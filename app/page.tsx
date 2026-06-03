@@ -11,11 +11,18 @@ const projectConditions = [
   "Free-Stand",
 ];
 
-const finishOptions = ["Stucco", "EIFS", "Masonry", "Glazing", "Paint"];
+const finishOptions = ["Plaster", "EIFS", "CMU", "Metal Panel", "Siding", "Special", "Thin Brick", "Shotcrete", "Paint"];
 const scaffoldWidths = ["3'", "3'6\"", "5'"];
-const workflowSteps = ["Upload PDF", "Scale", "Overlay", "Frame Configuration", "Set Scaffold"];
 const draftSteps = ["Draft", "Select Section", "Draft Section"];
 const productionOptions = ["Competitive", "Average", "Conservative"];
+
+const backendDefaults = [
+  { label: "Frame Height", value: "6'4\"" },
+  { label: "Bay Length", value: "10'" },
+  { label: "Plank Type", value: "Wood" },
+  { label: "Deck Levels", value: "Every Jump" },
+  { label: "Coverage", value: "Above 12' Tall" },
+];
 
 type Point = {
   x: number;
@@ -186,13 +193,27 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [selectedConditions, setSelectedConditions] = useState<string[]>([]);
-  const [selectedFinishes, setSelectedFinishes] = useState<string[]>(["Stucco"]);
+  const [selectedFinishes, setSelectedFinishes] = useState<string[]>(["Plaster"]);
   const [activeStep, setActiveStep] = useState("Upload PDF");
   const [scaffoldWidth, setScaffoldWidth] = useState("3'");
   const [production, setProduction] = useState("Average");
   const [showFrameConfiguration, setShowFrameConfiguration] = useState(false);
   const [topWallHeight, setTopWallHeight] = useState("28-7");
   const [topDeckOffset, setTopDeckOffset] = useState("6");
+
+  const [companyName, setCompanyName] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [projectAddress, setProjectAddress] = useState("");
+  const [estimatorName, setEstimatorName] = useState("");
+
+  const [frameRent, setFrameRent] = useState("4.00");
+  const [plankRent, setPlankRent] = useState("2.00");
+  const [miscRent, setMiscRent] = useState("1.00");
+  const [durationType, setDurationType] = useState("Monthly");
+  const [durationQuantity, setDurationQuantity] = useState("1");
+
+  const additionalItemsCost = 0;
+  const breakoutAreasCost = 0;
 
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pdfFileName, setPdfFileName] = useState("");
@@ -245,6 +266,201 @@ export default function Home() {
     if (tracedLinearFeet <= 0) return 0;
     return Math.ceil(tracedLinearFeet / 10);
   }, [tracedLinearFeet]);
+
+  const legCount = useMemo(() => {
+    if (tracedLinearFeet <= 0) return 0;
+    if (tracedLinearFeet <= 10) return 2;
+    return bayCount + 1;
+  }, [tracedLinearFeet, bayCount]);
+
+  const framesPerLeg = useMemo(() => {
+    if (!frameResult) return 0;
+    return frameResult.frames64 + frameResult.frames5 + frameResult.frames3;
+  }, [frameResult]);
+
+  const totalFrameCount = useMemo(() => {
+    return framesPerLeg * legCount;
+  }, [framesPerLeg, legCount]);
+
+  const planksPerBay = useMemo(() => {
+    if (scaffoldWidth === "3'6\"") return 4;
+    if (scaffoldWidth === "5'") return 6;
+    return 3;
+  }, [scaffoldWidth]);
+
+  const totalPlankCount = useMemo(() => {
+    if (!bayCount || !framesPerLeg) return 0;
+    return bayCount * planksPerBay * framesPerLeg;
+  }, [bayCount, planksPerBay, framesPerLeg]);
+
+  const totalMiscCount = useMemo(() => {
+    if (!legCount && !bayCount) return 0;
+    return legCount * 2 + bayCount * 2;
+  }, [legCount, bayCount]);
+
+  const materialOptions = useMemo(() => {
+    return [
+      { label: "Brackets", active: selectedConditions.includes("Setbacks / Pop-Outs") },
+      { label: "Beams", active: selectedConditions.includes("Free-Stand") },
+      { label: "Joists", active: selectedConditions.includes("Free-Stand") },
+      { label: "Shore Posts", active: selectedConditions.includes("Bad Access Areas") },
+    ];
+  }, [selectedConditions]);
+
+  const productionRate = useMemo(() => {
+    if (production === "Competitive") return 60;
+    if (production === "Conservative") return 40;
+    return 50;
+  }, [production]);
+
+  const stockHours = useMemo(() => {
+    if (!totalFrameCount) return 0;
+    return totalFrameCount / 80;
+  }, [totalFrameCount]);
+
+  const installHours = useMemo(() => {
+    if (!totalFrameCount) return 0;
+    return totalFrameCount / productionRate;
+  }, [totalFrameCount, productionRate]);
+
+  const dismantleHours = useMemo(() => {
+    if (!installHours) return 0;
+    if (production === "Competitive") return installHours * 0.6;
+    if (production === "Conservative") return installHours * 0.7;
+    return installHours * 0.65;
+  }, [installHours, production]);
+
+  const travelHours = 0;
+
+  const materialRentalTotal = useMemo(() => {
+    const durationMultiplier = Number(durationQuantity) || 0;
+    const frameRate = Number(frameRent) || 0;
+    const plankRate = Number(plankRent) || 0;
+    const miscRate = Number(miscRent) || 0;
+
+    return (
+      totalFrameCount * frameRate +
+      totalPlankCount * plankRate +
+      totalMiscCount * miscRate
+    ) * durationMultiplier;
+  }, [durationQuantity, frameRent, plankRent, miscRent, totalFrameCount, totalPlankCount, totalMiscCount]);
+
+  const currentTotalCost = useMemo(() => {
+    return materialRentalTotal + additionalItemsCost + breakoutAreasCost;
+  }, [materialRentalTotal, additionalItemsCost, breakoutAreasCost]);
+
+  const crewSize = useMemo(() => {
+    if (!framesPerLeg) return 0;
+    return Math.max(1, Math.ceil(framesPerLeg / 2));
+  }, [framesPerLeg]);
+
+  const totalInstallDays = useMemo(() => {
+    if (!installHours || !crewSize) return 0;
+    return Math.max(1, Math.ceil(installHours / (crewSize * 8)));
+  }, [installHours, crewSize]);
+
+  const crewPlan = useMemo(() => {
+    if (!totalInstallDays || !crewSize) return [];
+    return Array.from({ length: totalInstallDays }, (_, index) => ({
+      day: index + 1,
+      crew: crewSize,
+    }));
+  }, [totalInstallDays, crewSize]);
+
+
+  const framePartNumbers = useMemo(() => {
+    if (scaffoldWidth === "3'6\"") {
+      return { frame64: "FO6L42", frame5: "FO5L42", frame3: "FM342" };
+    }
+
+    if (scaffoldWidth === "5'") {
+      return { frame64: "FO6L", frame5: "FM5", frame3: "FM3" };
+    }
+
+    return { frame64: "FO6L3", frame5: "FO5L3", frame3: "FM33" };
+  }, [scaffoldWidth]);
+
+  const guardRailCount = useMemo(() => {
+    if (!bayCount || !framesPerLeg) return 0;
+    const topDeckRails = bayCount * 4;
+    const lowerDeckRails = Math.max(0, framesPerLeg - 1) * bayCount * 2;
+    return topDeckRails + lowerDeckRails;
+  }, [bayCount, framesPerLeg]);
+
+  const materialLoadList = useMemo(() => {
+    const rows = [
+      {
+        partNo: framePartNumbers.frame64,
+        category: "Frames",
+        description: `6' 4\" H - ${scaffoldWidth} W Frame`,
+        qty: frameResult ? frameResult.frames64 * legCount : 0,
+      },
+      {
+        partNo: framePartNumbers.frame5,
+        category: "Frames",
+        description: `5' H - ${scaffoldWidth} W Frame`,
+        qty: frameResult ? frameResult.frames5 * legCount : 0,
+      },
+      {
+        partNo: framePartNumbers.frame3,
+        category: "Frames",
+        description: `3' H - ${scaffoldWidth} W Frame`,
+        qty: frameResult ? frameResult.frames3 * legCount : 0,
+      },
+      {
+        partNo: "B104",
+        category: "Bracing",
+        description: "10X4 Cross Brace",
+        qty: bayCount * 2,
+      },
+      {
+        partNo: "GR10",
+        category: "Safety",
+        description: "10' Guard Rail",
+        qty: guardRailCount,
+      },
+      {
+        partNo: "WP10",
+        category: "Decking",
+        description: "10' Wood Plank",
+        qty: totalPlankCount,
+      },
+      {
+        partNo: "AL1S",
+        category: "Base",
+        description: "Screw Jack W/Base Plate",
+        qty: legCount * 2,
+      },
+      {
+        partNo: "BP1",
+        category: "Base",
+        description: "Fixed Base Plate",
+        qty: legCount * 2,
+      },
+    ];
+
+    return rows.filter((row) => row.qty > 0);
+  }, [bayCount, framePartNumbers, frameResult, guardRailCount, legCount, scaffoldWidth, totalPlankCount]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    window.localStorage.setItem(
+      "korbanInventoryLoadList",
+      JSON.stringify({
+        projectName,
+        projectAddress,
+        companyName,
+        scaffoldWidth,
+        linealFeet: tracedLinearFeet,
+        bayCount,
+        legCount,
+        framesPerLeg,
+        generatedAt: new Date().toISOString(),
+        rows: materialLoadList,
+      })
+    );
+  }, [bayCount, companyName, framesPerLeg, legCount, materialLoadList, projectAddress, projectName, scaffoldWidth, tracedLinearFeet]);
 
   function toggleCondition(condition: string) {
     setSelectedConditions((current) =>
@@ -395,13 +611,6 @@ export default function Home() {
     setOverlayMode(true);
   }
 
-  function clearScale() {
-    setScalePoints([]);
-    setKnownScaleFeet("");
-    setPixelsPerFoot(null);
-    setScaleMode(false);
-  }
-
   function undoTracePoint() {
     setTracePoints((current) => current.slice(0, -1));
     setTraceClosed(false);
@@ -435,6 +644,12 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3">
+          <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 px-5 py-2 shadow-[0_0_30px_rgba(249,115,22,0.12)]">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300">Current Total Cost</p>
+            <p className="font-mono text-lg font-bold text-orange-500">${currentTotalCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+            <p className="text-[10px] text-zinc-500">including all add scopes</p>
+          </div>
+
           <button className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:border-orange-500/40 hover:bg-orange-500/10">
             Save Draft
           </button>
@@ -446,7 +661,9 @@ export default function Home() {
 
       <div
         className={`grid h-[calc(100vh-64px)] ${
-          draftMode ? "grid-cols-[300px_minmax(0,1fr)_220px_340px]" : "grid-cols-[300px_minmax(0,1fr)_340px]"
+          draftMode
+            ? "grid-cols-[300px_minmax(0,1fr)_220px_360px_220px]"
+            : "grid-cols-[300px_minmax(0,1fr)_360px_220px]"
         }`}
       >
         <aside className="overflow-y-auto border-r border-orange-500/20 bg-[#090909] p-4">
@@ -457,14 +674,26 @@ export default function Home() {
 
             <div className="mt-4 space-y-3">
               <input
+                value={companyName}
+                onChange={(event) => setCompanyName(event.target.value)}
+                placeholder="Company"
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
+              />
+              <input
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
                 placeholder="Project Name"
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
               />
               <input
+                value={projectAddress}
+                onChange={(event) => setProjectAddress(event.target.value)}
                 placeholder="Address / Location"
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
               />
               <input
+                value={estimatorName}
+                onChange={(event) => setEstimatorName(event.target.value)}
                 placeholder="Estimator"
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
               />
@@ -503,14 +732,29 @@ export default function Home() {
                 </select>
               </div>
             </div>
+
+            <div className="mt-4 rounded-xl border border-zinc-900 bg-zinc-950/40 p-3">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-700">
+                Backend Defaults
+              </p>
+
+              <div className="mt-3 space-y-2">
+                {backendDefaults.map((item) => (
+                  <div key={item.label} className="flex items-center justify-between gap-3 text-[11px]">
+                    <span className="text-zinc-700">{item.label}</span>
+                    <span className="font-mono text-zinc-500">{item.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </section>
 
-          <section className="rounded-2xl border border-zinc-800 bg-black p-4">
+          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
             <h2 className="text-xs uppercase tracking-[0.25em] text-zinc-500">
               Exterior Finish
             </h2>
 
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className="mt-4 grid grid-cols-3 gap-1.5">
               {finishOptions.map((finish) => {
                 const selected = selectedFinishes.includes(finish);
 
@@ -518,7 +762,7 @@ export default function Home() {
                   <button
                     key={finish}
                     onClick={() => toggleFinish(finish)}
-                    className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                    className={`rounded-lg border px-2 py-1.5 text-[10px] leading-tight transition ${
                       selected
                         ? "border-orange-500 bg-orange-500 text-black"
                         : "border-zinc-700 text-zinc-400 hover:border-orange-500/50"
@@ -529,6 +773,17 @@ export default function Home() {
                 );
               })}
             </div>
+          </section>
+
+          <section className="rounded-2xl border border-zinc-900 bg-black/60 p-3">
+            {['Backend Input', 'Options', 'Help / Support'].map((item) => (
+              <button
+                key={item}
+                className="mb-2 w-full rounded-xl border border-zinc-900 bg-zinc-950/60 px-3 py-2.5 text-left text-xs text-zinc-500 transition hover:border-orange-500/30 hover:text-zinc-300 last:mb-0"
+              >
+                {item}
+              </button>
+            ))}
           </section>
         </aside>
 
@@ -550,13 +805,7 @@ export default function Home() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <label
-                className={`cursor-pointer rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${
-                  activeStep === "Upload PDF"
-                    ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                    : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"
-                }`}
-              >
+              <label className="cursor-pointer rounded-xl border border-orange-500 bg-orange-500 px-4 py-2.5 text-xs font-semibold text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]">
                 Upload PDF
                 <input
                   type="file"
@@ -601,11 +850,7 @@ export default function Home() {
 
               <button
                 onClick={() => activateStep("Set Scaffold")}
-                className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${
-                  activeStep === "Set Scaffold"
-                    ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                    : "border-orange-500/30 bg-black text-orange-300 hover:border-orange-500"
-                }`}
+                className="rounded-xl border border-orange-500/30 bg-black px-4 py-2.5 text-xs font-semibold text-orange-300 hover:border-orange-500"
               >
                 Set Scaffold
               </button>
@@ -633,19 +878,20 @@ export default function Home() {
               {pdfFileName || "No PDF Loaded"}
             </div>
 
-            {pdfLoading && (
-              <p className="relative z-10 text-sm text-zinc-500">Loading PDF...</p>
-            )}
-
-            {pdfError && (
-              <p className="relative z-10 text-sm text-red-400">{pdfError}</p>
-            )}
+            {pdfLoading && <p className="relative z-10 text-sm text-zinc-500">Loading PDF...</p>}
+            {pdfError && <p className="relative z-10 text-sm text-red-400">{pdfError}</p>}
 
             {!pdfDoc && !pdfLoading && !pdfError && (
               <div className="relative z-10 text-center">
-                <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-3xl text-orange-500">
+                <label className="mx-auto mb-5 flex h-20 w-20 cursor-pointer items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-3xl text-orange-500 transition hover:border-orange-500/60 hover:bg-orange-500/15">
                   +
-                </div>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={handlePdfUpload}
+                    className="hidden"
+                  />
+                </label>
                 <h2 className="text-2xl font-semibold">Design Workspace</h2>
                 <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">
                   Upload plans, set scale, create overlays, establish elevations,
@@ -827,6 +1073,7 @@ export default function Home() {
                   <span>Pixel LF: {tracePixelLength.toFixed(1)}</span>
                   <span>LF: {tracedLinearFeet.toFixed(1)}</span>
                   <span>Bays: {bayCount}</span>
+                  <span>Legs: {legCount}</span>
                 </div>
               </div>
             </div>
@@ -869,7 +1116,7 @@ export default function Home() {
                     Frame Configuration
                   </h2>
                   <p className="mt-1 text-xs text-zinc-500">
-                    Compact frame stack calculator for the selected scaffold set.
+                    Quick scaffold leg breakdown with inventory parts used for later material and labor calculations.
                   </p>
                 </div>
 
@@ -881,20 +1128,20 @@ export default function Home() {
                 </button>
               </div>
 
-              <div className="mt-4 grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
+              <div className="mt-4 grid gap-3 xl:grid-cols-[220px_minmax(0,1fr)]">
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
                   <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
                     Inputs
                   </h3>
 
-                  <div className="mt-3 space-y-3">
+                  <div className="mt-2 space-y-2">
                     <div>
                       <label className="text-xs text-zinc-500">Top of Wall Height</label>
                       <input
                         value={topWallHeight}
                         onChange={(event) => setTopWallHeight(event.target.value)}
                         placeholder={`28-7 or 28'7"`}
-                        className="mt-1.5 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
+                        className="mt-1 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
                       />
                     </div>
 
@@ -904,102 +1151,59 @@ export default function Home() {
                         value={topDeckOffset}
                         onChange={(event) => setTopDeckOffset(event.target.value)}
                         placeholder="6"
-                        className="mt-1.5 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
+                        className="mt-1 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
                       />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                          Width
-                        </p>
-                        <p className="mt-1 font-mono text-sm font-semibold text-orange-500">
-                          {scaffoldWidth}
-                        </p>
-                      </div>
-
-                      <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                          Pace
-                        </p>
-                        <p className="mt-1 font-mono text-sm font-semibold text-orange-500">
-                          {production}
-                        </p>
-                      </div>
                     </div>
                   </div>
                 </div>
 
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                    Stack Output
-                  </h3>
+                  <div className="rounded-xl border border-zinc-900 bg-black/60 p-3">
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                      Scaffold Leg Breakdown
+                    </h3>
+                  </div>
 
                   {frameResult ? (
-                    <>
-                      <div className="mt-3 grid gap-3 md:grid-cols-4">
-                        <CompactMetric
-                          label="Required Height"
-                          value={formatFeetInches(frameResult.requiredScaffoldHeightFeet)}
-                        />
-                        <CompactMetric
-                          label={`6'4" Frames`}
-                          value={String(frameResult.frames64)}
-                        />
-                        <CompactMetric
-                          label={`5' / 3' Frames`}
-                          value={`${frameResult.frames5} / ${frameResult.frames3}`}
-                        />
-                        <CompactMetric
-                          label="Jack Extension"
-                          value={`${frameResult.jackExtensionInches.toFixed(1)}"`}
-                        />
-                      </div>
-
-                      <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-800">
-                        <table className="w-full text-left text-xs">
-                          <thead className="bg-black text-zinc-500">
-                            <tr>
-                              <th className="px-3 py-2 font-medium">Material</th>
-                              <th className="px-3 py-2 font-medium">Description</th>
-                              <th className="px-3 py-2 text-right font-medium">Qty / Leg</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-zinc-900 bg-zinc-950/70">
-                            <MaterialRowSmall
-                              code="F-64"
-                              description={`6'4" Frame`}
-                              qty={frameResult.frames64}
-                            />
-                            <MaterialRowSmall
-                              code="F-5"
-                              description="5' Frame"
-                              qty={frameResult.frames5}
-                            />
-                            <MaterialRowSmall
-                              code="F-3"
-                              description="3' Frame"
-                              qty={frameResult.frames3}
-                            />
-                            <MaterialRowSmall
-                              code="SJ"
-                              description="Screw Jack Extension"
-                              qty={Number(frameResult.jackExtensionInches.toFixed(1))}
-                            />
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <p className="mt-3 text-xs leading-5 text-zinc-500">
-                        Stack target uses top of wall minus deck offset. This keeps the top working deck
-                        below wall height while using 6&apos;4&quot;, 5&apos;, 3&apos; frames and screw jack adjustment.
-                      </p>
-                    </>
+                    <div className="mt-3 grid gap-3 md:grid-cols-4">
+                      <CompactMetric
+                        label="Required Height"
+                        value={formatFeetInches(frameResult.requiredScaffoldHeightFeet)}
+                      />
+                      <CompactMetric label={`6'4" Frames`} value={String(frameResult.frames64)} />
+                      <CompactMetric label={`5' / 3' Frames`} value={`${frameResult.frames5} / ${frameResult.frames3}`} />
+                      <CompactMetric label="Jack" value={`${frameResult.jackExtensionInches.toFixed(1)}"`} />
+                    </div>
                   ) : (
                     <div className="mt-3 rounded-xl border border-zinc-800 bg-black p-4 text-xs text-zinc-500">
                       Enter valid wall height and deck offset to calculate frame configuration.
                     </div>
                   )}
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3 xl:col-span-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                    Inventory Parts Used
+                  </h3>
+
+                  <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-800">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-black text-zinc-500">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">Part No.</th>
+                          <th className="px-3 py-2 font-medium">Description</th>
+                          <th className="px-3 py-2 text-right font-medium">Qty / Leg</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-900 bg-zinc-950/70">
+                        <MaterialRowSmall code="F64" description={`6'4" Frame`} qty={frameResult ? frameResult.frames64 : 0} />
+                        <MaterialRowSmall code="F05" description="5' Frame" qty={frameResult ? frameResult.frames5 : 0} />
+                        <MaterialRowSmall code="F03" description="3' Frame" qty={frameResult ? frameResult.frames3 : 0} />
+                        <MaterialRowSmall code="SJ16" description={frameResult ? `Screw Jack (${frameResult.jackExtensionInches.toFixed(1)}" extension)` : "Screw Jack"} qty={frameResult ? 1 : 0} />
+                        <MaterialRowSmall code="BP" description="Base Plate" qty={frameResult ? 1 : 0} />
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1024,62 +1228,213 @@ export default function Home() {
         )}
 
         <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#090909] p-4">
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
+          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4 min-h-[30%]">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold">Estimate & Proposal</h2>
-                <p className="mt-1 text-xs text-zinc-500">Live estimate builder</p>
               </div>
               <p className="text-right text-[10px] leading-4 text-zinc-600">
                 {dateTimeStamp}
               </p>
             </div>
-          </section>
 
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
-            <h3 className="mb-3 text-xs uppercase tracking-[0.22em] text-orange-400">
-              Project Scope
-            </h3>
-            <div className="space-y-2 text-xs text-zinc-400">
-              <p>Lineal Footage: {tracedLinearFeet.toFixed(1)} LF</p>
-              <p>Bay Count: {bayCount}</p>
-              <p>Average Wall Height: {frameResult ? formatFeetInches(frameResult.wallHeightFeet) : "0'"}</p>
-              <p>Scaffold Width: {scaffoldWidth}</p>
-              <p>
-                Exterior Finish:{" "}
-                {selectedFinishes.length > 0 ? selectedFinishes.join(", ") : "Not Selected"}
+            <div className="mt-4 space-y-2">
+              <OutputRow label="Company" value={companyName || "Not entered"} />
+              <OutputRow label="Project" value={projectName || "Not entered"} />
+              <OutputRow label="Address" value={projectAddress || "Not entered"} />
+              <OutputRow
+                label="Exterior Finish"
+                value={selectedFinishes.length > 0 ? selectedFinishes.join(", ") : "Not selected"}
+              />
+              <OutputRow label="Elevations Covered" value="Pending" />
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-zinc-900 bg-zinc-950/40 p-3">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-700">
+                Proposal Description
               </p>
-              <p>Elevations Included: Pending</p>
+              <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+                Provide installation and dismantle of scaffold for{" "}
+                <span className="rounded-md border border-orange-500/20 bg-orange-500/10 px-1.5 py-0.5 font-mono text-orange-300">
+                  {selectedFinishes.length > 0 ? selectedFinishes.join(", ") : "selected"}
+                </span>{" "}
+                finishes per project plans/site visit. Figured{" "}
+                <span className="rounded-md border border-orange-500/20 bg-orange-500/10 px-1.5 py-0.5 font-mono text-orange-300">
+                  {scaffoldWidth}
+                </span>{" "}
+                wide scaffold, with{" "}
+                <span className="rounded-md border border-orange-500/20 bg-orange-500/10 px-1.5 py-0.5 font-mono text-orange-300">
+                  10&apos;
+                </span>{" "}
+                long bays to access walls{" "}
+                <span className="rounded-md border border-orange-500/20 bg-orange-500/10 px-1.5 py-0.5 font-mono text-orange-300">
+                  above 12&apos; tall
+                </span>.
+              </p>
+              <button className="mt-3 rounded-lg border border-zinc-800 px-3 py-1.5 text-[10px] text-zinc-500 transition hover:border-orange-500/40 hover:text-orange-300">
+                Edit / Add
+              </button>
             </div>
           </section>
 
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
+          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4 min-h-[50%]">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs uppercase tracking-[0.22em] text-orange-400">
+                Scaffold Breakdown
+              </h3>
+            </div>
+
+            <div className="mt-4 border-b border-zinc-900 pb-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                    Material
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <RentInput label="Frame" value={frameRent} onChange={setFrameRent} />
+                  <RentInput label="Plank" value={plankRent} onChange={setPlankRent} />
+                  <RentInput label="Misc" value={miscRent} onChange={setMiscRent} />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <OutputRow label="Total Frames" value={String(totalFrameCount)} />
+                <OutputRow label="Total Planks" value={String(totalPlankCount)} />
+                <OutputRow label="Total Misc." value={String(totalMiscCount)} />
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {materialOptions.map((item) => (
+                  <MaterialOption key={item.label} label={item.label} active={item.active} />
+                ))}
+              </div>
+
+              <div className="mt-4 grid grid-cols-[1fr_90px] gap-2">
+                <div>
+                  <label className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
+                    Duration
+                  </label>
+                  <select
+                    value={durationType}
+                    onChange={(event) => setDurationType(event.target.value)}
+                    className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
+                  >
+                    <option>Daily</option>
+                    <option>Weekly</option>
+                    <option>Monthly</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
+                    Qty
+                  </label>
+                  <input
+                    value={durationQuantity}
+                    onChange={(event) => setDurationQuantity(event.target.value)}
+                    className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 border-b border-zinc-900 pb-4">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                Alternate Scopes
+              </p>
+              <div className="space-y-2">
+                <OutputRow label="Add Items" value={`$${additionalItemsCost.toLocaleString()}`} />
+                <OutputRow label="Breakout-Areas" value={`$${breakoutAreasCost.toLocaleString()}`} />
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                Labor
+              </p>
+
+              <div className="space-y-2">
+                <OutputRow label="Total Stock Hours" value={stockHours.toFixed(1)} />
+                <OutputRow label="Total Install Hours" value={installHours.toFixed(1)} />
+                <OutputRow label="Total Dismantle Hours" value={dismantleHours.toFixed(1)} />
+                <OutputRow label="Total Travel Hours" value={travelHours.toFixed(1)} />
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-black p-4 min-h-[20%]">
             <h3 className="mb-3 text-xs uppercase tracking-[0.22em] text-orange-400">
-              Frame Stack
+              Project Management
             </h3>
 
-            <div className="space-y-2 text-xs text-zinc-400">
-              <p>Required Height: {frameResult ? formatFeetInches(frameResult.requiredScaffoldHeightFeet) : "Not Set"}</p>
-              <p>6&apos;4&quot; Frames: {frameResult ? frameResult.frames64 : 0}</p>
-              <p>5&apos; Frames: {frameResult ? frameResult.frames5 : 0}</p>
-              <p>3&apos; Frames: {frameResult ? frameResult.frames3 : 0}</p>
-              <p>Jack Extension: {frameResult ? `${frameResult.jackExtensionInches.toFixed(1)}"` : `0"`}</p>
+            <div className="space-y-2">
+              <OutputRow label="Bay Count" value={String(bayCount)} />
+              <OutputRow label="Frame Leg Count" value={String(legCount)} />
+              <OutputRow label="Lineal Footage" value={`${tracedLinearFeet.toFixed(1)} LF`} />
+              <OutputRow label="Frames Per Elevation" value={String(totalFrameCount)} />
+              <OutputRow label="Frames Per Leg" value={String(framesPerLeg)} />
+              <a
+                href="/inventory-load-list"
+                className="block w-full rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-center text-[11px] font-semibold text-orange-300 transition hover:border-orange-500 hover:bg-orange-500/20"
+              >
+                View Material List
+              </a>
+            </div>
+
+            <div className="mt-4 border-t border-zinc-900 pt-4">
+              <OutputRow label="Total Days" value={String(totalInstallDays)} />
+              <div className="mt-3 space-y-1.5">
+                {crewPlan.length === 0 ? (
+                  <p className="text-[11px] text-zinc-600">Crew plan pending install hours.</p>
+                ) : (
+                  crewPlan.map((item) => (
+                    <OutputRow
+                      key={item.day}
+                      label={`Day ${item.day}`}
+                      value={`${item.crew} person crew`}
+                    />
+                  ))
+                )}
+              </div>
             </div>
           </section>
+        </aside>
+        <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#120b05] p-3">
+          <section className="rounded-2xl border border-orange-500/20 bg-black/70 p-3">
+            <h2 className="text-xs uppercase tracking-[0.22em] text-orange-300">
+              Recommendations
+            </h2>
 
-          <MetricCard label="Estimated LF" value={tracedLinearFeet.toFixed(1)} />
-          <MetricCard label="Bay Count" value={String(bayCount)} />
-          <MetricCard label="Frames / Leg" value={frameResult ? String(frameResult.frames64 + frameResult.frames5 + frameResult.frames3) : "0"} />
-          <MetricCard label="Labor Hours" value="0" />
-
-          <section className="mt-4 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-orange-300">Estimate Total</p>
-            <h3 className="mt-3 font-mono text-3xl font-bold text-orange-500">$0</h3>
+            <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+              Concerns will appear as scale, overlay, height, access, and special conditions are reviewed.
+            </p>
           </section>
 
-          <section className="mt-4 rounded-2xl border border-orange-500/20 bg-black/70 p-3 shadow-[0_0_25px_rgba(249,115,22,0.08)]">
-            <h3 className="mb-2 text-xs font-semibold text-zinc-300">Alerts</h3>
-            <p className="text-xs text-zinc-500">No alerts detected.</p>
+          <section className="mt-3 rounded-2xl border border-orange-500/20 bg-black/70 p-3">
+            <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-orange-400">
+              Concerns / Alerts
+            </h3>
+
+            <div className="mt-3 space-y-2">
+              {!pdfDoc && <AlertItem status="waiting" text="No PDF plan uploaded." />}
+              {pdfDoc && !pixelsPerFoot && <AlertItem status="warning" text="Scale not calibrated." />}
+              {pixelsPerFoot && tracedLinearFeet === 0 && <AlertItem status="waiting" text="Overlay not traced." />}
+              {tracedLinearFeet > 0 && !traceClosed && <AlertItem status="warning" text="Overlay not closed." />}
+              {traceClosed && <AlertItem status="good" text="Overlay closed." />}
+              {bayCount > 0 && <AlertItem status="good" text={`Bays: ${bayCount}`} />}
+              {legCount > 0 && <AlertItem status="good" text={`Legs: ${legCount}`} />}
+              {selectedConditions.includes("Setbacks / Pop-Outs") && (
+                <AlertItem status="warning" text="Setback / pop-out review needed." />
+              )}
+              {selectedConditions.includes("Bad Access Areas") && (
+                <AlertItem status="warning" text="Access may affect production." />
+              )}
+              {frameResult && frameResult.jackExtensionInches > 14 && (
+                <AlertItem status="warning" text="High jack extension." />
+              )}
+            </div>
           </section>
         </aside>
       </div>
@@ -1110,11 +1465,70 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+function BayMetricCard({ bayCount, legCount }: { bayCount: number; legCount: number }) {
+  return (
+    <div className="mb-3 rounded-2xl border border-zinc-800 bg-black p-4">
+      <p className="text-xs uppercase tracking-[0.2em] text-zinc-600">Bay Count</p>
+      <h3 className="mt-3 font-mono text-3xl font-bold text-orange-500">{bayCount}</h3>
+      <p className="mt-2 border-t border-zinc-900 pt-2 text-xs text-zinc-500">
+        Frame Leg Count: <span className="font-mono text-orange-400">{legCount}</span>
+      </p>
+    </div>
+  );
+}
+
 function CompactMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-black p-3">
       <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
       <h3 className="mt-2 font-mono text-lg font-bold text-orange-500">{value}</h3>
+    </div>
+  );
+}
+
+function OutputRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3 text-[11px] leading-5">
+      <span className="text-zinc-600">{label}</span>
+      <span className="text-right font-mono text-zinc-400">{value}</span>
+    </div>
+  );
+}
+
+function RentInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-[9px] uppercase tracking-[0.14em] text-zinc-700">{label}</span>
+      <div className="mt-1 flex items-center rounded-lg border border-zinc-800 bg-zinc-950 focus-within:border-orange-500">
+        <span className="pl-2 font-mono text-[11px] text-zinc-600">$</span>
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full rounded-lg bg-transparent px-1.5 py-1.5 text-[11px] font-mono text-zinc-400 outline-none"
+        />
+      </div>
+    </label>
+  );
+}
+
+function MaterialOption({ label, active }: { label: string; active: boolean }) {
+  return (
+    <div
+      className={`rounded-xl border px-3 py-2 text-[11px] transition ${
+        active
+          ? "border-orange-500/50 bg-orange-500/10 font-mono text-orange-300"
+          : "border-zinc-900 bg-zinc-950/60 font-mono text-zinc-700"
+      }`}
+    >
+      {label}
     </div>
   );
 }
@@ -1134,5 +1548,26 @@ function MaterialRowSmall({
       <td className="px-3 py-2">{description}</td>
       <td className="px-3 py-2 text-right font-mono">{qty}</td>
     </tr>
+  );
+}
+
+function AlertItem({ status, text }: { status: "good" | "warning" | "waiting"; text: string }) {
+  const styles = {
+    good: "border-emerald-500/20 bg-emerald-500/5 text-emerald-300",
+    warning: "border-orange-500/45 bg-orange-500/10 text-orange-300 shadow-[0_0_18px_rgba(249,115,22,0.08)]",
+    waiting: "border-zinc-800 bg-zinc-950/80 text-zinc-500",
+  };
+
+  const dotStyles = {
+    good: "bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]",
+    warning: "bg-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.9)]",
+    waiting: "bg-zinc-600",
+  };
+
+  return (
+    <div className={`flex items-start gap-2 rounded-xl border p-2.5 text-[11px] leading-5 ${styles[status]}`}>
+      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${dotStyles[status]}`} />
+      <span>{text}</span>
+    </div>
   );
 }
