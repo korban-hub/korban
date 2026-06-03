@@ -29,6 +29,13 @@ type Point = {
   y: number;
 };
 
+type TurnBayMarker = {
+  id: number;
+  point: Point;
+  pointIndex: number | null;
+  scaffoldWidth: string;
+};
+
 type FrameResult = {
   wallHeightFeet: number;
   deckOffsetFeet: number;
@@ -231,6 +238,9 @@ export default function Home() {
   const [overlayMode, setOverlayMode] = useState(false);
   const [tracePoints, setTracePoints] = useState<Point[]>([]);
   const [traceClosed, setTraceClosed] = useState(false);
+  const [traceKeptOpen, setTraceKeptOpen] = useState(false);
+  const [turnBayMode, setTurnBayMode] = useState(false);
+  const [turnBayMarkers, setTurnBayMarkers] = useState<TurnBayMarker[]>([]);
 
   const draftMode = draftSteps.includes(activeStep);
 
@@ -272,6 +282,13 @@ export default function Home() {
     if (tracedLinearFeet <= 10) return 2;
     return bayCount + 1;
   }, [tracedLinearFeet, bayCount]);
+
+  const overlayStatus = useMemo(() => {
+    if (traceClosed) return "Closed";
+    if (traceKeptOpen) return "Open";
+    if (tracePoints.length > 0) return "In Progress";
+    return "Not Started";
+  }, [traceClosed, traceKeptOpen, tracePoints.length]);
 
   const framesPerLeg = useMemo(() => {
     if (!frameResult) return 0;
@@ -491,6 +508,8 @@ export default function Home() {
       setOverlayMode(true);
       setScaleMode(false);
       setTraceClosed(false);
+      setTraceKeptOpen(false);
+      setTurnBayMode(false);
     }
   }
 
@@ -517,6 +536,9 @@ export default function Home() {
     setPixelsPerFoot(null);
     setTracePoints([]);
     setTraceClosed(false);
+    setTraceKeptOpen(false);
+    setTurnBayMode(false);
+    setTurnBayMarkers([]);
 
     try {
       const pdfjsLib = await import("pdfjs-dist");
@@ -567,7 +589,7 @@ export default function Home() {
   function handleCanvasClick(event: React.MouseEvent<HTMLDivElement>) {
     const canvas = canvasRef.current;
 
-    if (!canvas || (!scaleMode && !overlayMode)) return;
+    if (!canvas || (!scaleMode && !overlayMode && !turnBayMode)) return;
 
     const rect = canvas.getBoundingClientRect();
 
@@ -585,9 +607,45 @@ export default function Home() {
         if (current.length >= 2) return [point];
         return [...current, point];
       });
+      return;
     }
 
-    if (overlayMode && !traceClosed) {
+    if (turnBayMode) {
+      if (tracePoints.length < 2) {
+        alert("Trace at least two overlay points before marking a turn bay.");
+        return;
+      }
+
+      let nearestIndex = 0;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+
+      tracePoints.forEach((tracePoint, index) => {
+        const distance = distanceBetween(point, tracePoint);
+
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+
+      const markerPoint = nearestDistance <= 28 ? tracePoints[nearestIndex] : point;
+
+      setTurnBayMarkers((current) => [
+        ...current,
+        {
+          id: Date.now(),
+          point: markerPoint,
+          pointIndex: nearestDistance <= 28 ? nearestIndex : null,
+          scaffoldWidth,
+        },
+      ]);
+
+      setTurnBayMode(false);
+      setOverlayMode(false);
+      return;
+    }
+
+    if (overlayMode && !traceClosed && !traceKeptOpen) {
       setTracePoints((current) => [...current, point]);
     }
   }
@@ -614,11 +672,38 @@ export default function Home() {
   function undoTracePoint() {
     setTracePoints((current) => current.slice(0, -1));
     setTraceClosed(false);
+    setTraceKeptOpen(false);
   }
 
   function clearTrace() {
     setTracePoints([]);
     setTraceClosed(false);
+    setTraceKeptOpen(false);
+    setTurnBayMode(false);
+    setTurnBayMarkers([]);
+  }
+
+  function keepOverlayOpen() {
+    if (tracePoints.length < 2) {
+      alert("Select at least 2 points before keeping overlay open.");
+      return;
+    }
+
+    setTraceKeptOpen(true);
+    setTraceClosed(false);
+    setOverlayMode(false);
+    setTurnBayMode(false);
+  }
+
+  function toggleTurnBayMode() {
+    if (tracePoints.length < 2) {
+      alert("Trace an overlay line before adding a turn bay.");
+      return;
+    }
+
+    setTurnBayMode((current) => !current);
+    setOverlayMode(false);
+    setScaleMode(false);
   }
 
   function closeTrace() {
@@ -628,7 +713,9 @@ export default function Home() {
     }
 
     setTraceClosed(true);
+    setTraceKeptOpen(false);
     setOverlayMode(false);
+    setTurnBayMode(false);
   }
 
   return (
@@ -940,13 +1027,14 @@ export default function Home() {
                   </button>
 
                   {scaleMode && <span className="text-orange-400">Scale: click 2 points</span>}
-                  {overlayMode && <span className="text-orange-400">Overlay: click perimeter points</span>}
+                  {overlayMode && <span className="text-orange-400">Overlay: click exterior wall points</span>}
+                  {turnBayMode && <span className="text-orange-400">Turn Bay: click corner point</span>}
                 </div>
 
                 <div
                   onClick={handleCanvasClick}
                   className={`relative rounded-2xl bg-white p-4 shadow-[0_0_60px_rgba(0,0,0,0.65)] ${
-                    scaleMode || overlayMode ? "cursor-crosshair" : ""
+                    scaleMode || overlayMode || turnBayMode ? "cursor-crosshair" : ""
                   }`}
                 >
                   <canvas ref={canvasRef} />
@@ -971,6 +1059,14 @@ export default function Home() {
 
                   {tracePoints.map((point, index) => (
                     <Marker key={`trace-${index}`} point={point} label={String(index + 1)} />
+                  ))}
+
+                  {turnBayMarkers.map((marker, index) => (
+                    <TurnBayMarkerIcon
+                      key={marker.id}
+                      point={marker.point}
+                      label={`T${index + 1}`}
+                    />
                   ))}
 
                   {tracePoints.length >= 2 && (
@@ -1054,10 +1150,28 @@ export default function Home() {
                   </button>
 
                   <button
+                    onClick={keepOverlayOpen}
+                    className="rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20"
+                  >
+                    Keep Open
+                  </button>
+
+                  <button
                     onClick={closeTrace}
                     className="rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-black hover:bg-orange-400"
                   >
                     Close Overlay
+                  </button>
+
+                  <button
+                    onClick={toggleTurnBayMode}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                      turnBayMode
+                        ? "border-orange-500 bg-orange-500 text-black"
+                        : "border-zinc-800 text-zinc-300 hover:border-orange-500/50"
+                    }`}
+                  >
+                    Turn Bay
                   </button>
 
                   <button
@@ -1069,7 +1183,9 @@ export default function Home() {
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-500">
+                  <span>Status: {overlayStatus}</span>
                   <span>Trace Points: {tracePoints.length}</span>
+                  <span>Turn Bays: {turnBayMarkers.length}</span>
                   <span>Pixel LF: {tracePixelLength.toFixed(1)}</span>
                   <span>LF: {tracedLinearFeet.toFixed(1)}</span>
                   <span>Bays: {bayCount}</span>
@@ -1421,8 +1537,10 @@ export default function Home() {
               {!pdfDoc && <AlertItem status="waiting" text="No PDF plan uploaded." />}
               {pdfDoc && !pixelsPerFoot && <AlertItem status="warning" text="Scale not calibrated." />}
               {pixelsPerFoot && tracedLinearFeet === 0 && <AlertItem status="waiting" text="Overlay not traced." />}
-              {tracedLinearFeet > 0 && !traceClosed && <AlertItem status="warning" text="Overlay not closed." />}
-              {traceClosed && <AlertItem status="good" text="Overlay closed." />}
+              {tracedLinearFeet > 0 && !traceClosed && !traceKeptOpen && <AlertItem status="warning" text="Overlay is still in progress." />}
+              {traceKeptOpen && <AlertItem status="good" text="Open overlay saved." />}
+              {traceClosed && <AlertItem status="good" text="Closed overlay saved." />}
+              {turnBayMarkers.length > 0 && <AlertItem status="warning" text={`${turnBayMarkers.length} turn bay condition${turnBayMarkers.length === 1 ? "" : "s"} marked for review.`} />}
               {bayCount > 0 && <AlertItem status="good" text={`Bays: ${bayCount}`} />}
               {legCount > 0 && <AlertItem status="good" text={`Legs: ${legCount}`} />}
               {selectedConditions.includes("Setbacks / Pop-Outs") && (
@@ -1452,6 +1570,20 @@ function Marker({ point, label }: { point: Point; label: string }) {
       }}
     >
       {label}
+    </div>
+  );
+}
+
+function TurnBayMarkerIcon({ point, label }: { point: Point; label: string }) {
+  return (
+    <div
+      className="absolute z-40 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 rotate-45 items-center justify-center rounded-md border border-orange-200 bg-black text-[10px] font-bold text-orange-300 shadow-[0_0_18px_rgba(249,115,22,0.55)]"
+      style={{
+        left: point.x + 16,
+        top: point.y + 16,
+      }}
+    >
+      <span className="-rotate-45">{label}</span>
     </div>
   );
 }
