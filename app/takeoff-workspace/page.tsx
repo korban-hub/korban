@@ -1,678 +1,931 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 type Point = { x: number; y: number };
+type Mode = "idle" | "scale" | "overlay";
+type BaseOverlay = "1st Floor" | "2nd Floor" | "3rd Floor" | "Other";
+type ElevationName = "North" | "South" | "East" | "West";
 
-type SavedOverlayLevel = {
+type HeightArea = {
   id: number;
-  name: string;
-  color: string;
-  colorLabel: string;
-  dashed: boolean;
-  points: Point[];
-  closed: boolean;
-  lockedOpen: boolean;
-  linealFeet: number;
-  bayCount: number;
-  legCount: number;
+  heightFt: number;
+  coveragePercent: number;
 };
 
-const levelSuggestions = ["Basement", "Ground", "Level", "Roof", "Penthouse"];
+type SavedElevation = {
+  id: number;
+  baseOverlay: BaseOverlay;
+  elevation: ElevationName;
+  start: Point;
+  end: Point;
+  linealFeet: number;
+  multipleHeights: boolean;
+  areas: HeightArea[];
+};
 
-const levelColors = [
-  { color: "#f97316", label: "Orange" },
-  { color: "#22c55e", label: "Green" },
-  { color: "#a855f7", label: "Purple" },
-  { color: "#06b6d4", label: "Cyan" },
-  { color: "#facc15", label: "Gold" },
-  { color: "#ef4444", label: "Red" },
-  { color: "#f472b6", label: "Pink" },
-  { color: "#38bdf8", label: "Blue" },
-];
+const baseOverlayOptions: BaseOverlay[] = ["1st Floor", "2nd Floor", "3rd Floor", "Other"];
+const elevationOptions: ElevationName[] = ["North", "South", "East", "West"];
 
-function isRoofLevel(name: string) {
-  return name.trim().toLowerCase().startsWith("roof");
-}
+const elevationColors: Record<ElevationName, string> = {
+  North: "#f97316",
+  South: "#22c55e",
+  East: "#38bdf8",
+  West: "#a855f7",
+};
 
-function getLevelVisual(name: string, savedCount: number) {
-  if (isRoofLevel(name)) {
-    return {
-      color: "#3f3f46",
-      label: "Roof",
-      dashed: true,
-    };
-  }
+export default function TakeoffWorkspacePage() {
+  const viewerRef = useRef<HTMLDivElement | null>(null);
 
-  const colorInfo = levelColors[savedCount % levelColors.length];
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfName, setPdfName] = useState("No PDF uploaded");
+  const [mode, setMode] = useState<Mode>("idle");
 
-  return {
-    color: colorInfo.color,
-    label: colorInfo.label,
-    dashed: false,
-  };
-}
+  const [baseOverlay, setBaseOverlay] = useState<BaseOverlay>("2nd Floor");
+  const [activeElevation, setActiveElevation] = useState<ElevationName>("North");
+  const [selectedElevation, setSelectedElevation] = useState<ElevationName>("North");
 
-function distanceBetween(a: Point, b: Point) {
-  return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
-}
-
-function polylineLength(points: Point[], closed: boolean) {
-  if (points.length < 2) return 0;
-
-  let total = 0;
-  for (let index = 1; index < points.length; index += 1) {
-    total += distanceBetween(points[index - 1], points[index]);
-  }
-
-  if (closed && points.length > 2) {
-    total += distanceBetween(points[points.length - 1], points[0]);
-  }
-
-  return total;
-}
-
-function parseFeetInches(input: string): number | null {
-  const value = input.trim();
-  if (!value) return null;
-
-  const cleaned = value
-    .replace(/feet/gi, "")
-    .replace(/foot/gi, "")
-    .replace(/ft/gi, "")
-    .replace(/inches/gi, "")
-    .replace(/inch/gi, "")
-    .replace(/in/gi, "")
-    .replace(/"/g, "")
-    .trim();
-
-  if (cleaned.includes("-")) {
-    const [feetRaw, inchesRaw] = cleaned.split("-");
-    const feet = Number(feetRaw.trim());
-    const inches = Number((inchesRaw || "0").trim());
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
-
-  if (cleaned.includes("'")) {
-    const [feetRaw, inchesRaw] = cleaned.split("'");
-    const feet = Number(feetRaw.trim());
-    const inches = Number((inchesRaw || "0").trim());
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
-
-  const feet = Number(cleaned);
-  return Number.isNaN(feet) ? null : feet;
-}
-
-function formatFeetInches(decimalFeet: number) {
-  const safeFeet = Math.max(0, decimalFeet);
-  let feet = Math.floor(safeFeet);
-  let inches = Math.round((safeFeet - feet) * 12);
-
-  if (inches === 12) {
-    feet += 1;
-    inches = 0;
-  }
-
-  return `${feet}'-${inches}"`;
-}
-
-function buildLevelName(type: string, levels: SavedOverlayLevel[]) {
-  const existingCount = levels.filter((level) => level.name.toLowerCase().startsWith(type.toLowerCase())).length;
-  return `${type} ${existingCount + 1}`;
-}
-
-export default function TakeoffWorkspace() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  const [activeTool, setActiveTool] = useState("Upload PDF");
-  const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [pdfFileName, setPdfFileName] = useState("");
-  const [numPages, setNumPages] = useState(0);
-  const [pageNumber, setPageNumber] = useState(1);
-  const [pageJump, setPageJump] = useState("1");
-  const [zoom, setZoom] = useState(0.5);
-  const [pdfLoading, setPdfLoading] = useState(false);
-  const [pdfError, setPdfError] = useState("");
-
-  const [scaleMode, setScaleMode] = useState(false);
   const [scalePoints, setScalePoints] = useState<Point[]>([]);
-  const [knownScaleFeet, setKnownScaleFeet] = useState("");
-  const [pageUnitsPerFoot, setPageUnitsPerFoot] = useState<number | null>(null);
+  const [knownDistanceFt, setKnownDistanceFt] = useState(100);
 
-  const [overlayMode, setOverlayMode] = useState(false);
-  const [tracePoints, setTracePoints] = useState<Point[]>([]);
-  const [traceClosed, setTraceClosed] = useState(false);
-  const [overlayLockedOpen, setOverlayLockedOpen] = useState(false);
+  const [overlayPoints, setOverlayPoints] = useState<Point[]>([]);
+  const [savedElevations, setSavedElevations] = useState<SavedElevation[]>([]);
 
-  const [levelName, setLevelName] = useState("Ground Level");
-  const [savedLevels, setSavedLevels] = useState<SavedOverlayLevel[]>([]);
-  const [showCombinedOverlay, setShowCombinedOverlay] = useState(false);
-
-  const scalePageDistance = useMemo(() => {
+  const scalePixelDistance = useMemo(() => {
     if (scalePoints.length < 2) return 0;
-    return distanceBetween(scalePoints[0], scalePoints[1]);
+    return distance(scalePoints[0], scalePoints[1]);
   }, [scalePoints]);
 
-  const tracePageLength = useMemo(() => polylineLength(tracePoints, traceClosed), [tracePoints, traceClosed]);
+  const feetPerPixel = useMemo(() => {
+    if (!scalePixelDistance || !knownDistanceFt) return 0;
+    return knownDistanceFt / scalePixelDistance;
+  }, [knownDistanceFt, scalePixelDistance]);
 
-  const tracedLinealFeet = useMemo(() => {
-    if (!pageUnitsPerFoot || pageUnitsPerFoot <= 0) return 0;
-    return tracePageLength / pageUnitsPerFoot;
-  }, [tracePageLength, pageUnitsPerFoot]);
+  const activeLinealFeet = useMemo(() => {
+    if (!feetPerPixel || overlayPoints.length < 2) return 0;
+    return distance(overlayPoints[0], overlayPoints[1]) * feetPerPixel;
+  }, [feetPerPixel, overlayPoints]);
 
-  const bayCountEstimate = useMemo(() => {
-    if (tracedLinealFeet <= 0) return 0;
-    return Math.ceil(tracedLinealFeet / 10);
-  }, [tracedLinealFeet]);
+  const selectedSavedElevation = useMemo(() => {
+    return savedElevations.find((item) => item.elevation === selectedElevation) ?? null;
+  }, [savedElevations, selectedElevation]);
 
-  const legCountEstimate = useMemo(() => {
-    if (tracedLinealFeet <= 0) return 0;
-    return bayCountEstimate + 1;
-  }, [tracedLinealFeet, bayCountEstimate]);
+  const elevationTotals = useMemo(() => {
+    return elevationOptions.map((elevation) => {
+      const saved = savedElevations.find((item) => item.elevation === elevation);
 
-  const overlayStatus = useMemo(() => {
-    if (traceClosed) return "Closed";
-    if (overlayLockedOpen) return "Open";
-    if (tracePoints.length > 0) return "In Progress";
-    return "Not Started";
-  }, [traceClosed, overlayLockedOpen, tracePoints.length]);
+      return {
+        elevation,
+        linealFeet: saved?.linealFeet ?? 0,
+        saved: Boolean(saved),
+      };
+    });
+  }, [savedElevations]);
 
-  async function handlePdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  const completeExteriorLf = useMemo(() => {
+    return savedElevations.reduce((sum, item) => sum + item.linealFeet, 0);
+  }, [savedElevations]);
+
+  function handlePdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (file.type !== "application/pdf") {
-      alert("Please upload a PDF file.");
-      return;
-    }
-
-    setPdfLoading(true);
-    setPdfError("");
-    setPdfFileName(file.name);
-    setPageNumber(1);
-    setPageJump("1");
+    setPdfUrl(URL.createObjectURL(file));
+    setPdfName(file.name);
+    setMode("idle");
     setScalePoints([]);
-    setPageUnitsPerFoot(null);
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setSavedLevels([]);
-    setShowCombinedOverlay(false);
-    setLevelName("Ground Level");
-
-    try {
-      const pdfjsLib = await import("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
-
-      const arrayBuffer = await file.arrayBuffer();
-      const loadedPdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-      setPdfDoc(loadedPdf);
-      setNumPages(loadedPdf.numPages);
-      setActiveTool("Scale");
-      setScaleMode(true);
-      setOverlayMode(false);
-    } catch {
-      setPdfError("Could not load PDF. Try another plan sheet.");
-      setPdfDoc(null);
-    } finally {
-      setPdfLoading(false);
-    }
+    setOverlayPoints([]);
+    setSavedElevations([]);
+    setSelectedElevation("North");
+    setActiveElevation("North");
   }
 
-  useEffect(() => {
-    async function renderPdfPage() {
-      if (!pdfDoc || !canvasRef.current) return;
+  function handleViewerClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (!viewerRef.current || mode === "idle") return;
 
-      const page = await pdfDoc.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: zoom });
-      const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
-      if (!context) return;
+    const rect = viewerRef.current.getBoundingClientRect();
 
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+    const nextPoint: Point = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
 
-      context.clearRect(0, 0, canvas.width, canvas.height);
+    if (mode === "scale") {
+      setScalePoints((current) => {
+        if (current.length >= 2) return [nextPoint];
+        return [...current, nextPoint];
+      });
 
-      await page.render({ canvasContext: context, viewport }).promise;
-    }
-
-    renderPdfPage();
-  }, [pdfDoc, pageNumber, zoom]);
-
-  function activateTool(tool: string) {
-    setActiveTool(tool);
-    setScaleMode(tool === "Scale");
-    setOverlayMode(tool === "Overlay");
-  }
-
-  function getPagePointFromClick(event: React.MouseEvent<HTMLDivElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-
-    const rect = canvas.getBoundingClientRect();
-    const renderedX = event.clientX - rect.left;
-    const renderedY = event.clientY - rect.top;
-
-    if (renderedX < 0 || renderedY < 0 || renderedX > rect.width || renderedY > rect.height) return null;
-
-    return { x: renderedX / zoom, y: renderedY / zoom };
-  }
-
-  function handleWorkspaceClick(event: React.MouseEvent<HTMLDivElement>) {
-    if (!scaleMode && !overlayMode) return;
-
-    const point = getPagePointFromClick(event);
-    if (!point) return;
-
-    if (scaleMode) {
-      setScalePoints((current) => (current.length >= 2 ? [point] : [...current, point]));
-    }
-
-    if (overlayMode && !traceClosed && !overlayLockedOpen) {
-      setTracePoints((current) => [...current, point]);
-    }
-  }
-
-  function calibrateScale() {
-    const feet = parseFeetInches(knownScaleFeet);
-
-    if (scalePoints.length < 2) {
-      alert("Click two points on the plan first.");
       return;
     }
 
-    if (!feet || feet <= 0) {
-      alert(`Enter the known length in feet and inches, like 20'-6" or 20-6.`);
-      return;
+    if (mode === "overlay") {
+      setOverlayPoints((current) => {
+        if (current.length >= 2) return [nextPoint];
+        return [...current, nextPoint];
+      });
     }
-
-    setPageUnitsPerFoot(scalePageDistance / feet);
-    setScaleMode(false);
-    setActiveTool("Overlay");
-    setOverlayMode(true);
-  }
-
-  function goToPage() {
-    const target = Number(pageJump);
-
-    if (!target || target < 1 || target > numPages) {
-      alert(`Enter a page number between 1 and ${numPages}.`);
-      return;
-    }
-
-    setPageNumber(target);
-  }
-
-  function keepOpenOverlay() {
-    if (tracePoints.length < 2) {
-      alert("Select at least 2 points to keep an overlay open.");
-      return;
-    }
-
-    setOverlayLockedOpen(true);
-    setTraceClosed(false);
-    setOverlayMode(false);
-    setActiveTool("Overlay");
-  }
-
-  function closeOverlay() {
-    if (tracePoints.length < 3) {
-      alert("Select at least 3 points before closing overlay.");
-      return;
-    }
-
-    setTraceClosed(true);
-    setOverlayLockedOpen(false);
-    setOverlayMode(false);
-    setActiveTool("Overlay");
-  }
-
-  function undoTracePoint() {
-    setTracePoints((current) => current.slice(0, -1));
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-  }
-
-  function clearOverlay() {
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
   }
 
   function clearScale() {
     setScalePoints([]);
-    setKnownScaleFeet("");
-    setPageUnitsPerFoot(null);
   }
 
-  function saveCurrentLevel() {
-    if (tracePoints.length < 2) {
-      alert("Trace an overlay before saving a level.");
-      return;
-    }
+  function clearCurrentOverlay() {
+    setOverlayPoints([]);
+  }
 
-    if (!traceClosed && !overlayLockedOpen) {
-      alert("Choose Keep Open or Close Overlay before saving this level.");
-      return;
-    }
+  function saveElevation() {
+    if (overlayPoints.length < 2 || !feetPerPixel || activeLinealFeet <= 0) return;
 
-    const trimmedName = levelName.trim();
+    const existing = savedElevations.find((item) => item.elevation === activeElevation);
 
-    if (!trimmedName) {
-      alert("Enter a level name.");
-      return;
-    }
-
-    const visualInfo = getLevelVisual(trimmedName, savedLevels.length);
-
-    const savedLevel: SavedOverlayLevel = {
-      id: Date.now(),
-      name: trimmedName,
-      color: visualInfo.color,
-      colorLabel: visualInfo.label,
-      dashed: visualInfo.dashed,
-      points: [...tracePoints],
-      closed: traceClosed,
-      lockedOpen: overlayLockedOpen,
-      linealFeet: tracedLinealFeet,
-      bayCount: bayCountEstimate,
-      legCount: legCountEstimate,
+    const nextElevation: SavedElevation = {
+      id: existing?.id ?? Date.now(),
+      baseOverlay,
+      elevation: activeElevation,
+      start: overlayPoints[0],
+      end: overlayPoints[1],
+      linealFeet: activeLinealFeet,
+      multipleHeights: existing?.multipleHeights ?? false,
+      areas:
+        existing?.areas ??
+        [
+          {
+            id: Date.now() + 1,
+            heightFt: 32,
+            coveragePercent: 100,
+          },
+        ],
     };
 
-    setSavedLevels((current) => [...current, savedLevel]);
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setActiveTool("Overlay");
-    setOverlayMode(true);
-    setLevelName(buildLevelName("Level", [...savedLevels, savedLevel]));
+    setSavedElevations((current) => [
+      ...current.filter((item) => item.elevation !== activeElevation),
+      nextElevation,
+    ]);
+
+    setSelectedElevation(activeElevation);
+    setOverlayPoints([]);
+    setMode("idle");
   }
 
-  function removeSavedLevel(id: number) {
-    setSavedLevels((current) => current.filter((level) => level.id !== id));
+  function removeElevation(elevation: ElevationName) {
+    setSavedElevations((current) => current.filter((item) => item.elevation !== elevation));
   }
 
-  function drawOverlayPolyline(points: Point[], closed: boolean, color: string, keyPrefix: string, dashed = false) {
-    if (points.length < 2) return null;
-
-    return (
-      <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full">
-        {points.map((point, index) => {
-          if (index === 0) return null;
-
-          const previous = points[index - 1];
-
-          return (
-            <line
-              key={`${keyPrefix}-line-${index}`}
-              x1={previous.x * zoom + 16}
-              y1={previous.y * zoom + 16}
-              x2={point.x * zoom + 16}
-              y2={point.y * zoom + 16}
-              stroke={color}
-              strokeWidth="3"
-              strokeDasharray={dashed ? "10 8" : undefined}
-            />
-          );
-        })}
-
-        {closed && points.length > 2 && (
-          <line
-            x1={points[points.length - 1].x * zoom + 16}
-            y1={points[points.length - 1].y * zoom + 16}
-            x2={points[0].x * zoom + 16}
-            y2={points[0].y * zoom + 16}
-            stroke={color}
-            strokeWidth="3"
-            strokeDasharray={dashed ? "10 8" : undefined}
-          />
-        )}
-      </svg>
+  function updateElevation(elevationId: number, updater: (item: SavedElevation) => SavedElevation) {
+    setSavedElevations((current) =>
+      current.map((item) => (item.id === elevationId ? updater(item) : item))
     );
   }
 
+  function updateSingleHeight(elevationId: number, heightFt: number) {
+    updateElevation(elevationId, (item) => ({
+      ...item,
+      multipleHeights: false,
+      areas: [
+        {
+          id: item.areas[0]?.id ?? Date.now(),
+          heightFt: Math.max(0, heightFt),
+          coveragePercent: 100,
+        },
+      ],
+    }));
+  }
+
+  function enableMultipleHeights(elevationId: number) {
+    updateElevation(elevationId, (item) => {
+      const existingHeight = item.areas[0]?.heightFt ?? 32;
+
+      return {
+        ...item,
+        multipleHeights: true,
+        areas:
+          item.areas.length > 1
+            ? item.areas
+            : [
+                {
+                  id: Date.now() + 1,
+                  heightFt: existingHeight,
+                  coveragePercent: 70,
+                },
+                {
+                  id: Date.now() + 2,
+                  heightFt: Math.max(0, existingHeight - 10),
+                  coveragePercent: 30,
+                },
+              ],
+      };
+    });
+  }
+
+  function disableMultipleHeights(elevationId: number) {
+    updateElevation(elevationId, (item) => ({
+      ...item,
+      multipleHeights: false,
+      areas: [
+        {
+          id: item.areas[0]?.id ?? Date.now(),
+          heightFt: item.areas[0]?.heightFt ?? 32,
+          coveragePercent: 100,
+        },
+      ],
+    }));
+  }
+
+  function addArea(elevationId: number) {
+    updateElevation(elevationId, (item) => {
+      const areas = item.areas;
+      const lastArea = areas[areas.length - 1];
+
+      if (!lastArea || lastArea.coveragePercent <= 5) return item;
+
+      const newCoverage = Math.min(25, Math.max(5, Math.round(lastArea.coveragePercent / 2)));
+
+      return {
+        ...item,
+        multipleHeights: true,
+        areas: [
+          ...areas.slice(0, -1),
+          {
+            ...lastArea,
+            coveragePercent: lastArea.coveragePercent - newCoverage,
+          },
+          {
+            id: Date.now(),
+            heightFt: lastArea.heightFt,
+            coveragePercent: newCoverage,
+          },
+        ],
+      };
+    });
+  }
+
+  function removeArea(elevationId: number, areaId: number) {
+    updateElevation(elevationId, (item) => {
+      if (item.areas.length <= 1) return item;
+
+      const removed = item.areas.find((area) => area.id === areaId);
+      if (!removed) return item;
+
+      const remaining = item.areas.filter((area) => area.id !== areaId);
+
+      return {
+        ...item,
+        multipleHeights: remaining.length > 1,
+        areas: remaining.map((area, index) =>
+          index === remaining.length - 1
+            ? {
+                ...area,
+                coveragePercent: area.coveragePercent + removed.coveragePercent,
+              }
+            : area
+        ),
+      };
+    });
+  }
+
+  function updateAreaHeight(elevationId: number, areaId: number, heightFt: number) {
+    updateElevation(elevationId, (item) => ({
+      ...item,
+      areas: item.areas.map((area) =>
+        area.id === areaId ? { ...area, heightFt: Math.max(0, heightFt) } : area
+      ),
+    }));
+  }
+
+  function updateAreaCoverage(elevationId: number, areaId: number, nextPercent: number) {
+    updateElevation(elevationId, (item) => {
+      const targetIndex = item.areas.findIndex((area) => area.id === areaId);
+      if (targetIndex < 0 || targetIndex === item.areas.length - 1) return item;
+
+      const lockedBefore = item.areas
+        .slice(0, targetIndex)
+        .reduce((sum, area) => sum + area.coveragePercent, 0);
+
+      const middleAfter = item.areas
+        .slice(targetIndex + 1, -1)
+        .reduce((sum, area) => sum + area.coveragePercent, 0);
+
+      const safePercent = Math.max(1, Math.min(nextPercent, 100 - lockedBefore - middleAfter - 1));
+      const usedBeforeRight = lockedBefore + safePercent + middleAfter;
+
+      return {
+        ...item,
+        areas: item.areas.map((area, index) => {
+          if (index === targetIndex) {
+            return {
+              ...area,
+              coveragePercent: safePercent,
+            };
+          }
+
+          if (index === item.areas.length - 1) {
+            return {
+              ...area,
+              coveragePercent: Math.max(1, 100 - usedBeforeRight),
+            };
+          }
+
+          return area;
+        }),
+      };
+    });
+  }
+
+  function saveTakeoffConfiguration() {
+    const payload = {
+      baseOverlay,
+      completeExteriorLf: Math.round(completeExteriorLf),
+      elevations: savedElevations.map((item) => ({
+        elevation: item.elevation,
+        linealFeet: Math.round(item.linealFeet),
+        multipleHeights: item.multipleHeights,
+        areas: item.areas.map((area, index) => ({
+          label: getAreaLabel(index, item.areas.length),
+          heightFt: area.heightFt,
+          coveragePercent: area.coveragePercent,
+          linealFeet: Math.round(item.linealFeet * (area.coveragePercent / 100)),
+        })),
+      })),
+    };
+
+    localStorage.setItem("korbanTakeoffElevationConfig", JSON.stringify(payload));
+    alert("Takeoff configuration saved. Next step: quantity engine.");
+  }
+
   return (
-    <main className="h-screen overflow-hidden bg-zinc-950 text-white">
-      <header className="flex h-16 items-center justify-between border-b border-orange-500/20 bg-black px-6">
-        <div>
-          <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">KORBAN</h1>
-          <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Takeoff Workspace</p>
+    <main className="min-h-screen bg-[#080604] text-white">
+      <section className="border-b border-orange-500/20 bg-black px-8 py-5">
+        <div className="flex items-center justify-between gap-5">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
+            <h1 className="mt-2 text-3xl font-bold">Takeoff Workspace</h1>
+            <p className="mt-1 text-sm text-zinc-500">
+              Expanded takeoff view for PDF scale, elevation overlays, and height configuration.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <a
+              href="/"
+              className="rounded-xl border border-zinc-800 bg-black px-5 py-3 text-sm font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
+            >
+              Back To Shell
+            </a>
+
+            <button
+              onClick={saveTakeoffConfiguration}
+              className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
+            >
+              Save Takeoff
+            </button>
+          </div>
         </div>
+      </section>
 
-        <div className="flex items-center gap-3">
-          <a href="/" className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-300 transition hover:border-orange-500/40 hover:bg-orange-500/10">
-            Back to Estimate
-          </a>
+      <section className="grid gap-5 p-6 xl:grid-cols-[minmax(0,1fr)_430px]">
+        <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
+                PDF / Overlay Viewer
+              </h2>
+              <p className="mt-1 text-xs text-zinc-500">
+                Select elevation, click start point, click end point, then save.
+              </p>
+            </div>
 
-          <button className="rounded-full bg-orange-500 px-5 py-2 text-sm font-semibold text-black hover:bg-orange-400">
-            Save Takeoff
-          </button>
-        </div>
-      </header>
-
-      <section className="flex h-[calc(100vh-64px)] flex-col bg-[#070707]">
-        <div className="border-b border-orange-500/20 bg-black/80 px-6 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex flex-wrap gap-2">
-              <label className={`cursor-pointer rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${activeTool === "Upload PDF" ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]" : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="cursor-pointer rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20">
                 Upload PDF
                 <input type="file" accept="application/pdf" onChange={handlePdfUpload} className="hidden" />
               </label>
 
-              {["Scale", "Overlay", "Set Scaffold", "Draft"].map((tool) => (
+              <button
+                onClick={() => setMode("scale")}
+                className={`rounded-xl border px-4 py-2 text-xs font-bold ${
+                  mode === "scale"
+                    ? "border-orange-500 bg-orange-500 text-black"
+                    : "border-zinc-800 bg-black text-zinc-400 hover:border-orange-500/40"
+                }`}
+              >
+                Set Scale
+              </button>
+
+              <button
+                onClick={clearScale}
+                className="rounded-xl border border-zinc-800 bg-black px-4 py-2 text-xs font-bold text-zinc-400 hover:border-orange-500/40"
+              >
+                Clear Scale
+              </button>
+
+              <button
+                onClick={() => setMode("overlay")}
+                disabled={!feetPerPixel}
+                className={`rounded-xl border px-4 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${
+                  mode === "overlay"
+                    ? "border-orange-500 bg-orange-500 text-black"
+                    : "border-zinc-800 bg-black text-zinc-400 hover:border-orange-500/40"
+                }`}
+              >
+                Start Overlay
+              </button>
+
+              <button
+                onClick={saveElevation}
+                disabled={overlayPoints.length < 2 || !feetPerPixel}
+                className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Save Elevation
+              </button>
+
+              <button
+                onClick={clearCurrentOverlay}
+                className="rounded-xl border border-zinc-800 bg-black px-4 py-2 text-xs font-bold text-zinc-400 hover:border-orange-500/40"
+              >
+                Clear Current
+              </button>
+            </div>
+          </div>
+
+          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_160px_220px]">
+            <div className="rounded-2xl border border-zinc-800 bg-black p-3">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">PDF</p>
+              <p className="mt-1 truncate text-xs font-bold text-zinc-300">{pdfName}</p>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-black p-3">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Mode</p>
+              <p className="mt-1 text-xs font-bold text-orange-300">{mode}</p>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-black p-3">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Scale</p>
+              <p className="mt-1 text-xs font-bold text-orange-300">
+                {feetPerPixel ? `${feetPerPixel.toFixed(4)} FT / PX` : "Not calibrated"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
+            <div className="flex flex-wrap gap-2">
+              {elevationOptions.map((option) => (
                 <button
-                  key={tool}
-                  onClick={() => activateTool(tool)}
-                  className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${activeTool === tool ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]" : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"}`}
+                  key={option}
+                  onClick={() => {
+                    setActiveElevation(option);
+                    setSelectedElevation(option);
+                  }}
+                  className={`rounded-xl border px-4 py-2 text-xs font-bold transition ${
+                    activeElevation === option
+                      ? "border-orange-500 bg-orange-500 text-black"
+                      : "border-zinc-800 bg-black text-zinc-400 hover:border-orange-500/40"
+                  }`}
                 >
-                  {tool}
+                  {option}
                 </button>
               ))}
             </div>
 
-            <div className="rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-500">Active: {activeTool}</div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={knownDistanceFt}
+                onChange={(event) => setKnownDistanceFt(Number(event.target.value || 0))}
+                className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-xs font-bold text-orange-300 outline-none focus:border-orange-500/40"
+              />
+              <span className="text-xs font-bold text-zinc-500">FT</span>
+            </div>
           </div>
-        </div>
 
-        <div className="sticky top-0 z-50 border-b border-zinc-800 bg-[#050505]/95 px-6 py-3 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-center gap-2 text-xs">
-            <span className="max-w-[320px] truncate rounded-full border border-orange-500/20 bg-black px-3 py-1.5 text-zinc-400">
-              {pdfFileName || "No PDF Loaded"}
-            </span>
+          <div
+            ref={viewerRef}
+            onClick={handleViewerClick}
+            className="relative h-[760px] overflow-hidden rounded-3xl border border-zinc-800 bg-black"
+          >
+            {pdfUrl ? (
+              <iframe src={pdfUrl} className="absolute inset-0 h-full w-full bg-white" />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-[linear-gradient(rgba(249,115,22,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(249,115,22,0.08)_1px,transparent_1px)] bg-[size:36px_36px]">
+                <div className="text-center">
+                  <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-4xl font-light text-orange-500">
+                    +
+                  </div>
+                  <p className="text-2xl font-bold text-zinc-100">Takeoff Workspace</p>
+                  <p className="mt-2 text-sm text-zinc-500">
+                    Upload PDF, set scale, and draw elevation start/end overlays.
+                  </p>
+                </div>
+              </div>
+            )}
 
-            <button disabled={!pdfDoc || pageNumber <= 1} onClick={() => { const nextPage = Math.max(1, pageNumber - 1); setPageNumber(nextPage); setPageJump(String(nextPage)); }} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">Prev</button>
+            <svg className="pointer-events-none absolute inset-0 h-full w-full">
+              {scalePoints.length === 2 && (
+                <line
+                  x1={scalePoints[0].x}
+                  y1={scalePoints[0].y}
+                  x2={scalePoints[1].x}
+                  y2={scalePoints[1].y}
+                  stroke="#ffffff"
+                  strokeWidth="3"
+                  strokeDasharray="8 6"
+                />
+              )}
 
-            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1">
-              <span className="text-zinc-500">Page</span>
-              <input value={pageJump} onChange={(event) => setPageJump(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} className="w-16 rounded bg-zinc-950 px-2 py-1 text-center text-zinc-200 outline-none focus:ring-1 focus:ring-orange-500" />
-              <span className="text-zinc-500">/ {numPages || 0}</span>
-              <button disabled={!pdfDoc} onClick={goToPage} className="rounded bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">Go</button>
+              {savedElevations.map((item) => (
+                <g key={item.id}>
+                  <line
+                    x1={item.start.x}
+                    y1={item.start.y}
+                    x2={item.end.x}
+                    y2={item.end.y}
+                    stroke={elevationColors[item.elevation]}
+                    strokeWidth="5"
+                    strokeLinecap="round"
+                  />
+
+                  <circle cx={item.start.x} cy={item.start.y} r="6" fill={elevationColors[item.elevation]} />
+                  <circle cx={item.end.x} cy={item.end.y} r="6" fill={elevationColors[item.elevation]} />
+
+                  <text
+                    x={(item.start.x + item.end.x) / 2}
+                    y={(item.start.y + item.end.y) / 2 - 10}
+                    fill={elevationColors[item.elevation]}
+                    fontSize="13"
+                    fontWeight="800"
+                  >
+                    {item.elevation} · {Math.round(item.linealFeet)} LF
+                  </text>
+                </g>
+              ))}
+
+              {overlayPoints.length === 2 && (
+                <line
+                  x1={overlayPoints[0].x}
+                  y1={overlayPoints[0].y}
+                  x2={overlayPoints[1].x}
+                  y2={overlayPoints[1].y}
+                  stroke={elevationColors[activeElevation]}
+                  strokeWidth="5"
+                  strokeLinecap="round"
+                  strokeDasharray="10 8"
+                />
+              )}
+
+              {overlayPoints.map((point, index) => (
+                <g key={`active-${index}`}>
+                  <circle cx={point.x} cy={point.y} r="7" fill={elevationColors[activeElevation]} />
+                  <text
+                    x={point.x + 10}
+                    y={point.y - 10}
+                    fill={elevationColors[activeElevation]}
+                    fontSize="12"
+                    fontWeight="800"
+                  >
+                    {index === 0 ? "Start" : "End"}
+                  </text>
+                </g>
+              ))}
+
+              {scalePoints.map((point, index) => (
+                <g key={`scale-${index}`}>
+                  <circle cx={point.x} cy={point.y} r="7" fill="#ffffff" />
+                  <text x={point.x + 10} y={point.y - 10} fill="#ffffff" fontSize="12" fontWeight="800">
+                    S{index + 1}
+                  </text>
+                </g>
+              ))}
+            </svg>
+          </div>
+        </section>
+
+        <aside className="space-y-5">
+          <PanelCard title="Base Overlay">
+            <div className="grid grid-cols-2 gap-2">
+              {baseOverlayOptions.map((option) => (
+                <button
+                  key={option}
+                  onClick={() => setBaseOverlay(option)}
+                  className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${
+                    baseOverlay === option
+                      ? "border-orange-500 bg-orange-500 text-black"
+                      : "border-zinc-800 bg-black text-zinc-400 hover:border-orange-500/40"
+                  }`}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </PanelCard>
+
+          <PanelCard title="Elevation Totals">
+            <div className="space-y-2">
+              {elevationTotals.map((item) => (
+                <button
+                  key={item.elevation}
+                  onClick={() => {
+                    setActiveElevation(item.elevation);
+                    setSelectedElevation(item.elevation);
+                  }}
+                  className={`w-full rounded-xl border p-3 text-left transition ${
+                    selectedElevation === item.elevation
+                      ? "border-orange-500/50 bg-orange-500/10"
+                      : "border-zinc-800 bg-black hover:border-orange-500/30"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: elevationColors[item.elevation] }}
+                      />
+                      <span className="text-xs font-bold text-zinc-300">{item.elevation}</span>
+                    </div>
+
+                    <span className="font-mono text-xs font-bold text-orange-400">
+                      {item.saved ? `${Math.round(item.linealFeet).toLocaleString()} LF` : "—"}
+                    </span>
+                  </div>
+                </button>
+              ))}
             </div>
 
-            <button disabled={!pdfDoc || pageNumber >= numPages} onClick={() => { const nextPage = Math.min(numPages, pageNumber + 1); setPageNumber(nextPage); setPageJump(String(nextPage)); }} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">Next</button>
+            <div className="mt-4 rounded-2xl border border-orange-500/25 bg-orange-500/10 p-4">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">
+                Complete Exterior
+              </p>
+              <p className="mt-2 font-mono text-3xl font-bold text-orange-400">
+                {Math.round(completeExteriorLf).toLocaleString()} LF
+              </p>
+            </div>
+          </PanelCard>
 
-            <button disabled={!pdfDoc} onClick={() => setZoom((current) => Math.max(0.1, current - 0.1))} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">-</button>
-            <span className="w-14 text-center font-mono text-orange-400">{Math.round(zoom * 100)}%</span>
-            <button disabled={!pdfDoc} onClick={() => setZoom((current) => Math.min(3, current + 0.1))} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">+</button>
+          <PanelCard title="Elevation Configuration">
+            <div className="mb-4 grid grid-cols-4 gap-2">
+              {elevationOptions.map((option) => (
+                <button
+                  key={option}
+                  onClick={() => {
+                    setSelectedElevation(option);
+                    setActiveElevation(option);
+                  }}
+                  className={`rounded-xl border px-2 py-2 text-xs font-bold transition ${
+                    selectedElevation === option
+                      ? "border-orange-500 bg-orange-500 text-black"
+                      : "border-zinc-800 bg-black text-zinc-400 hover:border-orange-500/40"
+                  }`}
+                >
+                  {option[0]}
+                </button>
+              ))}
+            </div>
 
-            <button disabled={!pdfDoc} onClick={() => setZoom(0.25)} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">Fit Page</button>
-            <button disabled={!pdfDoc} onClick={() => setZoom(0.5)} className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40">Fit Width</button>
-
-            {scaleMode && <span className="rounded-full bg-orange-500/10 px-3 py-1.5 text-orange-300">Scale: click 2 points</span>}
-            {overlayMode && <span className="rounded-full bg-orange-500/10 px-3 py-1.5 text-orange-300">Overlay: click coverage line</span>}
-          </div>
-        </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px]">
-          <div className="relative overflow-auto bg-black">
-            <div className="pointer-events-none absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#f97316_1px,transparent_1px),linear-gradient(to_bottom,#f97316_1px,transparent_1px)] bg-[size:38px_38px]" />
-
-            {pdfLoading && <div className="relative z-10 flex h-full items-center justify-center text-sm text-zinc-500">Loading PDF...</div>}
-            {pdfError && <div className="relative z-10 flex h-full items-center justify-center text-sm text-red-400">{pdfError}</div>}
-
-            {!pdfDoc && !pdfLoading && !pdfError && (
-              <label className="relative z-10 flex h-full cursor-pointer items-center justify-center">
-                <div className="text-center">
-                  <div className="mx-auto mb-5 flex h-24 w-24 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-5xl text-orange-500">+</div>
-                  <h2 className="text-2xl font-semibold">Upload Plan PDF</h2>
-                  <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">Full-screen takeoff workspace for scale, overlay, tracing, set scaffold, and drafting.</p>
-                </div>
-                <input type="file" accept="application/pdf" onChange={handlePdfUpload} className="hidden" />
-              </label>
-            )}
-
-            {pdfDoc && (
-              <div className="relative z-10 flex min-h-full justify-center p-10">
-                <div onClick={handleWorkspaceClick} className={`relative h-fit rounded-2xl bg-white p-4 shadow-[0_0_60px_rgba(0,0,0,0.65)] ${scaleMode || overlayMode ? "cursor-crosshair" : ""}`}>
-                  <canvas ref={canvasRef} />
-
-                  {showCombinedOverlay &&
-                    [...savedLevels]
-                      .sort((a, b) => Number(a.dashed) - Number(b.dashed))
-                      .map((level) => (
-                        <div key={level.id}>
-                          {drawOverlayPolyline(level.points, level.closed, level.color, `saved-${level.id}`, level.dashed)}
-                        </div>
-                      ))}
-
-                  {!showCombinedOverlay && scalePoints.map((point, index) => (
-                    <Marker key={`scale-${index}`} point={point} label={`S${index + 1}`} zoom={zoom} />
-                  ))}
-
-                  {!showCombinedOverlay && scalePoints.length === 2 && (
-                    <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full">
-                      <line x1={scalePoints[0].x * zoom + 16} y1={scalePoints[0].y * zoom + 16} x2={scalePoints[1].x * zoom + 16} y2={scalePoints[1].y * zoom + 16} stroke="#f97316" strokeWidth="3" strokeDasharray="8 8" />
-                    </svg>
-                  )}
-
-                  {!showCombinedOverlay && tracePoints.map((point, index) => (
-                    <Marker key={`trace-${index}`} point={point} label={String(index + 1)} zoom={zoom} />
-                  ))}
-
-                  {!showCombinedOverlay && drawOverlayPolyline(tracePoints, traceClosed, "#f97316", "current")}
-                </div>
+            {selectedSavedElevation ? (
+              <ElevationConfiguration
+                elevation={selectedSavedElevation}
+                updateSingleHeight={updateSingleHeight}
+                enableMultipleHeights={enableMultipleHeights}
+                disableMultipleHeights={disableMultipleHeights}
+                addArea={addArea}
+                removeArea={removeArea}
+                updateAreaHeight={updateAreaHeight}
+                updateAreaCoverage={updateAreaCoverage}
+                removeElevation={removeElevation}
+              />
+            ) : (
+              <div className="rounded-2xl border border-zinc-800 bg-black p-4">
+                <p className="text-xs leading-5 text-zinc-500">
+                  No {selectedElevation} elevation saved yet. Select {selectedElevation}, click start/end points,
+                  then save elevation.
+                </p>
               </div>
             )}
-          </div>
+          </PanelCard>
 
-          <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#090909] p-4">
-<section className="mt-4 rounded-2xl border border-zinc-800 bg-black p-4">
-              <h2 className="text-xs uppercase tracking-[0.25em] text-zinc-500">Scale</h2>
-              <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
-                <input value={knownScaleFeet} onChange={(event) => setKnownScaleFeet(event.target.value)} placeholder={`Known length, ex: 20'-6"`} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500" />
-                <button onClick={calibrateScale} className="rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-black hover:bg-orange-400">Set</button>
-              </div>
-              <div className="mt-3 space-y-1 text-xs text-zinc-500">
-                <p>Scale Points: {scalePoints.length}/2</p>
-                <p>Known Length: {knownScaleFeet || "Not Set"}</p>
-                <p>{pageUnitsPerFoot ? "Scale Locked" : "Scale not set"}</p>
-              </div>
-              <button onClick={clearScale} className="mt-3 w-full rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-300 hover:border-orange-500/50">Clear Scale</button>
-            </section>
+          <PanelCard title="Next Step">
+            <button
+              onClick={saveTakeoffConfiguration}
+              className="w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-black hover:bg-orange-400"
+            >
+              Save For Quantity Engine
+            </button>
 
-            <section className="mt-4 rounded-2xl border border-zinc-800 bg-black p-4">
-              <h2 className="text-xs uppercase tracking-[0.25em] text-zinc-500">Overlay Data</h2>
-              <div className="mt-4 space-y-3 text-xs">
-                <MetaRow label="Status" value={overlayStatus} />
-                <MetaRow label="Points" value={String(tracePoints.length)} />
-                <MetaRow label="Lineal Feet" value={formatFeetInches(tracedLinealFeet)} />
-                <MetaRow label="Bay Est." value={String(bayCountEstimate)} />
-                <MetaRow label="Leg Est." value={String(legCountEstimate)} />
-              </div>
-
-              <div className="mt-4 border-t border-zinc-900 pt-4">
-                <h3 className="text-[10px] uppercase tracking-[0.2em] text-orange-400">Overlay Controls</h3>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <button onClick={undoTracePoint} className="rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-300 hover:border-orange-500/50">Undo Point</button>
-                  <button onClick={keepOpenOverlay} className="rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">Keep Open</button>
-                  <button onClick={closeOverlay} className="rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-black hover:bg-orange-400">Close Overlay</button>
-                  <button onClick={clearOverlay} className="rounded-xl border border-zinc-800 px-3 py-2 text-xs text-zinc-300 hover:border-orange-500/50">Clear</button>
-                </div>
-              </div>
-
-              <div className="mt-4 border-t border-zinc-900 pt-4">
-                <label className="text-[10px] uppercase tracking-[0.2em] text-zinc-600">Level Name</label>
-                <input value={levelName} onChange={(event) => setLevelName(event.target.value)} placeholder="Enter level name" className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500" />
-
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {levelSuggestions.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      onClick={() => setLevelName(buildLevelName(suggestion, savedLevels))}
-                      className="rounded-full border border-zinc-800 px-2.5 py-1 text-[10px] text-zinc-500 transition hover:border-orange-500/40 hover:text-orange-300"
-                    >
-                      + {suggestion}
-                    </button>
-                  ))}
-                </div>
-
-                <button onClick={saveCurrentLevel} className="mt-3 w-full rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-black hover:bg-orange-400">Save Level Overlay</button>
-              </div>
-
-              <div className="mt-4 border-t border-zinc-900 pt-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-[10px] uppercase tracking-[0.2em] text-zinc-600">Saved Levels</h3>
-                  <button onClick={() => setShowCombinedOverlay((current) => !current)} className="rounded-full border border-orange-500/30 px-3 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/10">
-                    {showCombinedOverlay ? "Hide Combined" : "View Combined"}
-                  </button>
-                </div>
-
-                <div className="mt-3 space-y-2">
-                  {savedLevels.length === 0 && <p className="rounded-xl border border-zinc-900 bg-zinc-950 p-3 text-xs text-zinc-600">No saved levels yet.</p>}
-
-                  {savedLevels.map((level) => (
-                    <div key={level.id} className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-2.5 py-2 text-xs transition hover:border-orange-500/30">
-                      <div className="flex min-w-0 items-center gap-2">
-                        {level.dashed ? (
-                          <span
-                            className="h-0 w-5 shrink-0 border-t border-dashed"
-                            style={{ borderColor: level.color }}
-                          />
-                        ) : (
-                          <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: level.color }} />
-                        )}
-                        <span className="truncate font-semibold text-zinc-200">{level.name}</span>
-                      </div>
-
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="font-mono text-orange-400">{formatFeetInches(level.linealFeet)}</span>
-                        <button onClick={() => removeSavedLevel(level.id)} className="rounded-full border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500 hover:border-orange-500/50 hover:text-orange-300">Remove</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
-
-            <section className="mt-4 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-4">
-              <h2 className="text-xs uppercase tracking-[0.25em] text-orange-300">Workspace Notes</h2>
-              <p className="mt-3 text-xs leading-5 text-zinc-400">Save each floor overlay as a level. Combined overlay shows all saved levels together with color distinction.</p>
-            </section>
-          </aside>
-        </div>
+            <p className="mt-3 text-xs leading-5 text-zinc-500">
+              This saves LF by elevation and height areas. Frames, planks, legs, and jumps come next using Backend standards.
+            </p>
+          </PanelCard>
+        </aside>
       </section>
     </main>
   );
 }
 
-function Marker({ point, label, zoom }: { point: Point; label: string; zoom: number }) {
+function ElevationConfiguration({
+  elevation,
+  updateSingleHeight,
+  enableMultipleHeights,
+  disableMultipleHeights,
+  addArea,
+  removeArea,
+  updateAreaHeight,
+  updateAreaCoverage,
+  removeElevation,
+}: {
+  elevation: SavedElevation;
+  updateSingleHeight: (elevationId: number, heightFt: number) => void;
+  enableMultipleHeights: (elevationId: number) => void;
+  disableMultipleHeights: (elevationId: number) => void;
+  addArea: (elevationId: number) => void;
+  removeArea: (elevationId: number, areaId: number) => void;
+  updateAreaHeight: (elevationId: number, areaId: number, heightFt: number) => void;
+  updateAreaCoverage: (elevationId: number, areaId: number, nextPercent: number) => void;
+  removeElevation: (elevation: ElevationName) => void;
+}) {
+  const singleArea = elevation.areas[0];
+  const totalPercent = elevation.areas.reduce((sum, area) => sum + area.coveragePercent, 0);
+
   return (
-    <div className="absolute z-30 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-orange-300 bg-orange-500 text-[10px] font-bold text-black" style={{ left: point.x * zoom + 16, top: point.y * zoom + 16 }}>
-      {label}
+    <div>
+      <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+        <p className="text-xs font-bold text-zinc-200">{elevation.elevation} Elevation</p>
+        <p className="mt-1 font-mono text-3xl font-bold text-orange-400">
+          {Math.round(elevation.linealFeet).toLocaleString()} LF
+        </p>
+        <p className="mt-1 text-[10px] text-zinc-600">
+          Areas read left to right as if standing in front of the elevation.
+        </p>
+      </div>
+
+      {!elevation.multipleHeights && (
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+              Height / FT
+            </label>
+
+            <input
+              type="number"
+              value={singleArea?.heightFt ?? 0}
+              onChange={(event) => updateSingleHeight(elevation.id, Number(event.target.value || 0))}
+              className="mt-2 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
+            />
+          </div>
+
+          <button
+            onClick={() => enableMultipleHeights(elevation.id)}
+            className="w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-sm font-bold text-white shadow-[0_0_20px_rgba(255,255,255,0.12)] hover:bg-white/10"
+          >
+            + Multiple Heights
+          </button>
+        </div>
+      )}
+
+      {elevation.multipleHeights && (
+        <div className="mt-4 space-y-3">
+          <div className="rounded-2xl border border-zinc-800 bg-black p-3">
+            <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+              Coverage Meter
+            </p>
+
+            <div className="flex h-5 overflow-hidden rounded-full bg-zinc-900">
+              {elevation.areas.map((area, index) => (
+                <div
+                  key={area.id}
+                  className="h-full border-r border-black last:border-r-0"
+                  style={{
+                    width: `${area.coveragePercent}%`,
+                    background: index % 2 === 0 ? "#f97316" : "#fb923c",
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="mt-2 flex justify-between text-[10px] text-zinc-600">
+              <span>Left</span>
+              <span>{totalPercent}% / 100%</span>
+              <span>Right</span>
+            </div>
+          </div>
+
+          {elevation.areas.map((area, index) => {
+            const isLast = index === elevation.areas.length - 1;
+            const label = getAreaLabel(index, elevation.areas.length);
+            const areaLf = elevation.linealFeet * (area.coveragePercent / 100);
+
+            return (
+              <div key={area.id} className="rounded-2xl border border-zinc-800 bg-black p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">{label}</p>
+                    <p className="mt-1 font-mono text-xs font-bold text-orange-400">
+                      {Math.round(areaLf)} LF · {area.coveragePercent}%
+                    </p>
+                  </div>
+
+                  {elevation.areas.length > 1 && (
+                    <button
+                      onClick={() => removeArea(elevation.id, area.id)}
+                      className="text-[10px] font-bold text-zinc-600 hover:text-red-300"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-3">
+                  <label className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                    Height / FT
+                  </label>
+
+                  <input
+                    type="number"
+                    value={area.heightFt}
+                    onChange={(event) =>
+                      updateAreaHeight(elevation.id, area.id, Number(event.target.value || 0))
+                    }
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
+                  />
+                </div>
+
+                <div className="mt-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                      Coverage
+                    </label>
+
+                    <span className="font-mono text-xs font-bold text-zinc-300">
+                      {area.coveragePercent}%
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min={1}
+                    max={99}
+                    value={area.coveragePercent}
+                    disabled={isLast}
+                    onChange={(event) =>
+                      updateAreaCoverage(elevation.id, area.id, Number(event.target.value))
+                    }
+                    className="mt-2 w-full accent-orange-500 disabled:opacity-40"
+                  />
+
+                  {isLast && (
+                    <p className="mt-1 text-[10px] text-zinc-600">
+                      Right-side area auto-balances remaining coverage.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          <button
+            onClick={() => addArea(elevation.id)}
+            className="w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
+          >
+            + Add Area
+          </button>
+
+          <button
+            onClick={() => disableMultipleHeights(elevation.id)}
+            className="w-full rounded-xl border border-zinc-800 bg-black px-4 py-3 text-xs font-bold text-zinc-400 hover:border-orange-500/40"
+          >
+            Use Single Height
+          </button>
+        </div>
+      )}
+
+      <button
+        onClick={() => removeElevation(elevation.elevation)}
+        className="mt-4 w-full rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-xs font-bold text-red-300 hover:bg-red-500/10"
+      >
+        Remove Elevation
+      </button>
     </div>
   );
 }
 
-function MetaRow({ label, value }: { label: string; value: string }) {
+function PanelCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between border-b border-zinc-900 pb-2">
-      <span className="text-zinc-600">{label}</span>
-      <span className="font-mono text-orange-400">{value}</span>
-    </div>
+    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
+      <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">{title}</h2>
+      <div className="mt-4">{children}</div>
+    </section>
   );
+}
+
+function getAreaLabel(index: number, total: number) {
+  if (total === 1) return "Area 1";
+  if (index === 0) return "Area 1 (Left)";
+  if (index === total - 1) return `Area ${index + 1} (Right)`;
+  return `Area ${index + 1}`;
+}
+
+function distance(a: Point, b: Point) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+
+  return Math.sqrt(dx * dx + dy * dy);
 }
