@@ -11,7 +11,18 @@ const projectConditions = [
   "Free-Stand",
 ];
 
-const finishOptions = ["Plaster", "EIFS", "CMU", "Metal Panel", "Siding", "Special", "Thin Brick", "Shotcrete", "Paint"];
+const finishOptions = [
+  "Plaster",
+  "EIFS",
+  "CMU",
+  "Metal Panel",
+  "Siding",
+  "Special",
+  "Thin Brick",
+  "Shotcrete",
+  "Paint",
+];
+
 const scaffoldWidths = ["3'", "3'6\"", "5'"];
 const draftSteps = ["Draft", "Select Section", "Draft Section"];
 const productionOptions = ["Competitive", "Average", "Conservative"];
@@ -378,7 +389,15 @@ export default function Home() {
       totalPlankCount * plankRate +
       totalMiscCount * miscRate
     ) * durationMultiplier;
-  }, [durationQuantity, frameRent, plankRent, miscRent, totalFrameCount, totalPlankCount, totalMiscCount]);
+  }, [
+    durationQuantity,
+    frameRent,
+    plankRent,
+    miscRent,
+    totalFrameCount,
+    totalPlankCount,
+    totalMiscCount,
+  ]);
 
   const currentTotalCost = useMemo(() => {
     return materialRentalTotal + additionalItemsCost + breakoutAreasCost;
@@ -426,7 +445,7 @@ export default function Home() {
       {
         partNo: framePartNumbers.frame64,
         category: "Frames",
-        description: `6' 4\" H - ${scaffoldWidth} W Frame`,
+        description: `6' 4" H - ${scaffoldWidth} W Frame`,
         qty: frameResult ? frameResult.frames64 * legCount : 0,
       },
       {
@@ -474,7 +493,15 @@ export default function Home() {
     ];
 
     return rows.filter((row) => row.qty > 0);
-  }, [bayCount, framePartNumbers, frameResult, guardRailCount, legCount, scaffoldWidth, totalPlankCount]);
+  }, [
+    bayCount,
+    framePartNumbers,
+    frameResult,
+    guardRailCount,
+    legCount,
+    scaffoldWidth,
+    totalPlankCount,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -494,7 +521,17 @@ export default function Home() {
         rows: materialLoadList,
       })
     );
-  }, [bayCount, companyName, framesPerLeg, legCount, materialLoadList, projectAddress, projectName, scaffoldWidth, tracedLinearFeet]);
+  }, [
+    bayCount,
+    companyName,
+    framesPerLeg,
+    legCount,
+    materialLoadList,
+    projectAddress,
+    projectName,
+    scaffoldWidth,
+    tracedLinearFeet,
+  ]);
 
   function handleProjectMenuAction(item: string) {
     if (item === "Backend") {
@@ -507,7 +544,6 @@ export default function Home() {
       return;
     }
 
-    alert(`${item} will be connected in the next backend phase.`);
     setProjectMenuOpen(false);
   }
 
@@ -753,21 +789,30 @@ export default function Home() {
   return (
     <main className="h-screen overflow-hidden bg-zinc-950 text-white">
       <header className="flex h-16 items-center justify-between border-b border-orange-500/20 bg-black px-6">
-        <div className="relative flex items-center gap-3">
-          <div className="relative">
+        <div className="relative flex items-start gap-3">
+          <div>
+            <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">
+              KORBAN
+            </h1>
+            <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
+              Scaffold Intelligence Platform
+            </p>
+          </div>
+
+          <div className="relative pt-1">
             <button
               type="button"
               onClick={() => setProjectMenuOpen((current) => !current)}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-orange-500/30 bg-orange-500/10 text-orange-400 transition hover:border-orange-500 hover:bg-orange-500/20"
+              className="flex h-7 w-7 items-center justify-center rounded-lg border border-orange-500/30 bg-orange-500/10 text-orange-400 transition hover:border-orange-500 hover:bg-orange-500/20"
               aria-label="Open project menu"
             >
               ▾
             </button>
 
             {projectMenuOpen && (
-              <div className="absolute left-0 top-10 z-50 w-64 overflow-hidden rounded-2xl border border-orange-500/25 bg-black shadow-[0_0_30px_rgba(249,115,22,0.18)]">
+              <div className="absolute left-0 top-9 z-50 w-64 overflow-hidden rounded-2xl border border-orange-500/25 bg-black shadow-[0_0_30px_rgba(249,115,22,0.18)]">
                 {projectMenuItems.map((item, index) => {
-                  const dividerBefore = [5, 7, 9, 11].includes(index);
+                  const dividerBefore = [4, 7, 9, 11, 13].includes(index);
 
                   return (
                     <button
@@ -785,21 +830,16 @@ export default function Home() {
               </div>
             )}
           </div>
-
-          <div>
-            <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">
-              KORBAN
-            </h1>
-            <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
-              Scaffold Intelligence Platform
-            </p>
-          </div>
         </div>
 
         <div className="flex items-center gap-3">
           <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 px-5 py-2 shadow-[0_0_30px_rgba(249,115,22,0.12)]">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300">Current Total Cost</p>
-            <p className="font-mono text-lg font-bold text-orange-500">${currentTotalCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+            <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300">
+              Current Total Cost
+            </p>
+            <p className="font-mono text-lg font-bold text-orange-500">
+              ${currentTotalCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </p>
             <p className="text-[10px] text-zinc-500">including all add scopes</p>
           </div>
 
@@ -929,7 +969,7 @@ export default function Home() {
           </section>
 
           <section className="rounded-2xl border border-zinc-900 bg-black/60 p-3">
-            {['Backend Input', 'Options', 'Help / Support'].map((item) => (
+            {["Backend Input", "Options", "Help / Support"].map((item) => (
               <button
                 key={item}
                 className="mb-2 w-full rounded-xl border border-zinc-900 bg-zinc-950/60 px-3 py-2.5 text-left text-xs text-zinc-500 transition hover:border-orange-500/30 hover:text-zinc-300 last:mb-0"
@@ -1353,8 +1393,14 @@ export default function Home() {
                         value={formatFeetInches(frameResult.requiredScaffoldHeightFeet)}
                       />
                       <CompactMetric label={`6'4" Frames`} value={String(frameResult.frames64)} />
-                      <CompactMetric label={`5' / 3' Frames`} value={`${frameResult.frames5} / ${frameResult.frames3}`} />
-                      <CompactMetric label="Jack" value={`${frameResult.jackExtensionInches.toFixed(1)}"`} />
+                      <CompactMetric
+                        label={`5' / 3' Frames`}
+                        value={`${frameResult.frames5} / ${frameResult.frames3}`}
+                      />
+                      <CompactMetric
+                        label="Jack"
+                        value={`${frameResult.jackExtensionInches.toFixed(1)}"`}
+                      />
                     </div>
                   ) : (
                     <div className="mt-3 rounded-xl border border-zinc-800 bg-black p-4 text-xs text-zinc-500">
@@ -1378,11 +1424,35 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-900 bg-zinc-950/70">
-                        <MaterialRowSmall code="F64" description={`6'4" Frame`} qty={frameResult ? frameResult.frames64 : 0} />
-                        <MaterialRowSmall code="F05" description="5' Frame" qty={frameResult ? frameResult.frames5 : 0} />
-                        <MaterialRowSmall code="F03" description="3' Frame" qty={frameResult ? frameResult.frames3 : 0} />
-                        <MaterialRowSmall code="SJ16" description={frameResult ? `Screw Jack (${frameResult.jackExtensionInches.toFixed(1)}" extension)` : "Screw Jack"} qty={frameResult ? 1 : 0} />
-                        <MaterialRowSmall code="BP" description="Base Plate" qty={frameResult ? 1 : 0} />
+                        <MaterialRowSmall
+                          code="F64"
+                          description={`6'4" Frame`}
+                          qty={frameResult ? frameResult.frames64 : 0}
+                        />
+                        <MaterialRowSmall
+                          code="F05"
+                          description="5' Frame"
+                          qty={frameResult ? frameResult.frames5 : 0}
+                        />
+                        <MaterialRowSmall
+                          code="F03"
+                          description="3' Frame"
+                          qty={frameResult ? frameResult.frames3 : 0}
+                        />
+                        <MaterialRowSmall
+                          code="SJ16"
+                          description={
+                            frameResult
+                              ? `Screw Jack (${frameResult.jackExtensionInches.toFixed(1)}" extension)`
+                              : "Screw Jack"
+                          }
+                          qty={frameResult ? 1 : 0}
+                        />
+                        <MaterialRowSmall
+                          code="BP"
+                          description="Base Plate"
+                          qty={frameResult ? 1 : 0}
+                        />
                       </tbody>
                     </table>
                   </div>
@@ -1410,7 +1480,7 @@ export default function Home() {
         )}
 
         <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#090909] p-4">
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4 min-h-[30%]">
+          <section className="mb-4 min-h-[30%] rounded-2xl border border-zinc-800 bg-black p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold">Estimate & Proposal</h2>
@@ -1459,7 +1529,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4 min-h-[50%]">
+          <section className="mb-4 min-h-[50%] rounded-2xl border border-zinc-800 bg-black p-4">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-xs uppercase tracking-[0.22em] text-orange-400">
                 Scaffold Breakdown
@@ -1546,7 +1616,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="rounded-2xl border border-zinc-800 bg-black p-4 min-h-[20%]">
+          <section className="min-h-[20%] rounded-2xl border border-zinc-800 bg-black p-4">
             <h3 className="mb-3 text-xs uppercase tracking-[0.22em] text-orange-400">
               Project Management
             </h3>
@@ -1583,6 +1653,7 @@ export default function Home() {
             </div>
           </section>
         </aside>
+
         <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#120b05] p-3">
           <section className="rounded-2xl border border-orange-500/20 bg-black/70 p-3">
             <h2 className="text-xs uppercase tracking-[0.22em] text-orange-300">
@@ -1603,10 +1674,19 @@ export default function Home() {
               {!pdfDoc && <AlertItem status="waiting" text="No PDF plan uploaded." />}
               {pdfDoc && !pixelsPerFoot && <AlertItem status="warning" text="Scale not calibrated." />}
               {pixelsPerFoot && tracedLinearFeet === 0 && <AlertItem status="waiting" text="Overlay not traced." />}
-              {tracedLinearFeet > 0 && !traceClosed && !traceKeptOpen && <AlertItem status="warning" text="Overlay is still in progress." />}
+              {tracedLinearFeet > 0 && !traceClosed && !traceKeptOpen && (
+                <AlertItem status="warning" text="Overlay is still in progress." />
+              )}
               {traceKeptOpen && <AlertItem status="good" text="Open overlay saved." />}
               {traceClosed && <AlertItem status="good" text="Closed overlay saved." />}
-              {turnBayMarkers.length > 0 && <AlertItem status="warning" text={`${turnBayMarkers.length} turn bay condition${turnBayMarkers.length === 1 ? "" : "s"} marked for review.`} />}
+              {turnBayMarkers.length > 0 && (
+                <AlertItem
+                  status="warning"
+                  text={`${turnBayMarkers.length} turn bay condition${
+                    turnBayMarkers.length === 1 ? "" : "s"
+                  } marked for review.`}
+                />
+              )}
               {bayCount > 0 && <AlertItem status="good" text={`Bays: ${bayCount}`} />}
               {legCount > 0 && <AlertItem status="good" text={`Legs: ${legCount}`} />}
               {selectedConditions.includes("Setbacks / Pop-Outs") && (
