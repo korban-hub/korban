@@ -551,7 +551,7 @@ export default function TakeoffWorkspace() {
     }
 
     if (pickTarget.type === "elevation") {
-      const nextElevationRefs = elevationRefs.map((item) =>
+      const nextElevationRefs: ElevationReference[] = elevationRefs.map((item): ElevationReference =>
         item.elevation === pickTarget.elevation
           ? {
               ...item,
@@ -565,11 +565,11 @@ export default function TakeoffWorkspace() {
       );
 
       const duplicatedElevation = getOppositeElevation(pickTarget.elevation);
-      const duplicatedElevationRefs =
+      const duplicatedElevationRefs: ElevationReference[] =
         canDuplicateOpposite(pickTarget.elevation) &&
         duplicateElevationRefs[pickTarget.elevation] &&
         duplicatedElevation
-          ? nextElevationRefs.map((item) =>
+          ? nextElevationRefs.map((item): ElevationReference =>
               item.elevation === duplicatedElevation
                 ? {
                     ...item,
@@ -700,7 +700,7 @@ export default function TakeoffWorkspace() {
       return;
     }
 
-    const nextElevationRefs = elevationRefs.map((item) =>
+    const nextElevationRefs: ElevationReference[] = elevationRefs.map((item): ElevationReference =>
       item.elevation === elevation
         ? {
             ...item,
@@ -714,9 +714,9 @@ export default function TakeoffWorkspace() {
     );
 
     const duplicatedElevation = getOppositeElevation(elevation);
-    const duplicatedElevationRefs =
+    const duplicatedElevationRefs: ElevationReference[] =
       canDuplicateOpposite(elevation) && duplicateElevationRefs[elevation] && duplicatedElevation
-        ? nextElevationRefs.map((item) =>
+        ? nextElevationRefs.map((item): ElevationReference =>
             item.elevation === duplicatedElevation
               ? {
                   ...item,
@@ -836,7 +836,7 @@ export default function TakeoffWorkspace() {
     const currentElevation = elevationHeights.find((item) => item.elevation === elevation);
     const currentArea = currentElevation?.areas.find((area) => area.id === areaId);
 
-    if (!currentArea) return;
+    if (!currentElevation || !currentArea) return;
 
     const parsed = parseFeetInches(currentArea.heightInput);
 
@@ -862,8 +862,73 @@ export default function TakeoffWorkspace() {
       elevationRefs,
       elevationHeights,
     };
+    const activeProjectId = "takeoff-draft";
+    const totalLinearFeet = Math.round(keyFloorLf || totalElevationLf || 0);
+    const averageExteriorHeight = getAverageExteriorHeight(elevationHeights);
+    const bays = Math.max(0, Math.ceil(totalLinearFeet / 10));
+    const legs = bays > 0 ? bays + 1 : 0;
+    const jumps = Math.max(1, Math.ceil(averageExteriorHeight / (6 + 4 / 12)));
+    const frames = bays * jumps;
+    const planks = bays * 5;
+    const truckLoads = planks > 0 ? Math.ceil(planks / 150) : 0;
+    const tripCount = truckLoads > 0 ? Math.max(1, Math.ceil(truckLoads / 2)) : 0;
+    const estimateDraft = {
+      projectId: activeProjectId,
+      projectName: "Takeoff Workspace Draft",
+      projectAddress: "",
+      customer: "",
+      contactName: "",
+      contactEmail: "",
+      contactPhone: "",
+      estimator: "H. Pierre",
+      bidDate: new Date().toLocaleDateString("en-US"),
+      proposalNumber: `KRB-${Date.now()}`,
+      projectType: "Frame Scaffold",
+      unionStatus: "Union",
+      totalLinearFeet,
+      bays,
+      legs,
+      jumps,
+      frames,
+      planks,
+      crossBraces: frames,
+      guardrails: bays * 3,
+      basePlates: legs,
+      screwJacks: legs,
+      erectDays: 0,
+      dismantleDays: 0,
+      truckLoads,
+      deliveryTrips: tripCount,
+      pickupTrips: tripCount,
+      source: "takeoff-workspace",
+      updatedAt: new Date().toISOString(),
+      schemaVersion: 1,
+      takeoff: {
+        ...payload,
+        fullOverlayRows,
+      },
+    };
+    let storedProjectEstimates: Record<string, unknown> = {};
+
+    try {
+      const existing = localStorage.getItem("korbanProjectEstimates_v1");
+      const parsed = existing ? JSON.parse(existing) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        storedProjectEstimates = parsed;
+      }
+    } catch {
+      storedProjectEstimates = {};
+    }
 
     localStorage.setItem("korbanTakeoffHub", JSON.stringify(payload));
+    localStorage.setItem("korbanActiveProjectId", activeProjectId);
+    localStorage.setItem(
+      "korbanProjectEstimates_v1",
+      JSON.stringify({
+        ...storedProjectEstimates,
+        [activeProjectId]: estimateDraft,
+      }),
+    );
     window.location.href = "/estimate-review";
   }
 

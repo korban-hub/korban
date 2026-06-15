@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type RentalDuration = "30 Days" | "60 Days" | "90 Days" | "120 Days" | "Custom";
 type ProposalStatus = "Draft" | "Internal Review" | "Ready To Send" | "Submitted";
@@ -125,6 +125,60 @@ const baseEstimate = {
   pickupTrips: 2,
 };
 
+type EstimateData = typeof baseEstimate;
+
+type NumericEstimateField =
+  | "totalLinearFeet"
+  | "bays"
+  | "legs"
+  | "jumps"
+  | "frames"
+  | "planks"
+  | "crossBraces"
+  | "guardrails"
+  | "basePlates"
+  | "screwJacks"
+  | "erectDays"
+  | "dismantleDays"
+  | "truckLoads"
+  | "deliveryTrips"
+  | "pickupTrips";
+
+const numericEstimateFields: NumericEstimateField[] = [
+  "totalLinearFeet",
+  "bays",
+  "legs",
+  "jumps",
+  "frames",
+  "planks",
+  "crossBraces",
+  "guardrails",
+  "basePlates",
+  "screwJacks",
+  "erectDays",
+  "dismantleDays",
+  "truckLoads",
+  "deliveryTrips",
+  "pickupTrips",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeStoredEstimate(value: unknown): EstimateData | null {
+  if (!isRecord(value)) return null;
+
+  const estimate = { ...baseEstimate, ...value } as EstimateData;
+
+  numericEstimateFields.forEach((field) => {
+    const nextValue = Number(estimate[field]);
+    estimate[field] = Number.isFinite(nextValue) ? nextValue : baseEstimate[field];
+  });
+
+  return estimate;
+}
+
 const standardMaterialInputs = [
   {
     item: "Frames",
@@ -237,6 +291,7 @@ const addAlternates = [
 
 export default function EstimateReviewPage() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [storedEstimate, setStoredEstimate] = useState<EstimateData | null>(null);
   const [rentalDuration, setRentalDuration] = useState<RentalDuration>("30 Days");
   const [customRentalDays, setCustomRentalDays] = useState("45");
   const [proposalStatus, setProposalStatus] = useState<ProposalStatus>("Draft");
@@ -263,6 +318,23 @@ export default function EstimateReviewPage() {
   const [proposalNotes, setProposalNotes] = useState(
     "Proposal includes furnishing, erecting, maintaining, and dismantling frame scaffold based on provided bid documents and current KORBAN takeoff assumptions."
   );
+  const estimate = storedEstimate ?? baseEstimate;
+
+  useEffect(() => {
+    try {
+      const activeProjectId = localStorage.getItem("korbanActiveProjectId");
+      const storedProjectEstimates = localStorage.getItem("korbanProjectEstimates_v1");
+
+      if (!activeProjectId || !storedProjectEstimates) return;
+
+      const parsed = JSON.parse(storedProjectEstimates);
+      if (!isRecord(parsed)) return;
+
+      setStoredEstimate(normalizeStoredEstimate(parsed[activeProjectId]));
+    } catch {
+      setStoredEstimate(null);
+    }
+  }, []);
 
   const rentalDays =
     rentalDuration === "Custom" ? Number(customRentalDays || 0) : Number(rentalDuration.split(" ")[0]);
@@ -287,8 +359,8 @@ export default function EstimateReviewPage() {
   );
 
   const totals = useMemo(() => {
-    const frameMaterialCost = baseEstimate.frames * frameRate;
-    const plankMaterialCost = baseEstimate.planks * plankRate;
+    const frameMaterialCost = estimate.frames * frameRate;
+    const plankMaterialCost = estimate.planks * plankRate;
     const standardMaterialCost = frameMaterialCost + plankMaterialCost;
 
     const extraMaterialCost = extraMaterialItems.reduce(
@@ -356,6 +428,8 @@ export default function EstimateReviewPage() {
     approvedAlternates,
     baseMonthlyRentalRevenue,
     effectiveLaborRates,
+    estimate.frames,
+    estimate.planks,
     extraMaterialItems,
     frameRate,
     installMix,
@@ -543,44 +617,44 @@ export default function EstimateReviewPage() {
                 <p className="text-xs font-bold uppercase tracking-[0.35em] text-orange-500">
                   Estimate Proposal Review
                 </p>
-                <h2 className="mt-3 text-3xl font-bold text-white">{baseEstimate.projectName}</h2>
-                <p className="mt-1 text-sm text-zinc-500">{baseEstimate.projectAddress}</p>
+                <h2 className="mt-3 text-3xl font-bold text-white">{estimate.projectName}</h2>
+                <p className="mt-1 text-sm text-zinc-500">{estimate.projectAddress}</p>
               </div>
 
               <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 text-right">
                 <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Proposal No.</p>
                 <p className="mt-1 font-mono text-sm font-bold text-orange-400">
-                  {baseEstimate.proposalNumber}
+                  {estimate.proposalNumber}
                 </p>
                 <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-zinc-500">Bid Date</p>
-                <p className="mt-1 font-mono text-sm text-zinc-300">{baseEstimate.bidDate}</p>
+                <p className="mt-1 font-mono text-sm text-zinc-300">{estimate.bidDate}</p>
               </div>
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-3">
-              <SummaryTile label="Total Linear Feet" value={formatNumber(baseEstimate.totalLinearFeet)} suffix="LF" />
-              <SummaryTile label="Frame Count" value={formatNumber(baseEstimate.frames)} />
-              <SummaryTile label="Plank Count" value={formatNumber(baseEstimate.planks)} />
+              <SummaryTile label="Total Linear Feet" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
+              <SummaryTile label="Frame Count" value={formatNumber(estimate.frames)} />
+              <SummaryTile label="Plank Count" value={formatNumber(estimate.planks)} />
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
               <ReviewBlock title="Scaffold Quantity Summary">
                 <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Legs" value={baseEstimate.legs} />
+                  <QuantityRow label="Legs" value={estimate.legs} />
                 </div>
 
                 <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Jumps" value={baseEstimate.jumps} />
+                  <QuantityRow label="Jumps" value={estimate.jumps} />
                 </div>
 
                 <div className="h-px bg-orange-500/25" />
 
-                <QuantityRow label="Frames" value={baseEstimate.frames} />
-                <QuantityRow label="Planks" value={baseEstimate.planks} />
-                <QuantityRow label="Cross Braces" value={baseEstimate.crossBraces} />
-                <QuantityRow label="Guardrails" value={baseEstimate.guardrails} />
-                <QuantityRow label="Base Plates" value={baseEstimate.basePlates} />
-                <QuantityRow label="Screw Jacks" value={baseEstimate.screwJacks} />
+                <QuantityRow label="Frames" value={estimate.frames} />
+                <QuantityRow label="Planks" value={estimate.planks} />
+                <QuantityRow label="Cross Braces" value={estimate.crossBraces} />
+                <QuantityRow label="Guardrails" value={estimate.guardrails} />
+                <QuantityRow label="Base Plates" value={estimate.basePlates} />
+                <QuantityRow label="Screw Jacks" value={estimate.screwJacks} />
               </ReviewBlock>
 
               <ReviewBlock title="Labor / Operations Summary">
@@ -588,9 +662,9 @@ export default function EstimateReviewPage() {
                 <QuantityRow label="Dismantle Days" value={dismantleDays} />
                 <QuantityRow label="Install Laborer-Days" value={totals.installLaborerDays} />
                 <QuantityRow label="Dismantle Laborer-Days" value={totals.dismantleLaborerDays} />
-                <QuantityRow label="Truck Loads" value={baseEstimate.truckLoads} />
-                <QuantityRow label="Delivery Trips" value={baseEstimate.deliveryTrips} />
-                <QuantityRow label="Pickup Trips" value={baseEstimate.pickupTrips} />
+                <QuantityRow label="Truck Loads" value={estimate.truckLoads} />
+                <QuantityRow label="Delivery Trips" value={estimate.deliveryTrips} />
+                <QuantityRow label="Pickup Trips" value={estimate.pickupTrips} />
               </ReviewBlock>
             </div>
 
@@ -613,6 +687,8 @@ export default function EstimateReviewPage() {
             />
 
             <CostInputsSection
+              frames={estimate.frames}
+              planks={estimate.planks}
               frameRate={frameRate}
               setFrameRate={setFrameRate}
               plankRate={plankRate}
@@ -701,19 +777,19 @@ export default function EstimateReviewPage() {
 
         <aside className="space-y-5">
           <PreProposalPanel
-            projectName={baseEstimate.projectName}
-            projectAddress={baseEstimate.projectAddress}
-            customer={baseEstimate.customer}
-            contactName={baseEstimate.contactName}
-            contactEmail={baseEstimate.contactEmail}
-            contactPhone={baseEstimate.contactPhone}
-            estimator={baseEstimate.estimator}
-            unionStatus={baseEstimate.unionStatus}
+            projectName={estimate.projectName}
+            projectAddress={estimate.projectAddress}
+            customer={estimate.customer}
+            contactName={estimate.contactName}
+            contactEmail={estimate.contactEmail}
+            contactPhone={estimate.contactPhone}
+            estimator={estimate.estimator}
+            unionStatus={estimate.unionStatus}
             bidRoundPhase={bidRoundPhase}
-            projectType={baseEstimate.projectType}
-            totalLinearFeet={baseEstimate.totalLinearFeet}
-            frames={baseEstimate.frames}
-            planks={baseEstimate.planks}
+            projectType={estimate.projectType}
+            totalLinearFeet={estimate.totalLinearFeet}
+            frames={estimate.frames}
+            planks={estimate.planks}
             rentalDays={rentalDays}
             rentalMonths={rentalMonths}
             rentalRevenue={totals.rentalRevenue}
@@ -792,7 +868,7 @@ function PreProposalPanel({
   miscRevenue: number;
   alternateRevenue: number;
   finalBid: number;
-  approvedAlternates: string[];
+  approvedAlternates: number[];
 }) {
   return (
     <section className="rounded-[2rem] border border-zinc-700 bg-zinc-800/40 p-5 shadow-2xl">
@@ -1093,6 +1169,8 @@ function RentalDurationSection({
 }
 
 function CostInputsSection({
+  frames,
+  planks,
   frameRate,
   setFrameRate,
   plankRate,
@@ -1125,6 +1203,8 @@ function CostInputsSection({
   blendedLaborRate,
   laborCost,
 }: {
+  frames: number;
+  planks: number;
   frameRate: number;
   setFrameRate: (value: number) => void;
   plankRate: number;
@@ -1170,18 +1250,18 @@ function CostInputsSection({
         <InputGroup title="Standard Material Inputs" source="Backend > Material Pricing">
           <RateInputRow
             label="Frames"
-            quantity={baseEstimate.frames}
+            quantity={frames}
             rate={frameRate}
             onChange={setFrameRate}
-            total={baseEstimate.frames * frameRate}
+            total={frames * frameRate}
           />
 
           <RateInputRow
             label="Planks"
-            quantity={baseEstimate.planks}
+            quantity={planks}
             rate={plankRate}
             onChange={setPlankRate}
-            total={baseEstimate.planks * plankRate}
+            total={planks * plankRate}
           />
 
           <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
