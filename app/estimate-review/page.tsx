@@ -236,6 +236,7 @@ const addAlternates = [
 ];
 
 export default function EstimateReviewPage() {
+  const [menuOpen, setMenuOpen] = useState(false);
   const [rentalDuration, setRentalDuration] = useState<RentalDuration>("30 Days");
   const [customRentalDays, setCustomRentalDays] = useState("45");
   const [proposalStatus, setProposalStatus] = useState<ProposalStatus>("Draft");
@@ -485,12 +486,33 @@ export default function EstimateReviewPage() {
     <main className="min-h-screen bg-[#080604] text-white">
       <section className="border-b border-orange-500/20 bg-black px-8 py-5">
         <div className="flex items-center justify-between gap-5">
-          <div>
-            <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
-            <h1 className="mt-2 text-3xl font-bold">Estimate Review</h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              Finalize estimate numbers, approve proposal content, and submit price to client.
-            </p>
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <button
+                onClick={() => setMenuOpen((current) => !current)}
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/10 text-orange-400 hover:bg-orange-500/20"
+              >
+                ▾
+              </button>
+
+              {menuOpen && (
+                <div className="absolute left-0 top-12 z-[999] w-56 rounded-2xl border border-orange-500/20 bg-black p-2 shadow-2xl">
+                  <a href="/" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Bid Room</a>
+                  <a href="/takeoff-workspace" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Takeoff Workspace</a>
+                  <a href="/projects" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Projects</a>
+                  <a href="/backend" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Backend</a>
+                  <a href="/settings" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Settings</a>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
+              <h1 className="mt-2 text-3xl font-bold">Estimate Review</h1>
+              <p className="mt-1 text-sm text-zinc-500">
+                Finalize estimate numbers, approve proposal content, and submit price to client.
+              </p>
+            </div>
           </div>
 
           <div className="flex items-center gap-3">
@@ -513,7 +535,7 @@ export default function EstimateReviewPage() {
         </div>
       </section>
 
-      <section className="grid gap-5 p-6 xl:grid-cols-[minmax(0,1fr)_420px] 2xl:grid-cols-[minmax(0,1fr)_480px]">
+      <section className="grid gap-5 p-6 xl:grid-cols-[minmax(0,6.5fr)_minmax(280px,2.5fr)_minmax(150px,1fr)]">
         <section className="space-y-5">
           <ProposalSheet>
             <div className="flex items-start justify-between gap-6 border-b border-zinc-800 pb-5">
@@ -533,22 +555,6 @@ export default function EstimateReviewPage() {
                 <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-zinc-500">Bid Date</p>
                 <p className="mt-1 font-mono text-sm text-zinc-300">{baseEstimate.bidDate}</p>
               </div>
-            </div>
-
-            <div className="mt-5 grid gap-5 md:grid-cols-2">
-              <ReviewBlock title="Project Information">
-                <InfoRow label="Project Type" value={baseEstimate.projectType} />
-                <InfoRow label="Estimator" value={baseEstimate.estimator} />
-                <InfoRow label="Union Status" value={baseEstimate.unionStatus} />
-                <InfoRow label="Bid Round Phase" value={bidRoundPhase} />
-              </ReviewBlock>
-
-              <ReviewBlock title="Customer Information">
-                <InfoRow label="Customer" value={baseEstimate.customer} />
-                <InfoRow label="Contact" value={baseEstimate.contactName} />
-                <InfoRow label="Email" value={baseEstimate.contactEmail} />
-                <InfoRow label="Phone" value={baseEstimate.contactPhone} />
-              </ReviewBlock>
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-3">
@@ -668,8 +674,56 @@ export default function EstimateReviewPage() {
                 className="mt-4 min-h-28 w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-6 text-zinc-300 outline-none focus:border-orange-500/40"
               />
             </div>
+
+            <div className="mt-5 grid gap-5 xl:grid-cols-2">
+              <InternalReviewCard
+                rentalDays={rentalDays}
+                rentalMonths={rentalMonths}
+                proposalStatus={proposalStatus}
+                approvedAlternateCount={approvedAlternates.length}
+                finalBid={totals.finalBid}
+                activeRevision={activeRevision}
+                bidRoundPhase={bidRoundPhase}
+                setBidRoundPhase={setBidRoundPhase}
+                blendedLaborRate={totals.blendedLaborRate}
+                productionType={productionType}
+              />
+
+              <ProposalActionCard
+                proposalStatus={proposalStatus}
+                setProposalStatus={setProposalStatus}
+                approveProposal={approveProposal}
+                submitPrice={submitPrice}
+              />
+            </div>
           </ProposalSheet>
         </section>
+
+        <aside className="space-y-5">
+          <PreProposalPanel
+            projectName={baseEstimate.projectName}
+            projectAddress={baseEstimate.projectAddress}
+            customer={baseEstimate.customer}
+            contactName={baseEstimate.contactName}
+            contactEmail={baseEstimate.contactEmail}
+            contactPhone={baseEstimate.contactPhone}
+            estimator={baseEstimate.estimator}
+            unionStatus={baseEstimate.unionStatus}
+            bidRoundPhase={bidRoundPhase}
+            projectType={baseEstimate.projectType}
+            totalLinearFeet={baseEstimate.totalLinearFeet}
+            frames={baseEstimate.frames}
+            planks={baseEstimate.planks}
+            rentalDays={rentalDays}
+            rentalMonths={rentalMonths}
+            rentalRevenue={totals.rentalRevenue}
+            laborRevenue={laborRevenue}
+            miscRevenue={miscRevenue}
+            alternateRevenue={totals.alternateRevenue}
+            finalBid={totals.finalBid}
+            approvedAlternates={approvedAlternates}
+          />
+        </aside>
 
         <aside className="space-y-5">
           <RevenuePanel
@@ -688,36 +742,195 @@ export default function EstimateReviewPage() {
             finalBid={totals.finalBid}
             rentalMonths={rentalMonths}
           />
-
-          <InternalReviewCard
-            rentalDays={rentalDays}
-            rentalMonths={rentalMonths}
-            proposalStatus={proposalStatus}
-            approvedAlternateCount={approvedAlternates.length}
-            finalBid={totals.finalBid}
-            activeRevision={activeRevision}
-            bidRoundPhase={bidRoundPhase}
-            setBidRoundPhase={setBidRoundPhase}
-            blendedLaborRate={totals.blendedLaborRate}
-            productionType={productionType}
-          />
-
-          <ProposalActionCard
-            proposalStatus={proposalStatus}
-            setProposalStatus={setProposalStatus}
-            approveProposal={approveProposal}
-            submitPrice={submitPrice}
-          />
         </aside>
       </section>
     </main>
   );
 }
 
+
+function PreProposalPanel({
+  projectName,
+  projectAddress,
+  customer,
+  contactName,
+  contactEmail,
+  contactPhone,
+  estimator,
+  unionStatus,
+  bidRoundPhase,
+  projectType,
+  totalLinearFeet,
+  frames,
+  planks,
+  rentalDays,
+  rentalMonths,
+  rentalRevenue,
+  laborRevenue,
+  miscRevenue,
+  alternateRevenue,
+  finalBid,
+  approvedAlternates,
+}: {
+  projectName: string;
+  projectAddress: string;
+  customer: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  estimator: string;
+  unionStatus: string;
+  bidRoundPhase: BidRoundPhase;
+  projectType: string;
+  totalLinearFeet: number;
+  frames: number;
+  planks: number;
+  rentalDays: number;
+  rentalMonths: number;
+  rentalRevenue: number;
+  laborRevenue: number;
+  miscRevenue: number;
+  alternateRevenue: number;
+  finalBid: number;
+  approvedAlternates: string[];
+}) {
+  return (
+    <section className="rounded-[2rem] border border-zinc-700 bg-zinc-800/40 p-5 shadow-2xl">
+      <div className="rounded-3xl border border-zinc-700 bg-zinc-900/90 p-5">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-orange-400">
+              Proposal Preview
+            </p>
+            <h2 className="mt-2 text-xl font-bold text-white">{projectName}</h2>
+            <p className="mt-1 text-xs text-zinc-500">{customer}</p>
+          </div>
+
+          <div className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-right">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Status</p>
+            <p className="font-mono text-xs font-bold text-orange-300">Draft</p>
+          </div>
+        </div>
+
+        <div className="mt-5 space-y-4">
+          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Project Information
+            </h3>
+            <div className="mt-3 space-y-2">
+              <InfoRow label="Project" value={projectName} />
+              <InfoRow label="Address" value={projectAddress} />
+              <InfoRow label="Project Type" value={projectType} />
+              <InfoRow label="Estimator" value={estimator} />
+              <InfoRow label="Union Status" value={unionStatus} />
+              <InfoRow label="Bid Round Phase" value={bidRoundPhase} />
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Customer Information
+            </h3>
+            <div className="mt-3 space-y-2">
+              <InfoRow label="Customer" value={customer} />
+              <InfoRow label="Contact" value={contactName} />
+              <InfoRow label="Email" value={contactEmail} />
+              <InfoRow label="Phone" value={contactPhone} />
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Customer Scope
+            </h3>
+            <div className="mt-3 space-y-2">
+              <InfoRow label="Scaffold Type" value={projectType} />
+              <InfoRow label="Total Coverage" value={`${formatNumber(totalLinearFeet)} LF`} />
+              <InfoRow label="Rental Duration" value={`${rentalDays} Days / ${rentalMonths} Mo.`} />
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Included In Proposal
+            </h3>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+              <ProposalMiniTile label="Frames" value={formatNumber(frames)} />
+              <ProposalMiniTile label="Planks" value={formatNumber(planks)} />
+              <ProposalMiniTile label="Install" value="Included" />
+              <ProposalMiniTile label="Dismantle" value="Included" />
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Add Alternates
+            </h3>
+            <div className="mt-3 space-y-2">
+              {approvedAlternates.length ? (
+                approvedAlternates.map((alternate, index) => (
+                  <div key={alternate} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs">
+                    <span className="text-zinc-400">Add Alternate #{index + 1}</span>
+                    <span className="text-right font-bold text-zinc-200">{alternate}</span>
+                  </div>
+                ))
+              ) : (
+                <p className="rounded-xl border border-zinc-800 bg-black px-3 py-3 text-xs text-zinc-600">
+                  No add alternates selected.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">
+              Proposal Figures
+            </h3>
+            <div className="mt-3 space-y-2">
+              <ProposalFigure label="Rental" value={rentalRevenue} />
+              <ProposalFigure label="Labor" value={laborRevenue} />
+              <ProposalFigure label="Misc" value={miscRevenue} />
+              <ProposalFigure label="Alternates" value={alternateRevenue} />
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-orange-500/30 bg-orange-500/10 p-5 text-center">
+            <p className="text-[10px] uppercase tracking-[0.22em] text-orange-300/70">
+              Proposal Total
+            </p>
+            <p className="mt-2 font-mono text-3xl font-black text-orange-300">
+              {formatMoney(finalBid)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProposalMiniTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-black p-3">
+      <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
+      <p className="mt-1 font-mono text-xs font-bold text-zinc-200">{value}</p>
+    </div>
+  );
+}
+
+function ProposalFigure({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-center justify-between border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
+      <span className="text-xs text-zinc-500">{label}</span>
+      <span className="font-mono text-xs font-bold text-zinc-200">{formatMoney(value)}</span>
+    </div>
+  );
+}
+
+
 function ProposalSheet({ children }: { children: React.ReactNode }) {
   return (
-    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-6 shadow-2xl">
-      <div className="mx-auto max-w-[980px] rounded-[1.5rem] border border-zinc-800 bg-[#090909] p-6">
+    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-4 shadow-2xl">
+      <div className="rounded-[1.5rem] border border-zinc-800 bg-[#090909] p-4">
         {children}
       </div>
     </section>
@@ -1556,53 +1769,59 @@ function RevenuePanel({
   rentalMonths: number;
 }) {
   return (
-    <section className="rounded-[2rem] border border-orange-500/25 bg-orange-500/10 p-5 shadow-2xl">
-      <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-300">
-        Revenue / Profit Panel
+    <section className="rounded-[2rem] border border-orange-500/25 bg-orange-500/10 p-3 shadow-2xl">
+      <h2 className="text-[11px] font-bold uppercase tracking-[0.2em] text-orange-300">
+        Revenue Review
       </h2>
-      <p className="mt-1 text-xs text-orange-200/60">
-        Rental revenue is shown by month, while projected profit focuses on labor.
-      </p>
 
-      <div className="mt-5 space-y-3">
-        <RevenueStatic label={`Rental Revenue (${rentalMonths} month(s))`} value={rentalRevenue} />
-        <RevenueStatic label="Monthly Rental Base" value={baseMonthlyRentalRevenue} muted />
-        <RevenueInput label="Labor Revenue" value={laborRevenue} onChange={setLaborRevenue} />
-        <RevenueInput label="Misc. Revenue" value={miscRevenue} onChange={setMiscRevenue} />
-        <RevenueStatic label="Alternate Revenue" value={alternateRevenue} />
+      <div className="mt-3 rounded-2xl border border-orange-500/25 bg-black p-3">
+        <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">
+          Output
+        </p>
+        <p className="mt-1 text-[10px] leading-4 text-orange-200/55">
+          Internal revenue and profit snapshot.
+        </p>
+      </div>
 
-        <div className="my-4 h-px bg-orange-500/30" />
+      <div className="mt-3 space-y-2">
+        <RevenueStatic label={`Rental (${rentalMonths} Mo.)`} value={rentalRevenue} />
+        <RevenueStatic label="Monthly Base" value={baseMonthlyRentalRevenue} muted />
+        <RevenueInput label="Labor Rev." value={laborRevenue} onChange={setLaborRevenue} />
+        <RevenueInput label="Misc Rev." value={miscRevenue} onChange={setMiscRevenue} />
+        <RevenueStatic label="Alt. Rev." value={alternateRevenue} />
+
+        <div className="my-3 h-px bg-orange-500/30" />
 
         <RevenueStatic label="Material Cost" value={materialCost} muted />
         <RevenueStatic label="Labor Cost" value={laborCost} muted />
-        <RevenueStatic label="Misc. Cost" value={miscCost} muted />
+        <RevenueStatic label="Misc Cost" value={miscCost} muted />
 
-        <div className="my-4 h-px bg-orange-500/30" />
+        <div className="my-3 h-px bg-orange-500/30" />
 
-        <div className="rounded-3xl border border-orange-500/40 bg-black p-5">
-          <p className="text-xs uppercase tracking-[0.22em] text-orange-300/70">
-            Projected Labor Profit
+        <div className="rounded-2xl border border-orange-500/35 bg-black p-3">
+          <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">
+            Labor Profit
           </p>
-          <p className="mt-2 font-mono text-3xl font-bold text-orange-400">
+          <p className="mt-1 font-mono text-lg font-bold text-orange-400">
             {formatMoney(projectedLaborProfit)}
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="rounded-2xl border border-orange-500/25 bg-black p-4">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">
-              Labor Margin
+        <div className="grid gap-2">
+          <div className="rounded-2xl border border-orange-500/25 bg-black p-3">
+            <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">
+              Margin
             </p>
-            <p className="mt-2 font-mono text-xl font-bold text-orange-400">
+            <p className="mt-1 font-mono text-base font-bold text-orange-400">
               {projectedLaborMargin.toFixed(1)}%
             </p>
           </div>
 
-          <div className="rounded-2xl border border-orange-500/25 bg-black p-4">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">
+          <div className="rounded-2xl border border-orange-500/25 bg-black p-3">
+            <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">
               Final Bid
             </p>
-            <p className="mt-2 font-mono text-xl font-bold text-orange-400">
+            <p className="mt-1 font-mono text-base font-bold text-orange-400">
               {formatMoney(finalBid)}
             </p>
           </div>
@@ -1624,21 +1843,24 @@ function RevenueInput({
   return (
     <div className="rounded-2xl border border-orange-500/20 bg-black p-3">
       <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">{label}</p>
-      <input
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value || 0))}
-        type="number"
-        className="mt-2 w-full rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/50"
-      />
+      <div className="mt-2 flex items-center rounded-xl border border-orange-500/20 bg-orange-500/10 px-2">
+        <span className="font-mono text-xs font-bold text-orange-300">$</span>
+        <input
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value || 0))}
+          type="number"
+          className="w-full bg-transparent px-2 py-2 text-right font-mono text-xs font-bold text-orange-300 outline-none"
+        />
+      </div>
     </div>
   );
 }
 
 function RevenueStatic({ label, value, muted = false }: { label: string; value: number; muted?: boolean }) {
   return (
-    <div className="flex items-center justify-between rounded-2xl border border-orange-500/20 bg-black p-3">
-      <span className={`text-xs ${muted ? "text-orange-200/45" : "text-orange-300/70"}`}>{label}</span>
-      <span className="font-mono text-sm font-bold text-orange-400">{formatMoney(value)}</span>
+    <div className="rounded-2xl border border-orange-500/20 bg-black p-3">
+      <span className={`block text-[10px] leading-4 ${muted ? "text-orange-200/45" : "text-orange-300/70"}`}>{label}</span>
+      <span className="mt-1 block font-mono text-xs font-bold text-orange-400">{formatMoney(value)}</span>
     </div>
   );
 }
