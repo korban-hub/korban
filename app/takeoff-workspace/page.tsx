@@ -1,6 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  calculateQuantityEngine,
+  getActiveElevation,
+  getActiveProject,
+  getActiveProjectId,
+  hasTakeoffOverlayGeometry,
+  saveActiveElevation,
+  saveActiveProject,
+  setActiveProjectId,
+  type ProjectElevation,
+} from "@/lib/projectStore";
 
 type Point = { x: number; y: number };
 type PickTarget =
@@ -263,7 +274,7 @@ export default function TakeoffWorkspace() {
 
   const [fullOverlayRows, setFullOverlayRows] = useState<FullOverlayRow[]>([
     {
-      id: Date.now(),
+      id: 1,
       isKeyFloor: true,
       overlayType: "Level",
       level: "Level 2",
@@ -281,6 +292,7 @@ export default function TakeoffWorkspace() {
   );
   const [activeElevation, setActiveElevation] =
     useState<ElevationName>("North");
+  const [activeProjectName, setActiveProjectName] = useState("Takeoff Workspace Draft");
   const [duplicateElevationRefs, setDuplicateElevationRefs] = useState<Record<"North" | "East", boolean>>({
     North: false,
     East: false,
@@ -330,6 +342,108 @@ export default function TakeoffWorkspace() {
       elevationHeights[0],
     [activeElevation, elevationHeights],
   );
+
+  useEffect(() => {
+    setActiveProjectId(getActiveProjectId());
+    setActiveProjectName(getActiveProject().projectName || "Takeoff Workspace Draft");
+  }, []);
+
+  function buildWorkspaceElevation(
+    elevation: ElevationName,
+    refs: ElevationReference[] = elevationRefs,
+    heights: ElevationHeight[] = elevationHeights,
+    overlayRows: FullOverlayRow[] = fullOverlayRows,
+  ): ProjectElevation {
+    const ref = refs.find((item) => item.elevation === elevation) ?? refs[0];
+    const height = heights.find((item) => item.elevation === elevation) ?? heights[0];
+    const levelRow = overlayRows.find((row) => row.isKeyFloor) ?? overlayRows[0];
+    const currentKeyFloorLf = levelRow?.linealFeet ?? 0;
+    const currentTotalElevationLf = refs.reduce((sum, item) => sum + item.linealFeet, 0);
+    const manualLinearFeet = ref ? parseFeetInches(ref.manualLinealFeetInput) : null;
+    const enteredWallHeight = height ? getHeightWithBelowGrade(height) : 0;
+    const linearFeetSource =
+      manualLinearFeet && manualLinearFeet > 0
+        ? manualLinearFeet
+        : ref?.linealFeet || currentKeyFloorLf || currentTotalElevationLf || 0;
+    const linearFeet = Math.round(linearFeetSource);
+    const wallHeight = enteredWallHeight || getAverageExteriorHeight(heights);
+    const scaffoldInput = {
+      scaffoldWidth: 3,
+      standardBayLength: 10,
+      frameHeight: 6 + 4 / 12,
+      plankCountPerBay: 2,
+      bracePattern: "Every Bay",
+      wallOffset: 1,
+    };
+    const quantityEngine = calculateQuantityEngine({
+      linearFeet,
+      wallHeight,
+      ...scaffoldInput,
+    });
+    const scale = {
+      keyFloorLf: currentKeyFloorLf,
+      source: ref?.source ?? "Not Set",
+      pageUnitsPerFoot,
+      scalePoints,
+      knownScaleFeet,
+    };
+    const activeFullOverlayPoints = levelRow?.points ?? [];
+    const overlayGeometry = {
+      elevationName: elevation,
+      levelName: levelRow?.level || "Main Level",
+      tracedPerimeter: activeFullOverlayPoints,
+      overlayPoints: activeFullOverlayPoints,
+      wallSegments: refs.filter((item) => item.points.length >= 2).map((item) => item.points),
+      referencePoints: scalePoints,
+      elevationPoints: ref?.points ?? [],
+      fullOverlayRows: overlayRows,
+      elevationRefs: refs,
+      elevationHeights: heights,
+      scale,
+    };
+
+    return {
+      elevationId: `${elevation.toLowerCase()}-elevation`,
+      elevationName: elevation,
+      levelName: overlayGeometry.levelName,
+      linearFeet,
+      wallHeight,
+      phase: "Main",
+      mobilization: "Base Bid",
+      overlayGeometry,
+      scale,
+      scaffoldInput,
+      quantityEngine,
+      sectionView: {
+        frameMakeup: "5 x 6'-4\" + 1 x 5'-0\" + 1 x 3'-0\"",
+        selectedRun: `Run ${elevation.slice(0, 1)}-01`,
+        wallOffset: scaffoldInput.wallOffset,
+        sectionType: "A-A",
+      },
+    };
+  }
+
+  function saveWorkspaceElevation(
+    elevation: ElevationName = activeElevation,
+    refs: ElevationReference[] = elevationRefs,
+    heights: ElevationHeight[] = elevationHeights,
+    overlayRows: FullOverlayRow[] = fullOverlayRows,
+  ) {
+    const project = getActiveProject();
+    const nextElevation = buildWorkspaceElevation(elevation, refs, heights, overlayRows);
+    if (!nextElevation.linearFeet || nextElevation.linearFeet <= 0) {
+      console.warn("TAKEOFF SAVING LF: skipped invalid LF", nextElevation.linearFeet);
+      return;
+    }
+    console.log("TAKEOFF SAVING LF:", nextElevation.linearFeet);
+    saveActiveProject({
+      ...project,
+      projectName: project.projectName || "Takeoff Workspace Draft",
+      estimator: project.estimator || "H. Pierre",
+    });
+    saveActiveElevation(nextElevation);
+    console.log("VERIFY AFTER USER SAVE", getActiveElevation());
+  }
 
   async function handlePdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -535,8 +649,7 @@ export default function TakeoffWorkspace() {
     }
 
     if (pickTarget.type === "full") {
-      setFullOverlayRows((current) =>
-        current.map((row) =>
+      const nextFullOverlayRows = fullOverlayRows.map((row) =>
           row.id === pickTarget.id
             ? {
                 ...row,
@@ -546,8 +659,9 @@ export default function TakeoffWorkspace() {
                 pageNumber,
               }
             : row,
-        ),
       );
+      setFullOverlayRows(nextFullOverlayRows);
+      saveWorkspaceElevation(activeElevation, elevationRefs, elevationHeights, nextFullOverlayRows);
     }
 
     if (pickTarget.type === "elevation") {
@@ -583,7 +697,8 @@ source: "Manual" as const,
             )
           : nextElevationRefs;
 
-      const nextTotal = duplicatedElevationRefs.reduce(
+      const typedDuplicatedElevationRefs = duplicatedElevationRefs as ElevationReference[];
+      const nextTotal = typedDuplicatedElevationRefs.reduce(
         (sum, item) => sum + item.linealFeet,
         0,
       );
@@ -606,7 +721,8 @@ source: "Manual" as const,
         }
       }
 
-setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
+      setElevationRefs(typedDuplicatedElevationRefs);
+      saveWorkspaceElevation(pickTarget.elevation, typedDuplicatedElevationRefs, elevationHeights);
     }
 
     if (pickTarget.type === "heightOverall") {
@@ -730,7 +846,8 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
           )
         : nextElevationRefs;
 
-    const nextTotal = duplicatedElevationRefs.reduce(
+    const typedDuplicatedElevationRefs = duplicatedElevationRefs as ElevationReference[];
+    const nextTotal = typedDuplicatedElevationRefs.reduce(
       (sum, item) => sum + item.linealFeet,
       0,
     );
@@ -751,7 +868,8 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       if (redo) return;
     }
 
-setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
+    setElevationRefs(typedDuplicatedElevationRefs);
+    saveWorkspaceElevation(elevation, typedDuplicatedElevationRefs, elevationHeights);
   }
 
   function updateElevationHeight(
@@ -830,13 +948,18 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       overallHeightInput: nextItem.overallHeightInput,
     });
     duplicateHeightToOpposite(elevation, nextItem);
+    saveWorkspaceElevation(
+      elevation,
+      elevationRefs,
+      elevationHeights.map((item) => (item.elevation === elevation ? nextItem : item)),
+    );
   }
 
   function storeManualAreaHeight(elevation: ElevationName, areaId: string) {
     const currentElevation = elevationHeights.find((item) => item.elevation === elevation);
     const currentArea = currentElevation?.areas.find((area) => area.id === areaId);
 
-    if (!currentArea) return;
+    if (!currentElevation || !currentArea) return;
 
     const parsed = parseFeetInches(currentArea.heightInput);
 
@@ -854,6 +977,11 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       heightInput: formatFeetInches(parsed),
     });
     duplicateHeightToOpposite(elevation, nextItem);
+    saveWorkspaceElevation(
+      elevation,
+      elevationRefs,
+      elevationHeights.map((item) => (item.elevation === elevation ? nextItem : item)),
+    );
   }
 
   function saveToEstimateReview() {
@@ -862,14 +990,15 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       elevationRefs,
       elevationHeights,
     };
-    const activeProjectId = "takeoff-draft";
-    const totalLinearFeet = Math.round(keyFloorLf || totalElevationLf || 0);
+    const activeProjectId = getActiveProjectId();
+    const sharedElevation = buildWorkspaceElevation(activeElevation);
+    const totalLinearFeet = sharedElevation.linearFeet;
     const averageExteriorHeight = getAverageExteriorHeight(elevationHeights);
-    const bays = Math.max(0, Math.ceil(totalLinearFeet / 10));
-    const legs = bays > 0 ? bays + 1 : 0;
-    const jumps = Math.max(1, Math.ceil(averageExteriorHeight / (6 + 4 / 12)));
-    const frames = bays * jumps;
-    const planks = bays * 5;
+    const bays = sharedElevation.quantityEngine.bayCount;
+    const legs = sharedElevation.quantityEngine.legCount;
+    const jumps = sharedElevation.quantityEngine.jumps;
+    const frames = sharedElevation.quantityEngine.frameCount;
+    const planks = sharedElevation.quantityEngine.plankCount;
     const truckLoads = planks > 0 ? Math.ceil(planks / 150) : 0;
     const tripCount = truckLoads > 0 ? Math.max(1, Math.ceil(truckLoads / 2)) : 0;
     const estimateDraft = {
@@ -891,10 +1020,10 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       jumps,
       frames,
       planks,
-      crossBraces: frames,
-      guardrails: bays * 3,
-      basePlates: legs,
-      screwJacks: legs,
+      crossBraces: sharedElevation.quantityEngine.crossBraceCount,
+      guardrails: sharedElevation.quantityEngine.guardrailCount,
+      basePlates: sharedElevation.quantityEngine.basePlateCount,
+      screwJacks: sharedElevation.quantityEngine.screwJackCount,
       erectDays: 0,
       dismantleDays: 0,
       truckLoads,
@@ -920,8 +1049,8 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       storedProjectEstimates = {};
     }
 
+    saveWorkspaceElevation(activeElevation);
     localStorage.setItem("korbanTakeoffHub", JSON.stringify(payload));
-    localStorage.setItem("korbanActiveProjectId", activeProjectId);
     localStorage.setItem(
       "korbanProjectEstimates_v1",
       JSON.stringify({
@@ -976,6 +1105,8 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
       </svg>
     );
   }
+
+  const debugElevation = buildWorkspaceElevation(activeElevation);
 
   return (
     <main className="h-screen overflow-hidden bg-zinc-950 text-white">
@@ -1051,7 +1182,9 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
         </div>
       </header>
 
-      <section className="flex h-[calc(100vh-64px)] flex-col bg-[#070707]">
+      <ProjectDebugStrip projectName={activeProjectName} elevation={debugElevation} />
+
+      <section className="flex h-[calc(100vh-92px)] flex-col bg-[#070707]">
         <div className="border-b border-orange-500/20 bg-black/80 px-6 py-4">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -1357,6 +1490,26 @@ setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
         </div>
       </section>
     </main>
+  );
+}
+
+function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation }) {
+  const quantity = elevation.quantityEngine;
+  const overlayExists = hasTakeoffOverlayGeometry(elevation);
+
+  return (
+    <div className="border-b border-orange-500/20 bg-black px-6 py-2 font-mono text-[11px] text-zinc-400">
+      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
+      <span className="text-orange-300">{projectName}</span> | Level:{" "}
+      <span className="text-orange-300">{elevation.levelName ?? "Main Level"}</span> | Active Elevation:{" "}
+      <span className="text-orange-300">{elevation.elevationName}</span> | LF:{" "}
+      <span className="text-orange-300">{elevation.linearFeet}</span> | Height:{" "}
+      <span className="text-orange-300">{elevation.wallHeight}</span> | Bays:{" "}
+      <span className="text-orange-300">{quantity.bayCount}</span> | Legs:{" "}
+      <span className="text-orange-300">{quantity.legCount}</span> | Frames:{" "}
+      <span className="text-orange-300">{quantity.frameCount}</span> | overlayGeometry exists ={" "}
+      <span className="text-orange-300">{String(overlayExists)}</span>
+    </div>
   );
 }
 

@@ -1,6 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  getActiveElevation,
+  getActiveProject,
+  getActiveProjectId,
+  hasTakeoffOverlayGeometry,
+  type ProjectElevation,
+} from "@/lib/projectStore";
 
 type RentalDuration = "30 Days" | "60 Days" | "90 Days" | "120 Days" | "Custom";
 type ProposalStatus = "Draft" | "Internal Review" | "Ready To Send" | "Submitted";
@@ -124,6 +131,8 @@ const baseEstimate = {
   deliveryTrips: 2,
   pickupTrips: 2,
 };
+
+type EstimateData = typeof baseEstimate;
 
 const standardMaterialInputs = [
   {
@@ -263,6 +272,52 @@ export default function EstimateReviewPage() {
   const [proposalNotes, setProposalNotes] = useState(
     "Proposal includes furnishing, erecting, maintaining, and dismantling frame scaffold based on provided bid documents and current KORBAN takeoff assumptions."
   );
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [storedEstimate, setStoredEstimate] = useState<EstimateData | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState(baseEstimate.projectName);
+  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
+
+  useEffect(() => {
+    function loadStoredEstimate() {
+      const project = getActiveProject();
+      const elevation = getActiveElevation();
+      const quantityEngine = elevation.quantityEngine;
+      console.log("ESTIMATE REVIEW LOADED LF:", elevation.linearFeet);
+      setActiveProjectName(project.projectName || baseEstimate.projectName);
+      setActiveElevationData(elevation);
+
+      setStoredEstimate({
+        ...baseEstimate,
+        projectName: project.projectName || baseEstimate.projectName,
+        projectAddress: project.projectAddress || baseEstimate.projectAddress,
+        customer: project.customer || baseEstimate.customer,
+        estimator: project.estimator || baseEstimate.estimator,
+        totalLinearFeet: elevation.linearFeet ?? baseEstimate.totalLinearFeet,
+        bays: quantityEngine.bayCount ?? baseEstimate.bays,
+        legs: quantityEngine.legCount ?? baseEstimate.legs,
+        jumps: quantityEngine.jumps ?? baseEstimate.jumps,
+        frames: quantityEngine.frameCount ?? baseEstimate.frames,
+        planks: quantityEngine.plankCount ?? baseEstimate.planks,
+        crossBraces: quantityEngine.crossBraceCount ?? baseEstimate.crossBraces,
+        guardrails: quantityEngine.guardrailCount ?? baseEstimate.guardrails,
+        basePlates: quantityEngine.basePlateCount ?? baseEstimate.basePlates,
+        screwJacks: quantityEngine.screwJackCount ?? baseEstimate.screwJacks,
+      });
+      setIsHydrated(true);
+    }
+
+    const loadStoredEstimateDelay = window.setTimeout(loadStoredEstimate, 250);
+    window.addEventListener("focus", loadStoredEstimate);
+    window.addEventListener("pageshow", loadStoredEstimate);
+
+    return () => {
+      window.clearTimeout(loadStoredEstimateDelay);
+      window.removeEventListener("focus", loadStoredEstimate);
+      window.removeEventListener("pageshow", loadStoredEstimate);
+    };
+  }, []);
+
+  const estimate = storedEstimate ?? baseEstimate;
 
   const rentalDays =
     rentalDuration === "Custom" ? Number(customRentalDays || 0) : Number(rentalDuration.split(" ")[0]);
@@ -287,8 +342,8 @@ export default function EstimateReviewPage() {
   );
 
   const totals = useMemo(() => {
-    const frameMaterialCost = baseEstimate.frames * frameRate;
-    const plankMaterialCost = baseEstimate.planks * plankRate;
+    const frameMaterialCost = estimate.frames * frameRate;
+    const plankMaterialCost = estimate.planks * plankRate;
     const standardMaterialCost = frameMaterialCost + plankMaterialCost;
 
     const extraMaterialCost = extraMaterialItems.reduce(
@@ -356,6 +411,8 @@ export default function EstimateReviewPage() {
     approvedAlternates,
     baseMonthlyRentalRevenue,
     effectiveLaborRates,
+    estimate.frames,
+    estimate.planks,
     extraMaterialItems,
     frameRate,
     installMix,
@@ -482,8 +539,13 @@ export default function EstimateReviewPage() {
     setProposalStatus("Ready To Send");
   }
 
+  if (!isHydrated) {
+    return <main className="min-h-screen bg-[#080604] text-white" />;
+  }
+
   return (
     <main className="min-h-screen bg-[#080604] text-white">
+      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
       <section className="border-b border-orange-500/20 bg-black px-8 py-5">
         <div className="flex items-center justify-between gap-5">
           <div className="flex items-center gap-3">
@@ -543,44 +605,44 @@ export default function EstimateReviewPage() {
                 <p className="text-xs font-bold uppercase tracking-[0.35em] text-orange-500">
                   Estimate Proposal Review
                 </p>
-                <h2 className="mt-3 text-3xl font-bold text-white">{baseEstimate.projectName}</h2>
-                <p className="mt-1 text-sm text-zinc-500">{baseEstimate.projectAddress}</p>
+                <h2 className="mt-3 text-3xl font-bold text-white">{estimate.projectName}</h2>
+                <p className="mt-1 text-sm text-zinc-500">{estimate.projectAddress}</p>
               </div>
 
               <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 text-right">
                 <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Proposal No.</p>
                 <p className="mt-1 font-mono text-sm font-bold text-orange-400">
-                  {baseEstimate.proposalNumber}
+                  {estimate.proposalNumber}
                 </p>
                 <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-zinc-500">Bid Date</p>
-                <p className="mt-1 font-mono text-sm text-zinc-300">{baseEstimate.bidDate}</p>
+                <p className="mt-1 font-mono text-sm text-zinc-300">{estimate.bidDate}</p>
               </div>
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-3">
-              <SummaryTile label="Total Linear Feet" value={formatNumber(baseEstimate.totalLinearFeet)} suffix="LF" />
-              <SummaryTile label="Frame Count" value={formatNumber(baseEstimate.frames)} />
-              <SummaryTile label="Plank Count" value={formatNumber(baseEstimate.planks)} />
+              <SummaryTile label="Total Linear Feet" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
+              <SummaryTile label="Frame Count" value={formatNumber(estimate.frames)} />
+              <SummaryTile label="Plank Count" value={formatNumber(estimate.planks)} />
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
               <ReviewBlock title="Scaffold Quantity Summary">
                 <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Legs" value={baseEstimate.legs} />
+                  <QuantityRow label="Legs" value={estimate.legs} />
                 </div>
 
                 <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Jumps" value={baseEstimate.jumps} />
+                  <QuantityRow label="Jumps" value={estimate.jumps} />
                 </div>
 
                 <div className="h-px bg-orange-500/25" />
 
-                <QuantityRow label="Frames" value={baseEstimate.frames} />
-                <QuantityRow label="Planks" value={baseEstimate.planks} />
-                <QuantityRow label="Cross Braces" value={baseEstimate.crossBraces} />
-                <QuantityRow label="Guardrails" value={baseEstimate.guardrails} />
-                <QuantityRow label="Base Plates" value={baseEstimate.basePlates} />
-                <QuantityRow label="Screw Jacks" value={baseEstimate.screwJacks} />
+                <QuantityRow label="Frames" value={estimate.frames} />
+                <QuantityRow label="Planks" value={estimate.planks} />
+                <QuantityRow label="Cross Braces" value={estimate.crossBraces} />
+                <QuantityRow label="Guardrails" value={estimate.guardrails} />
+                <QuantityRow label="Base Plates" value={estimate.basePlates} />
+                <QuantityRow label="Screw Jacks" value={estimate.screwJacks} />
               </ReviewBlock>
 
               <ReviewBlock title="Labor / Operations Summary">
@@ -588,9 +650,9 @@ export default function EstimateReviewPage() {
                 <QuantityRow label="Dismantle Days" value={dismantleDays} />
                 <QuantityRow label="Install Laborer-Days" value={totals.installLaborerDays} />
                 <QuantityRow label="Dismantle Laborer-Days" value={totals.dismantleLaborerDays} />
-                <QuantityRow label="Truck Loads" value={baseEstimate.truckLoads} />
-                <QuantityRow label="Delivery Trips" value={baseEstimate.deliveryTrips} />
-                <QuantityRow label="Pickup Trips" value={baseEstimate.pickupTrips} />
+                <QuantityRow label="Truck Loads" value={estimate.truckLoads} />
+                <QuantityRow label="Delivery Trips" value={estimate.deliveryTrips} />
+                <QuantityRow label="Pickup Trips" value={estimate.pickupTrips} />
               </ReviewBlock>
             </div>
 
@@ -615,8 +677,10 @@ export default function EstimateReviewPage() {
             <CostInputsSection
               frameRate={frameRate}
               setFrameRate={setFrameRate}
+              frameQuantity={estimate.frames}
               plankRate={plankRate}
               setPlankRate={setPlankRate}
+              plankQuantity={estimate.planks}
               standardMaterialCost={totals.standardMaterialCost}
               extraMaterialItems={extraMaterialItems}
               newMaterialChoice={newMaterialChoice}
@@ -701,19 +765,19 @@ export default function EstimateReviewPage() {
 
         <aside className="space-y-5">
           <PreProposalPanel
-            projectName={baseEstimate.projectName}
-            projectAddress={baseEstimate.projectAddress}
-            customer={baseEstimate.customer}
-            contactName={baseEstimate.contactName}
-            contactEmail={baseEstimate.contactEmail}
-            contactPhone={baseEstimate.contactPhone}
-            estimator={baseEstimate.estimator}
-            unionStatus={baseEstimate.unionStatus}
+            projectName={estimate.projectName}
+            projectAddress={estimate.projectAddress}
+            customer={estimate.customer}
+            contactName={estimate.contactName}
+            contactEmail={estimate.contactEmail}
+            contactPhone={estimate.contactPhone}
+            estimator={estimate.estimator}
+            unionStatus={estimate.unionStatus}
             bidRoundPhase={bidRoundPhase}
-            projectType={baseEstimate.projectType}
-            totalLinearFeet={baseEstimate.totalLinearFeet}
-            frames={baseEstimate.frames}
-            planks={baseEstimate.planks}
+            projectType={estimate.projectType}
+            totalLinearFeet={estimate.totalLinearFeet}
+            frames={estimate.frames}
+            planks={estimate.planks}
             rentalDays={rentalDays}
             rentalMonths={rentalMonths}
             rentalRevenue={totals.rentalRevenue}
@@ -792,7 +856,7 @@ function PreProposalPanel({
   miscRevenue: number;
   alternateRevenue: number;
   finalBid: number;
-  approvedAlternates: string[];
+  approvedAlternates: number[];
 }) {
   return (
     <section className="rounded-[2rem] border border-zinc-700 bg-zinc-800/40 p-5 shadow-2xl">
@@ -1092,11 +1156,33 @@ function RentalDurationSection({
   );
 }
 
+function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
+  const quantity = elevation?.quantityEngine;
+  const overlayExists = hasTakeoffOverlayGeometry(elevation);
+
+  return (
+    <div className="border-b border-orange-500/20 bg-black px-8 py-2 font-mono text-[11px] text-zinc-400">
+      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
+      <span className="text-orange-300">{projectName}</span> | Level:{" "}
+      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
+      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
+      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
+      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
+      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
+      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
+      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
+      <span className="text-orange-300">{String(overlayExists)}</span>
+    </div>
+  );
+}
+
 function CostInputsSection({
   frameRate,
   setFrameRate,
+  frameQuantity,
   plankRate,
   setPlankRate,
+  plankQuantity,
   standardMaterialCost,
   extraMaterialItems,
   newMaterialChoice,
@@ -1127,8 +1213,10 @@ function CostInputsSection({
 }: {
   frameRate: number;
   setFrameRate: (value: number) => void;
+  frameQuantity: number;
   plankRate: number;
   setPlankRate: (value: number) => void;
+  plankQuantity: number;
   standardMaterialCost: number;
   extraMaterialItems: ExtraMaterialItem[];
   newMaterialChoice: string;
@@ -1170,18 +1258,18 @@ function CostInputsSection({
         <InputGroup title="Standard Material Inputs" source="Backend > Material Pricing">
           <RateInputRow
             label="Frames"
-            quantity={baseEstimate.frames}
+            quantity={frameQuantity}
             rate={frameRate}
             onChange={setFrameRate}
-            total={baseEstimate.frames * frameRate}
+            total={frameQuantity * frameRate}
           />
 
           <RateInputRow
             label="Planks"
-            quantity={baseEstimate.planks}
+            quantity={plankQuantity}
             rate={plankRate}
             onChange={setPlankRate}
-            total={baseEstimate.planks * plankRate}
+            total={plankQuantity * plankRate}
           />
 
           <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">

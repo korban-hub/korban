@@ -1,6 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  getActiveElevation,
+  getActiveProject,
+  getActiveProjectId,
+  hasTakeoffOverlayGeometry,
+  type ProjectElevation,
+} from "@/lib/projectStore";
 
 type ToolName = "Notes" | "Callouts" | "Leaders" | "Highlight" | "Draw" | "Dimension" | "Erase" | "Select";
 
@@ -31,6 +38,43 @@ const tools: ToolName[] = ["Notes", "Callouts", "Leaders", "Highlight", "Draw", 
 export default function SectionViewPage() {
   const [activePart, setActivePart] = useState("6'-4\" Frame");
   const [activeTool, setActiveTool] = useState<ToolName>("Select");
+  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState("Mare Island Apartments");
+
+  useEffect(() => {
+    function loadActiveElevation() {
+      const elevation = getActiveElevation();
+      console.log("SECTION VIEW LOADED LF:", elevation.linearFeet);
+      setActiveElevationData(elevation);
+      setActiveProjectName(getActiveProject().projectName || "Mare Island Apartments");
+    }
+
+    loadActiveElevation();
+    window.addEventListener("focus", loadActiveElevation);
+    window.addEventListener("pageshow", loadActiveElevation);
+
+    return () => {
+      window.removeEventListener("focus", loadActiveElevation);
+      window.removeEventListener("pageshow", loadActiveElevation);
+    };
+  }, []);
+
+  const sharedFrameConfig = useMemo(() => {
+    if (!activeElevationData) return frameConfig;
+
+    return [
+      ["Frame Width", `${activeElevationData.scaffoldInput.scaffoldWidth}'-0"`],
+      ["Total Linear Ft", `${activeElevationData.linearFeet.toLocaleString()} LF`],
+      ["Frame Heights / Frame Makeup", activeElevationData.sectionView.frameMakeup],
+      ["Frames Tall", String(activeElevationData.quantityEngine.frameTall)],
+      ["Jumps", String(activeElevationData.quantityEngine.jumps)],
+      ["Plank Count", `${activeElevationData.scaffoldInput.plankCountPerBay} / Bay`],
+      ["Brace Pattern", activeElevationData.scaffoldInput.bracePattern],
+      ["Wall Offset", `${activeElevationData.scaffoldInput.wallOffset}'-0"`],
+    ];
+  }, [activeElevationData]);
+
+  const activeQuantity = activeElevationData?.quantityEngine;
 
   return (
     <main className="h-screen overflow-hidden bg-[#030303] text-zinc-100">
@@ -41,17 +85,17 @@ export default function SectionViewPage() {
             <h1 className="mt-1 text-xl font-semibold tracking-tight text-zinc-100">Section View Design</h1>
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] uppercase tracking-[0.1em] text-zinc-600">
               <span className="text-zinc-500">Generated From:</span>
-              <span>Level: <span className="text-zinc-400">Main Level</span></span>
-              <span>Elevation: <span className="text-zinc-400">North</span></span>
-              <span>Frame Width: <span className="text-zinc-400">3'-0"</span></span>
-              <span>Frames Tall: <span className="text-zinc-400">7</span></span>
-              <span>Bay Count: <span className="text-zinc-400">54</span></span>
-              <span>Leg Count: <span className="text-zinc-400">54</span></span>
+              <span>Level: <span className="text-zinc-400">{activeElevationData?.levelName ?? "Main Level"}</span></span>
+              <span>Elevation: <span className="text-zinc-400">{activeElevationData?.elevationName ?? "North"}</span></span>
+              <span>Frame Width: <span className="text-zinc-400">{activeElevationData ? `${activeElevationData.scaffoldInput.scaffoldWidth}'-0"` : "3'-0\""}</span></span>
+              <span>Frames Tall: <span className="text-zinc-400">{activeQuantity?.frameTall ?? 7}</span></span>
+              <span>Bay Count: <span className="text-zinc-400">{activeQuantity?.bayCount ?? 54}</span></span>
+              <span>Leg Count: <span className="text-zinc-400">{activeQuantity?.legCount ?? 54}</span></span>
             </div>
           </div>
           <div className="hidden h-8 border-l border-zinc-700/70 lg:block" />
           <p className="hidden max-w-xl text-[11px] uppercase tracking-[0.24em] text-zinc-600 xl:block">
-            CAD section assembly workspace / static drafting preview
+            {activeProjectName} / CAD section assembly workspace
           </p>
         </div>
 
@@ -64,7 +108,9 @@ export default function SectionViewPage() {
         </nav>
       </header>
 
-      <section className="grid h-[calc(100vh-76px)] grid-rows-[128px_minmax(0,1fr)_172px] overflow-hidden bg-[#030303]">
+      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
+
+      <section className="grid h-[calc(100vh-104px)] grid-rows-[128px_minmax(0,1fr)_172px] overflow-hidden bg-[#030303]">
         <section className="relative border-b border-orange-500/35 bg-[#0b0805] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),inset_0_-2px_0_rgba(249,115,22,0.16),0_10px_28px_rgba(0,0,0,0.45)]">
           <div className="mb-2.5 flex items-center justify-between">
             <div>
@@ -76,12 +122,12 @@ export default function SectionViewPage() {
               </p>
             </div>
             <span className="border border-orange-500/35 bg-[#120904] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-orange-300 shadow-[inset_0_0_12px_rgba(249,115,22,0.08)]">
-              North Run N-01 / A-A
+              {activeElevationData?.sectionView.selectedRun ?? "North Run N-01"} / {activeElevationData?.sectionView.sectionType ?? "A-A"}
             </span>
           </div>
 
-          <div className="grid grid-cols-[0.9fr_2.15fr_0.72fr_0.62fr_0.82fr_1.15fr_0.8fr] gap-px border border-zinc-800/80 bg-zinc-800/80">
-            {frameConfig.map(([label, value]) => (
+          <div className="grid grid-cols-[0.9fr_0.9fr_2.15fr_0.72fr_0.62fr_0.82fr_1.15fr_0.8fr] gap-px border border-zinc-800/80 bg-zinc-800/80">
+            {sharedFrameConfig.map(([label, value]) => (
               <ConfigCard key={label} label={label} value={value} />
             ))}
           </div>
@@ -89,15 +135,15 @@ export default function SectionViewPage() {
 
         <section className="grid min-h-0 grid-cols-[30fr_45fr_25fr] border-b border-t border-zinc-700/70 bg-[#050607] shadow-[inset_0_10px_20px_rgba(0,0,0,0.4)]">
           <ViewerPanel title="PDF / Plan Viewer" subtitle="Sheet A2.11 / selected section line">
-            <PdfViewer />
+            <PdfViewer elevation={activeElevationData} />
           </ViewerPanel>
 
           <ViewerPanel title="Elevation View" subtitle="Primary scaffold drafting elevation">
-            <ElevationView />
+            <ElevationView elevation={activeElevationData} />
           </ViewerPanel>
 
           <ViewerPanel title="Section Viewer" subtitle="Wall edge and scaffold section assembly">
-            <SectionViewer />
+            <SectionViewer elevation={activeElevationData} />
           </ViewerPanel>
         </section>
 
@@ -110,7 +156,104 @@ export default function SectionViewPage() {
   );
 }
 
-function PdfViewer() {
+type ViewerPoint = { x: number; y: number };
+
+function isFinitePoint(point: ViewerPoint) {
+  return Number.isFinite(point.x) && Number.isFinite(point.y);
+}
+
+function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
+  const geometry = elevation?.overlayGeometry;
+  if (!geometry) return [];
+
+  const keyFullOverlay = geometry.fullOverlayRows.find((row) => row.isKeyFloor && row.points.length >= 3);
+  const firstFullOverlay = geometry.fullOverlayRows.find((row) => row.points.length >= 3);
+  const firstWallSegment = geometry.wallSegments.find((segment) => segment.length >= 3);
+
+  if (geometry.tracedPerimeter.length >= 3) return geometry.tracedPerimeter;
+  if (geometry.overlayPoints.length >= 3) return geometry.overlayPoints;
+  if (keyFullOverlay) return keyFullOverlay.points;
+  if (firstFullOverlay) return firstFullOverlay.points;
+  if (geometry.elevationPoints.length >= 3) return geometry.elevationPoints;
+  if (firstWallSegment) return firstWallSegment;
+  return [];
+}
+
+function mapGeometryPoints(points: ViewerPoint[], width: number, height: number, padding: number) {
+  const validPoints = points.filter(isFinitePoint);
+  if (validPoints.length < 2) return [];
+
+  const minX = Math.min(...validPoints.map((point) => point.x));
+  const maxX = Math.max(...validPoints.map((point) => point.x));
+  const minY = Math.min(...validPoints.map((point) => point.y));
+  const maxY = Math.max(...validPoints.map((point) => point.y));
+  const geometryWidth = Math.max(1, maxX - minX);
+  const geometryHeight = Math.max(1, maxY - minY);
+  const scale = Math.min((width - padding * 2) / geometryWidth, (height - padding * 2) / geometryHeight);
+  const drawnWidth = geometryWidth * scale;
+  const drawnHeight = geometryHeight * scale;
+  const offsetX = padding + (width - padding * 2 - drawnWidth) / 2;
+  const offsetY = padding + (height - padding * 2 - drawnHeight) / 2;
+
+  return validPoints.map((point) => ({
+    x: offsetX + (point.x - minX) * scale,
+    y: offsetY + (point.y - minY) * scale,
+  }));
+}
+
+function pointsToSvgPath(points: ViewerPoint[], closed: boolean) {
+  if (points.length < 2) return "";
+  const [first, ...rest] = points;
+  return `M${first.x} ${first.y} ${rest.map((point) => `L${point.x} ${point.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
+}
+
+function getScaledOverlayRows(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+  const geometry = elevation?.overlayGeometry;
+  const basePoints = getPrimaryGeometryPoints(elevation);
+  if (!geometry || basePoints.length < 2) return [];
+
+  const fullRows = geometry.fullOverlayRows.filter((row) => row.points.length >= 2);
+  const rows = fullRows.length
+    ? fullRows
+    : [
+        {
+          id: 0,
+          isKeyFloor: true,
+          level: geometry.levelName,
+          points: basePoints,
+          closed: basePoints.length >= 3,
+          color: "#2563eb",
+        },
+      ];
+  const allPoints = rows.flatMap((row) => row.points);
+
+  return rows.map((row, index) => ({
+    id: row.id ?? index,
+    level: row.level,
+    isKeyFloor: Boolean(row.isKeyFloor),
+    closed: Boolean(row.closed),
+    color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
+    points: mapGeometryPoints(row.points.length >= 2 ? row.points : allPoints, width, height, padding),
+  })).filter((row) => row.points.length >= 2);
+}
+
+function getScaledReferencePoints(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+  const geometry = elevation?.overlayGeometry;
+  if (!geometry || geometry.referencePoints.length < 1) return [];
+
+  const basePoints = getPrimaryGeometryPoints(elevation);
+  const allPoints = [...basePoints, ...geometry.referencePoints];
+  const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding);
+  return mappedAllPoints.slice(basePoints.length);
+}
+
+function PdfViewer({ elevation }: { elevation: ProjectElevation | null }) {
+  const storedRows = getScaledOverlayRows(elevation, 620, 470, 78);
+  const referencePoints = getScaledReferencePoints(elevation, 620, 470, 78);
+  const primaryRow = storedRows.find((row) => row.isKeyFloor) ?? storedRows[0];
+  const cutStart = primaryRow?.points[0];
+  const cutEnd = primaryRow?.points[Math.max(1, Math.floor(primaryRow.points.length / 2))];
+
   return (
     <div className="relative h-full overflow-hidden border border-zinc-700/80 bg-[#050505] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.025),0_14px_28px_rgba(0,0,0,0.5)]">
       <Grid size={28} opacity="0.09" />
@@ -127,30 +270,69 @@ function PdfViewer() {
 
       <svg viewBox="0 0 620 470" className="relative z-10 h-full w-full pt-9">
         <rect x="58" y="64" width="500" height="350" fill="#090909" stroke="#27272a" strokeWidth="1" />
-        <path
-          d="M130 116 L456 116 L456 184 L502 184 L502 322 L414 322 L414 374 L176 374 L176 278 L110 278 L110 196 L130 196 Z"
-          fill="transparent"
-          stroke="#2563eb"
-          strokeWidth="1"
-        />
-        <path
-          d="M154 144 L426 144 L426 206 L470 206 L470 298 L390 298 L390 344 L204 344 L204 254 L142 254 L142 214 L154 214 Z"
-          fill="transparent"
-          stroke="#22c55e"
-          strokeWidth="0.8"
-          opacity="0.9"
-        />
-        <line x1="142" y1="104" x2="468" y2="104" stroke="#f8fafc" strokeWidth="0.8" opacity="0.65" />
-        <text x="150" y="93" fill="#f97316" fontSize="10" fontFamily="monospace" fontWeight="700">A-A</text>
-        <line x1="150" y1="92" x2="150" y2="116" stroke="#f97316" strokeWidth="0.8" />
-        <line x1="468" y1="92" x2="468" y2="116" stroke="#f97316" strokeWidth="0.8" />
-        <path d="M300 104 L300 62 L368 62" stroke="#f97316" strokeWidth="0.8" fill="none" />
-        <text x="376" y="66" fill="#fb923c" fontSize="10" fontFamily="monospace">Selected section line A-A</text>
+        {storedRows.length ? (
+          <>
+            {storedRows.map((row, index) => (
+              <path
+                key={`${row.id}-${index}`}
+                d={pointsToSvgPath(row.points, row.closed)}
+                fill="transparent"
+                stroke={row.isKeyFloor ? "#2563eb" : row.color}
+                strokeWidth={row.isKeyFloor ? "1" : "0.8"}
+                opacity={row.isKeyFloor ? 1 : 0.9}
+              />
+            ))}
+            {referencePoints.map((point, index) => (
+              <g key={`section-reference-${index}`}>
+                <line x1={point.x - 5} y1={point.y} x2={point.x + 5} y2={point.y} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
+                <line x1={point.x} y1={point.y - 5} x2={point.x} y2={point.y + 5} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
+              </g>
+            ))}
+            {cutStart && cutEnd && (
+              <>
+                <line x1={cutStart.x} y1={cutStart.y - 18} x2={cutEnd.x} y2={cutEnd.y - 18} stroke="#f8fafc" strokeWidth="0.8" opacity="0.65" />
+                <text x={cutStart.x + 8} y={cutStart.y - 29} fill="#f97316" fontSize="10" fontFamily="monospace" fontWeight="700">A-A</text>
+                <line x1={cutStart.x + 8} y1={cutStart.y - 30} x2={cutStart.x + 8} y2={cutStart.y} stroke="#f97316" strokeWidth="0.8" />
+                <line x1={cutEnd.x} y1={cutEnd.y - 30} x2={cutEnd.x} y2={cutEnd.y} stroke="#f97316" strokeWidth="0.8" />
+                <path d={`M${(cutStart.x + cutEnd.x) / 2} ${(cutStart.y + cutEnd.y) / 2 - 18} L${(cutStart.x + cutEnd.x) / 2} 62 L${Math.min(568, (cutStart.x + cutEnd.x) / 2 + 68)} 62`} stroke="#f97316" strokeWidth="0.8" fill="none" />
+                <text x={Math.min(576, (cutStart.x + cutEnd.x) / 2 + 76)} y="66" fill="#fb923c" fontSize="10" fontFamily="monospace">Selected section line A-A</text>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <path
+              d="M130 116 L456 116 L456 184 L502 184 L502 322 L414 322 L414 374 L176 374 L176 278 L110 278 L110 196 L130 196 Z"
+              fill="transparent"
+              stroke="#2563eb"
+              strokeWidth="1"
+            />
+            <path
+              d="M154 144 L426 144 L426 206 L470 206 L470 298 L390 298 L390 344 L204 344 L204 254 L142 254 L142 214 L154 214 Z"
+              fill="transparent"
+              stroke="#22c55e"
+              strokeWidth="0.8"
+              opacity="0.9"
+            />
+            <line x1="142" y1="104" x2="468" y2="104" stroke="#f8fafc" strokeWidth="0.8" opacity="0.65" />
+            <text x="150" y="93" fill="#f97316" fontSize="10" fontFamily="monospace" fontWeight="700">A-A</text>
+            <line x1="150" y1="92" x2="150" y2="116" stroke="#f97316" strokeWidth="0.8" />
+            <line x1="468" y1="92" x2="468" y2="116" stroke="#f97316" strokeWidth="0.8" />
+            <path d="M300 104 L300 62 L368 62" stroke="#f97316" strokeWidth="0.8" fill="none" />
+            <text x="376" y="66" fill="#fb923c" fontSize="10" fontFamily="monospace">Selected section line A-A</text>
+          </>
+        )}
       </svg>
 
       <div className="absolute bottom-3 right-3 z-20 h-24 w-36 border border-zinc-700 bg-black/90 p-1 shadow-[0_8px_20px_rgba(0,0,0,0.5)]">
         <svg viewBox="0 0 140 90" className="h-full w-full">
-          <path d="M28 20 L105 20 L105 38 L120 38 L120 68 L90 68 L90 78 L35 78 L35 58 L20 58 L20 38 L28 38 Z" fill="none" stroke="#2563eb" strokeWidth="0.8" />
+          {storedRows.length ? (
+            storedRows.map((row, index) => (
+              <path key={`mini-${row.id}-${index}`} d={pointsToSvgPath(mapGeometryPoints(row.points, 140, 90, 12), row.closed)} fill="none" stroke={row.isKeyFloor ? "#2563eb" : row.color} strokeWidth="0.8" />
+            ))
+          ) : (
+            <path d="M28 20 L105 20 L105 38 L120 38 L120 68 L90 68 L90 78 L35 78 L35 58 L20 58 L20 38 L28 38 Z" fill="none" stroke="#2563eb" strokeWidth="0.8" />
+          )}
           <rect x="44" y="14" width="56" height="18" fill="none" stroke="#f97316" strokeWidth="0.8" />
         </svg>
       </div>
@@ -158,7 +340,7 @@ function PdfViewer() {
   );
 }
 
-function ElevationView() {
+function ElevationView({ elevation }: { elevation: ProjectElevation | null }) {
   const bays = [102, 222, 342, 462, 582];
   const levels = [396, 332, 268, 204, 140, 76];
 
@@ -167,7 +349,7 @@ function ElevationView() {
       <Grid size={26} opacity="0.08" />
       <svg viewBox="0 24 740 430" className="relative z-10 h-full w-full">
         <text x="28" y="28" fill="#f97316" fontSize="11" fontFamily="monospace" fontWeight="700" letterSpacing="2">
-          ELEVATION VIEW - NORTH RUN N-01
+          ELEVATION VIEW - {elevation?.elevationName.toUpperCase() ?? "NORTH"} RUN
         </text>
         <line x1="58" y1="410" x2="704" y2="410" stroke="#71717a" strokeWidth="1" />
         <text x="60" y="430" fill="#71717a" fontSize="10" fontFamily="monospace">FINISH GRADE</text>
@@ -187,7 +369,9 @@ function ElevationView() {
             <line x1={x + 72} y1="180" x2={x} y2="244" stroke="#a1a1aa" strokeWidth="0.82" />
             <line x1={x} y1="258" x2={x + 72} y2="322" stroke="#a1a1aa" strokeWidth="0.82" />
             <line x1={x + 72} y1="336" x2={x} y2="400" stroke="#a1a1aa" strokeWidth="0.82" />
-            <text x={x + 36} y="450" fill="#71717a" fontSize="9" textAnchor="middle" fontFamily="monospace">10'-0"</text>
+            <text x={x + 36} y="450" fill="#71717a" fontSize="9" textAnchor="middle" fontFamily="monospace">
+              {elevation?.scaffoldInput.standardBayLength ?? 10}'-0"
+            </text>
           </g>
         ))}
 
@@ -209,7 +393,10 @@ function ElevationView() {
   );
 }
 
-function SectionViewer() {
+function SectionViewer({ elevation }: { elevation: ProjectElevation | null }) {
+  const wallOffset = elevation?.sectionView.wallOffset ?? elevation?.scaffoldInput.wallOffset ?? 1;
+  const selectedRun = elevation?.sectionView.selectedRun ?? "Run N-01";
+
   return (
     <div className="relative h-full overflow-hidden border border-zinc-700/80 bg-[#050505] p-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.025),0_14px_28px_rgba(0,0,0,0.5)]">
       <div className="mb-2 grid grid-cols-2 gap-1.5">
@@ -230,7 +417,7 @@ function SectionViewer() {
           <line x1="82" y1="34" x2="82" y2="410" stroke="#2563eb" strokeWidth="1" />
           <text x="40" y="28" fill="#60a5fa" fontSize="9" fontFamily="monospace">WALL EDGE</text>
           <line x1="118" y1="34" x2="118" y2="410" stroke="#f97316" strokeWidth="0.8" strokeDasharray="5 4" />
-          <text x="128" y="48" fill="#fb923c" fontSize="9" fontFamily="monospace">1'-0" OFFSET</text>
+          <text x="128" y="48" fill="#fb923c" fontSize="9" fontFamily="monospace">{wallOffset}'-0" OFFSET</text>
 
           <line x1="154" y1="62" x2="154" y2="410" stroke="#f8fafc" strokeWidth="1.2" />
           <line x1="242" y1="62" x2="242" y2="410" stroke="#f8fafc" strokeWidth="1.2" />
@@ -246,6 +433,7 @@ function SectionViewer() {
           <line x1="132" y1="410" x2="264" y2="410" stroke="#71717a" strokeWidth="1" />
           <rect x="142" y="410" width="24" height="6" fill="#e5e7eb" />
           <rect x="230" y="410" width="24" height="6" fill="#e5e7eb" />
+          <text x="140" y="28" fill="#a1a1aa" fontSize="9" fontFamily="monospace">{selectedRun}</text>
           <CalloutLine x1={260} y1={128} x2={334} y2={102} label="Work deck" />
           <CalloutLine x1={154} y1={410} x2={48} y2={372} label="Base / jack" />
           <CalloutLine x1={242} y1={170} x2={334} y2={188} label="Brace bay" />
@@ -312,6 +500,26 @@ function DrawingTools({
         ))}
       </div>
     </section>
+  );
+}
+
+function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
+  const quantity = elevation?.quantityEngine;
+  const overlayExists = hasTakeoffOverlayGeometry(elevation);
+
+  return (
+    <div className="border-b border-orange-500/20 bg-black px-5 py-2 font-mono text-[11px] text-zinc-400">
+      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
+      <span className="text-orange-300">{projectName}</span> | Level:{" "}
+      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
+      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
+      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
+      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
+      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
+      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
+      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
+      <span className="text-orange-300">{String(overlayExists)}</span>
+    </div>
   );
 }
 

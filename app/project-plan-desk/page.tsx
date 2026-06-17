@@ -1,6 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  getActiveElevation,
+  getActiveProject,
+  getActiveProjectId,
+  setActiveProjectId,
+  type ProjectElevation,
+  type ProjectRecord,
+} from "@/lib/projectStore";
 
 type DeskTileStatus = "Ready" | "In Progress" | "Waiting" | "Needs Review";
 type ProjectPhase = "Budget / ROM" | "Design Development" | "50% CD" | "75% CD" | "100% CD" | "GMP" | "Final Round";
@@ -74,6 +82,27 @@ export default function ProjectPlanDeskPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeOverlay, setActiveOverlay] = useState("Level 2");
   const [activeSection, setActiveSection] = useState("North");
+  const [storedProject, setStoredProject] = useState<ProjectRecord | null>(null);
+  const [storedElevation, setStoredElevation] = useState<ProjectElevation | null>(null);
+
+  useEffect(() => {
+    const activeProjectId = getActiveProjectId();
+    setActiveProjectId(activeProjectId);
+    setStoredProject(getActiveProject());
+    setStoredElevation(getActiveElevation());
+  }, []);
+
+  const displayProject = storedProject ?? {
+    projectId: project.projectNumber,
+    projectName: project.projectName,
+    projectAddress: project.address,
+    customer: project.customer,
+    estimator: project.estimator,
+    updatedAt: project.lastSaved,
+    schemaVersion: 1,
+    takeoff: { levels: [] },
+  };
+  const activeQuantities = storedElevation?.quantityEngine;
 
   const selectedOverlay = useMemo(
     () => overlayLevels.find((level) => level.label === activeOverlay) ?? overlayLevels[3],
@@ -120,19 +149,19 @@ export default function ProjectPlanDeskPage() {
 
           <div className="hidden items-center gap-3 xl:flex">
             <DeskAction href="/takeoff-workspace" label="Open Takeoff" />
-            <DeskAction href="/takeoff-workspace" label="Set Scaffold" />
-            <DeskAction href="/takeoff-workspace" label="Section View" />
+            <DeskAction href="/set-scaffold" label="Set Scaffold" />
+            <DeskAction href="/section-view" label="Section View" />
             <DeskAction href="/estimate-review" label="Estimate Review" primary />
           </div>
         </div>
 
         <div className="mt-4 grid gap-3 md:grid-cols-4 xl:grid-cols-8">
-          <TopStat label="Project" value={project.projectName} wide />
-          <TopStat label="Client" value={project.customer} />
+          <TopStat label="Project" value={displayProject.projectName} wide />
+          <TopStat label="Client" value={displayProject.customer} />
           <TopStat label="Phase" value={project.currentPhase} />
           <TopStat label="Status" value={project.projectStatus} />
           <TopStat label="Bid Due" value={project.bidDueDate} />
-          <TopStat label="Last Saved" value={project.lastSaved} />
+          <TopStat label="Last Saved" value={storedProject ? new Date(displayProject.updatedAt).toLocaleString() : project.lastSaved} />
         </div>
       </header>
 
@@ -142,9 +171,9 @@ export default function ProjectPlanDeskPage() {
         <Tile className="xl:col-span-3" title="Project Information" subtitle="Current bid profile">
           <div className="space-y-2">
             <InfoRow label="Project No." value={project.projectNumber} />
-            <InfoRow label="Address" value={project.address} />
+            <InfoRow label="Address" value={displayProject.projectAddress} />
             <InfoRow label="GC" value={project.gc} />
-            <InfoRow label="Estimator" value={project.estimator} />
+            <InfoRow label="Estimator" value={displayProject.estimator} />
             <InfoRow label="Union" value={project.unionStatus} />
           </div>
           <TileButton href="/projects" label="Open Project Record" />
@@ -152,7 +181,7 @@ export default function ProjectPlanDeskPage() {
 
         <Tile className="xl:col-span-3" title="Customer Database" subtitle="Client profile + history">
           <div className="space-y-2">
-            <InfoRow label="Company" value={project.customer} />
+            <InfoRow label="Company" value={displayProject.customer} />
             <InfoRow label="Contact" value="Marcus Lee" />
             <InfoRow label="Phone" value="(510) 555-0138" />
             <InfoRow label="Email" value="estimating@turner.com" />
@@ -165,14 +194,14 @@ export default function ProjectPlanDeskPage() {
           <ProgressRow label="Set Scaffold" value={68} />
           <ProgressRow label="Frame Config" value={85} />
           <ProgressRow label="Section Design" value={35} />
-          <TileButton href="/takeoff-workspace" label="Continue Scaffold Setup" />
+          <TileButton href="/set-scaffold" label="Continue Scaffold Setup" />
         </Tile>
 
         <Tile className="xl:col-span-3" title="Estimate Status" subtitle="Quantity engine + review">
           <div className="grid grid-cols-2 gap-2">
-            <MiniMetric label="LF" value="1,240" />
-            <MiniMetric label="Frames" value="496" />
-            <MiniMetric label="Planks" value="620" />
+            <MiniMetric label="LF" value={(storedElevation?.linearFeet ?? 1240).toLocaleString()} />
+            <MiniMetric label="Frames" value={(activeQuantities?.frameCount ?? 496).toLocaleString()} />
+            <MiniMetric label="Planks" value={(activeQuantities?.plankCount ?? 620).toLocaleString()} />
             <MiniMetric label="Bid" value="$196K" />
           </div>
           <TileButton href="/estimate-review" label="Open Estimate Review" />

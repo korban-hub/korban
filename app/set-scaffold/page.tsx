@@ -1,6 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  calculateQuantityEngine,
+  getActiveElevation,
+  getActiveProject,
+  getActiveProjectId,
+  hasTakeoffOverlayGeometry,
+  saveActiveElevation,
+  type ProjectElevation,
+  type ScaffoldInput,
+} from "@/lib/projectStore";
 
 type ScaffoldWidth = "3'" | "3'-6\"" | "5'";
 type PlankType = "Wood" | "Aluminum" | "Steel";
@@ -55,6 +65,17 @@ const runSummary = [
   { label: "West Run", lf: "72'-0\"", bays: 8, legs: 9 },
 ];
 
+function parseFeetValue(value: string) {
+  const parsed = Number(value.replace(/[^0-9.]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatScaffoldWidth(value: number): ScaffoldWidth {
+  if (value >= 5) return "5'";
+  if (value >= 3.5) return "3'-6\"";
+  return "3'";
+}
+
 export default function SetScaffoldPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scaffoldWidth, setScaffoldWidth] = useState<ScaffoldWidth>("3'");
@@ -64,9 +85,45 @@ export default function SetScaffoldPage() {
   const [activePiece, setActivePiece] = useState<PieceType>("Straight Bay");
   const [showOverlay, setShowOverlay] = useState(true);
   const [showScaffold, setShowScaffold] = useState(true);
+  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
 
-  const frameHeightCount = 7;
+  const frameHeightCount = activeElevationData?.quantityEngine.frameTall ?? 7;
   const scaffoldOffset = 12;
+  const storedOverlayRows = useMemo(
+    () => getScaledOverlayRows(activeElevationData, 1200, 720, 110),
+    [activeElevationData],
+  );
+  const storedReferencePoints = useMemo(
+    () => getScaledReferencePoints(activeElevationData, 1200, 720, 110),
+    [activeElevationData],
+  );
+  const storedScaffoldOutline = useMemo(
+    () => getScaledPrimaryOutline(activeElevationData, 1200, 720, 110),
+    [activeElevationData],
+  );
+  const scaffoldOutline = storedScaffoldOutline ?? currentLevelOutline;
+
+  useEffect(() => {
+    function loadActiveElevation() {
+      const elevation = getActiveElevation();
+      const project = getActiveProject();
+      console.log("SET SCAFFOLD LOADED LF:", elevation.linearFeet);
+      setActiveElevationData(elevation);
+      setActiveProjectName(project.projectName || projectInfo.projectName);
+      setScaffoldWidth(formatScaffoldWidth(elevation.scaffoldInput.scaffoldWidth));
+      setStandardBayLength(`${elevation.scaffoldInput.standardBayLength}'`);
+    }
+
+    loadActiveElevation();
+    window.addEventListener("focus", loadActiveElevation);
+    window.addEventListener("pageshow", loadActiveElevation);
+
+    return () => {
+      window.removeEventListener("focus", loadActiveElevation);
+      window.removeEventListener("pageshow", loadActiveElevation);
+    };
+  }, []);
 
   const plankCountPerBay = useMemo(() => {
     if (scaffoldWidth === "5'") return 3;
@@ -74,6 +131,16 @@ export default function SetScaffoldPage() {
   }, [scaffoldWidth]);
 
   const totals = useMemo(() => {
+    if (activeElevationData) {
+      return {
+        bays: activeElevationData.quantityEngine.bayCount,
+        legs: activeElevationData.quantityEngine.legCount,
+        frames: activeElevationData.quantityEngine.frameCount,
+        planks: activeElevationData.quantityEngine.plankCount,
+        braces: activeElevationData.quantityEngine.crossBraceCount,
+      };
+    }
+
     const bays = runSummary.reduce((sum, item) => sum + item.bays, 0);
     const legs = runSummary.reduce((sum, item) => sum + item.legs, 0);
     const frames = legs * frameHeightCount;
@@ -81,7 +148,42 @@ export default function SetScaffoldPage() {
     const braces = bays - 5;
 
     return { bays, legs, frames, planks, braces };
-  }, [plankCountPerBay]);
+  }, [activeElevationData, frameHeightCount, plankCountPerBay]);
+
+  function saveScaffoldInput(updates: Partial<ScaffoldInput>) {
+    const current = activeElevationData ?? getActiveElevation();
+    const scaffoldInput = {
+      ...current.scaffoldInput,
+      ...updates,
+    };
+    const quantityEngine = calculateQuantityEngine({
+      linearFeet: current.linearFeet,
+      wallHeight: current.wallHeight,
+      ...scaffoldInput,
+    });
+    const nextElevation = {
+      ...current,
+      scaffoldInput,
+      quantityEngine,
+      sectionView: {
+        ...current.sectionView,
+        wallOffset: scaffoldInput.wallOffset,
+      },
+    };
+
+    setActiveElevationData(nextElevation);
+    saveActiveElevation(nextElevation);
+  }
+
+  function updateScaffoldWidth(value: ScaffoldWidth) {
+    setScaffoldWidth(value);
+    saveScaffoldInput({ scaffoldWidth: parseFeetValue(value) });
+  }
+
+  function updateStandardBayLength(value: string) {
+    setStandardBayLength(value);
+    saveScaffoldInput({ standardBayLength: parseFeetValue(value) || 10 });
+  }
 
   return (
     <main className="min-h-screen bg-[#070604] text-white">
@@ -117,7 +219,7 @@ export default function SetScaffoldPage() {
           </div>
 
           <div className="hidden items-center gap-4 xl:flex">
-            <HeaderMeta label="Project" value={projectInfo.projectName} />
+            <HeaderMeta label="Project" value={activeProjectName} />
             <HeaderMeta label="Job No." value={projectInfo.jobNumber} />
             <HeaderMeta label="Reference" value={projectInfo.reference} />
             <TopAction href="/project-plan-desk" label="Project Plan Desk" />
@@ -126,7 +228,9 @@ export default function SetScaffoldPage() {
         </div>
       </header>
 
-      <section className="grid h-[calc(100vh-97px)] grid-cols-[minmax(0,1fr)_400px]">
+      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
+
+      <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
           <div className="absolute left-6 top-5 z-20 flex items-center gap-3">
             <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay((current) => !current)} />
@@ -158,29 +262,33 @@ export default function SetScaffoldPage() {
                 </g>
 
                 {showOverlay && (
-                  <g>
-                    <path
-                      d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z"
-                      fill="transparent"
-                      stroke="#2563eb"
-                      strokeWidth="0.7"
-                      strokeLinejoin="miter"
-                    />
+                  storedOverlayRows.length ? (
+                    <StoredTakeoffOverlay rows={storedOverlayRows} referencePoints={storedReferencePoints} />
+                  ) : (
+                    <g>
+                      <path
+                        d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z"
+                        fill="transparent"
+                        stroke="#2563eb"
+                        strokeWidth="0.7"
+                        strokeLinejoin="miter"
+                      />
 
-                    <path
-                      d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z"
-                      fill="transparent"
-                      stroke="#22c55e"
-                      strokeWidth="0.6"
-                      strokeLinejoin="miter"
-                      opacity="0.9"
-                    />
-                  </g>
+                      <path
+                        d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z"
+                        fill="transparent"
+                        stroke="#22c55e"
+                        strokeWidth="0.6"
+                        strokeLinejoin="miter"
+                        opacity="0.9"
+                      />
+                    </g>
+                  )
                 )}
 
                 {showScaffold && (
                   <g className="scaffold-plan">
-                    <OffsetScaffoldTicks points={currentLevelOutline} offset={scaffoldOffset} frameTall={frameHeightCount} />
+                    <OffsetScaffoldTicks points={scaffoldOutline} offset={scaffoldOffset} frameTall={frameHeightCount} />
                   </g>
                 )}
               </svg>
@@ -212,7 +320,7 @@ export default function SetScaffoldPage() {
         <aside className="overflow-y-auto bg-[#080604] p-4">
           <Panel title="Backend Takeoff Info" subtitle="Current scaffold defaults">
             <ControlLabel label="Frame Width">
-              <select value={scaffoldWidth} onChange={(event) => setScaffoldWidth(event.target.value as ScaffoldWidth)} className="control-input">
+              <select value={scaffoldWidth} onChange={(event) => updateScaffoldWidth(event.target.value as ScaffoldWidth)} className="control-input">
                 <option>3'</option>
                 <option>3'-6"</option>
                 <option>5'</option>
@@ -232,7 +340,7 @@ export default function SetScaffoldPage() {
             </ControlLabel>
 
             <ControlLabel label="Standard Bay Length">
-              <input value={standardBayLength} onChange={(event) => setStandardBayLength(event.target.value)} className="control-input" />
+              <input value={standardBayLength} onChange={(event) => updateStandardBayLength(event.target.value)} className="control-input" />
             </ControlLabel>
 
             <button
@@ -272,7 +380,7 @@ export default function SetScaffoldPage() {
 
           <Panel title="Scaffold Quantities" subtitle="Generated from scaffold layout">
             <div className="space-y-2">
-              <QuantityRow label="Total Linear Feet" value="482 LF" />
+              <QuantityRow label="Total Linear Ft" value={`${(activeElevationData?.linearFeet ?? 482).toLocaleString()} LF`} />
               <QuantityRow label="Standard Bays" value={totals.bays.toLocaleString()} />
               <QuantityRow label="Total Legs" value={totals.legs.toLocaleString()} />
               <QuantityRow label="Frames Tall" value={String(frameHeightCount)} />
@@ -283,17 +391,29 @@ export default function SetScaffoldPage() {
             </div>
 
             <div className="mt-4 space-y-2">
-              {runSummary.map((run) => (
-                <div key={run.label} className="rounded-2xl border border-zinc-800 bg-black p-3">
+              {activeElevationData ? (
+                <div className="rounded-2xl border border-zinc-800 bg-black p-3">
                   <div className="flex items-center justify-between">
-                    <p className="text-xs font-bold text-zinc-300">{run.label}</p>
-                    <p className="font-mono text-xs text-orange-300">{run.lf}</p>
+                    <p className="text-xs font-bold text-zinc-300">{activeElevationData.elevationName} Run</p>
+                    <p className="font-mono text-xs text-orange-300">{activeElevationData.linearFeet.toLocaleString()} LF</p>
                   </div>
                   <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                    {run.bays} Bays · {run.legs} Legs
+                    {totals.bays} Bays · {totals.legs} Legs
                   </p>
                 </div>
-              ))}
+              ) : (
+                runSummary.map((run) => (
+                  <div key={run.label} className="rounded-2xl border border-zinc-800 bg-black p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-bold text-zinc-300">{run.label}</p>
+                      <p className="font-mono text-xs text-orange-300">{run.lf}</p>
+                    </div>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">
+                      {run.bays} Bays · {run.legs} Legs
+                    </p>
+                  </div>
+                ))
+              )}
             </div>
           </Panel>
 
@@ -358,6 +478,131 @@ function isFiniteNumber(value: number) {
 
 function isFinitePoint(point: PlanPoint) {
   return isFiniteNumber(point.x) && isFiniteNumber(point.y);
+}
+
+function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
+  const geometry = elevation?.overlayGeometry;
+  if (!geometry) return [];
+
+  const keyFullOverlay = geometry.fullOverlayRows.find((row) => row.isKeyFloor && row.points.length >= 3);
+  const firstFullOverlay = geometry.fullOverlayRows.find((row) => row.points.length >= 3);
+  const firstWallSegment = geometry.wallSegments.find((segment) => segment.length >= 3);
+
+  if (geometry.tracedPerimeter.length >= 3) return geometry.tracedPerimeter;
+  if (geometry.overlayPoints.length >= 3) return geometry.overlayPoints;
+  if (keyFullOverlay) return keyFullOverlay.points;
+  if (firstFullOverlay) return firstFullOverlay.points;
+  if (geometry.elevationPoints.length >= 3) return geometry.elevationPoints;
+  if (firstWallSegment) return firstWallSegment;
+  return [];
+}
+
+function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number) {
+  const validPoints = points.filter(isFinitePoint);
+  if (validPoints.length < 2) return [];
+
+  const minX = Math.min(...validPoints.map((point) => point.x));
+  const maxX = Math.max(...validPoints.map((point) => point.x));
+  const minY = Math.min(...validPoints.map((point) => point.y));
+  const maxY = Math.max(...validPoints.map((point) => point.y));
+  const geometryWidth = Math.max(1, maxX - minX);
+  const geometryHeight = Math.max(1, maxY - minY);
+  const scale = Math.min((width - padding * 2) / geometryWidth, (height - padding * 2) / geometryHeight);
+  const drawnWidth = geometryWidth * scale;
+  const drawnHeight = geometryHeight * scale;
+  const offsetX = padding + (width - padding * 2 - drawnWidth) / 2;
+  const offsetY = padding + (height - padding * 2 - drawnHeight) / 2;
+
+  return validPoints.map((point) => ({
+    x: offsetX + (point.x - minX) * scale,
+    y: offsetY + (point.y - minY) * scale,
+  }));
+}
+
+function getScaledPrimaryOutline(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+  const points = getPrimaryGeometryPoints(elevation);
+  const mapped = mapGeometryPoints(points, width, height, padding);
+  return mapped.length >= 3 ? mapped : null;
+}
+
+function getScaledOverlayRows(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+  const geometry = elevation?.overlayGeometry;
+  const basePoints = getPrimaryGeometryPoints(elevation);
+  if (!geometry || basePoints.length < 2) return [];
+
+  const allRows = geometry.fullOverlayRows.filter((row) => row.points.length >= 2);
+  const fallbackRows = allRows.length
+    ? allRows
+    : [
+        {
+          id: 0,
+          isKeyFloor: true,
+          level: geometry.levelName,
+          points: basePoints,
+          closed: basePoints.length >= 3,
+          color: "#2563eb",
+        },
+      ];
+
+  const allPoints = fallbackRows.flatMap((row) => row.points);
+  return fallbackRows.map((row, index) => ({
+    id: row.id ?? index,
+    level: row.level,
+    isKeyFloor: Boolean(row.isKeyFloor),
+    closed: Boolean(row.closed),
+    color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
+    points: mapGeometryPoints(allPoints.length >= 2 ? row.points : basePoints, width, height, padding),
+  })).filter((row) => row.points.length >= 2);
+}
+
+function getScaledReferencePoints(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+  const geometry = elevation?.overlayGeometry;
+  if (!geometry || geometry.referencePoints.length < 1) return [];
+
+  const basePoints = getPrimaryGeometryPoints(elevation);
+  const allPoints = [...basePoints, ...geometry.referencePoints];
+  const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding);
+  return mappedAllPoints.slice(basePoints.length);
+}
+
+function pointsToSvgPath(points: PlanPoint[], closed: boolean) {
+  if (points.length < 2) return "";
+  const [first, ...rest] = points;
+  return `M${first.x} ${first.y} ${rest.map((point) => `L${point.x} ${point.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
+}
+
+function StoredTakeoffOverlay({
+  rows,
+  referencePoints,
+}: {
+  rows: Array<{ id: number; level: string; isKeyFloor: boolean; closed: boolean; color: string; points: PlanPoint[] }>;
+  referencePoints: PlanPoint[];
+}) {
+  return (
+    <g>
+      {rows.map((row, index) => (
+        <g key={`${row.id}-${index}`}>
+          <path
+            d={pointsToSvgPath(row.points, row.closed)}
+            fill="transparent"
+            stroke={row.isKeyFloor ? "#2563eb" : row.color}
+            strokeWidth={row.isKeyFloor ? "0.9" : "0.6"}
+            strokeLinejoin="miter"
+            opacity={row.isKeyFloor ? 1 : 0.9}
+          />
+          {row.points.map((point, pointIndex) => (
+            <circle key={`${row.id}-point-${pointIndex}`} cx={point.x} cy={point.y} r="2" fill={row.isKeyFloor ? "#60a5fa" : "#22c55e"} opacity="0.75" />
+          ))}
+        </g>
+      ))}
+      {referencePoints.map((point, index) => (
+        <g key={`reference-point-${index}`}>
+          <line x1={point.x - 5} y1={point.y} x2={point.x + 5} y2={point.y} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
+          <line x1={point.x} y1={point.y - 5} x2={point.x} y2={point.y + 5} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
+        </g>
+      ))}
+    </g>
+  );
 }
 
 function OffsetScaffoldTicks({
@@ -1034,6 +1279,26 @@ function ViewerTool({ label, primary = false }: { label: string; primary?: boole
     }`}>
       {label}
     </button>
+  );
+}
+
+function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
+  const quantity = elevation?.quantityEngine;
+  const overlayExists = hasTakeoffOverlayGeometry(elevation);
+
+  return (
+    <div className="border-b border-orange-500/20 bg-black px-6 py-2 font-mono text-[11px] text-zinc-400">
+      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
+      <span className="text-orange-300">{projectName}</span> | Level:{" "}
+      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
+      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
+      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
+      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
+      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
+      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
+      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
+      <span className="text-orange-300">{String(overlayExists)}</span>
+    </div>
   );
 }
 
