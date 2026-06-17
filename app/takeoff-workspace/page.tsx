@@ -551,7 +551,7 @@ export default function TakeoffWorkspace() {
     }
 
     if (pickTarget.type === "elevation") {
-      const nextElevationRefs: ElevationReference[] = elevationRefs.map((item): ElevationReference =>
+      const nextElevationRefs = elevationRefs.map((item) =>
         item.elevation === pickTarget.elevation
           ? {
               ...item,
@@ -565,11 +565,11 @@ export default function TakeoffWorkspace() {
       );
 
       const duplicatedElevation = getOppositeElevation(pickTarget.elevation);
-      const duplicatedElevationRefs: ElevationReference[] =
+const duplicatedElevationRefs =
         canDuplicateOpposite(pickTarget.elevation) &&
         duplicateElevationRefs[pickTarget.elevation] &&
         duplicatedElevation
-          ? nextElevationRefs.map((item): ElevationReference =>
+          ? nextElevationRefs.map((item) =>
               item.elevation === duplicatedElevation
                 ? {
                     ...item,
@@ -577,7 +577,7 @@ export default function TakeoffWorkspace() {
                     closed: false,
                     linealFeet: tracedLinealFeet,
                     manualLinealFeetInput: formatFeetInches(tracedLinealFeet),
-                    source: "Manual",
+source: "Manual" as const,
                   }
                 : item,
             )
@@ -606,7 +606,7 @@ export default function TakeoffWorkspace() {
         }
       }
 
-      setElevationRefs(duplicatedElevationRefs);
+setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
     }
 
     if (pickTarget.type === "heightOverall") {
@@ -700,7 +700,7 @@ export default function TakeoffWorkspace() {
       return;
     }
 
-    const nextElevationRefs: ElevationReference[] = elevationRefs.map((item): ElevationReference =>
+    const nextElevationRefs = elevationRefs.map((item) =>
       item.elevation === elevation
         ? {
             ...item,
@@ -714,9 +714,9 @@ export default function TakeoffWorkspace() {
     );
 
     const duplicatedElevation = getOppositeElevation(elevation);
-    const duplicatedElevationRefs: ElevationReference[] =
+    const duplicatedElevationRefs =
       canDuplicateOpposite(elevation) && duplicateElevationRefs[elevation] && duplicatedElevation
-        ? nextElevationRefs.map((item): ElevationReference =>
+        ? nextElevationRefs.map((item) =>
             item.elevation === duplicatedElevation
               ? {
                   ...item,
@@ -751,7 +751,7 @@ export default function TakeoffWorkspace() {
       if (redo) return;
     }
 
-    setElevationRefs(duplicatedElevationRefs);
+setElevationRefs(duplicatedElevationRefs as ElevationReference[]);
   }
 
   function updateElevationHeight(
@@ -836,7 +836,7 @@ export default function TakeoffWorkspace() {
     const currentElevation = elevationHeights.find((item) => item.elevation === elevation);
     const currentArea = currentElevation?.areas.find((area) => area.id === areaId);
 
-    if (!currentElevation || !currentArea) return;
+    if (!currentArea) return;
 
     const parsed = parseFeetInches(currentArea.heightInput);
 
@@ -908,7 +908,7 @@ export default function TakeoffWorkspace() {
         fullOverlayRows,
       },
     };
-    let storedProjectEstimates: Record<string, unknown> = {};
+    let storedProjectEstimates: Record<string, typeof estimateDraft> = {};
 
     try {
       const existing = localStorage.getItem("korbanProjectEstimates_v1");
