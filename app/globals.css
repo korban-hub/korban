@@ -1,26 +1,49 @@
 @import "tailwindcss";
-
+@theme inline {
+  --font-title: var(--font-title);
+}
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #070604;
+  --foreground: #ededed;
+
+  /* KORBAN surface tokens */
+  --korban-base: #070604;
+  --korban-raised: #0b0b0b;
+  --korban-inset: #030303;
+  --korban-header: #000000;
+  --korban-cad-header: #050403;
+  --korban-workspace: #070707;
+  --korban-viewer: #050505;
+
+  /* KORBAN accent tokens */
+  --korban-accent: #f97316;
+  --korban-accent-hover: #fb923c;
+  --korban-border-accent: rgba(249, 115, 22, 0.2);
+  --korban-border-accent-strong: rgba(249, 115, 22, 0.25);
+  --korban-accent-subtle: rgba(249, 115, 22, 0.1);
+  --korban-accent-muted: rgba(249, 115, 22, 0.3);
+  --korban-glow: rgba(249, 115, 22, 0.35);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-korban-base: var(--korban-base);
+  --color-korban-raised: var(--korban-raised);
+  --color-korban-inset: var(--korban-inset);
+  --color-korban-header: var(--korban-header);
+  --color-korban-cad-header: var(--korban-cad-header);
+  --color-korban-workspace: var(--korban-workspace);
+  --color-korban-viewer: var(--korban-viewer);
+  --color-korban-accent: var(--korban-accent);
+  --color-korban-accent-hover: var(--korban-accent-hover);
+  --color-korban-border-accent: var(--korban-border-accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
+  background: var(--korban-base);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }

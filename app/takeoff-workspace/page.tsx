@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanPanel, KorbanEngineeringWorkspace, KorbanWorkspaceHud, KorbanWorkspaceGrid, KorbanStatusPill, type KorbanMenuLink } from "@/components/korban";
 import {
   calculateQuantityEngine,
   getActiveElevation,
   getActiveProject,
   getActiveProjectId,
-  hasTakeoffOverlayGeometry,
   saveActiveElevation,
   saveActiveProject,
   setActiveProjectId,
@@ -97,6 +97,14 @@ const initialElevationHeights: ElevationHeight[] = elevationOptions.map(
 );
 
 const levelSuggestions = ["Basement", "Ground", "Level", "Roof", "Penthouse"];
+
+const takeoffMenuLinks: KorbanMenuLink[] = [
+  { href: "/", label: "Bid Room" },
+  { href: "/projects", label: "Projects" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
+];
 
 function buildDefaultHeightAreas(): HeightArea[] {
   return [
@@ -1106,90 +1114,38 @@ source: "Manual" as const,
     );
   }
 
-  const debugElevation = buildWorkspaceElevation(activeElevation);
-
   return (
-    <main className="h-screen overflow-hidden bg-zinc-950 text-white">
-      <header className="flex h-16 items-center justify-between border-b border-orange-500/20 bg-black px-6">
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <button
-              onClick={() => setMenuOpen((current) => !current)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/10 text-orange-400 hover:bg-orange-500/20"
-            >
-              ▾
-            </button>
+    <main className="min-h-screen overflow-hidden bg-korban-base text-white">
+      <KorbanHeader
+        title="Takeoff Workspace"
+        subtitle="Scale, overlays, elevations, and height references"
+        menuLinks={takeoffMenuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((current) => !current)}
+        menuWidthClass="w-56"
+        actionsClassName="gap-4"
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={activeProjectName} />
+            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">
+              Project Plan Desk
+            </KorbanButton>
+            <KorbanButton variant="primary" onClick={saveToEstimateReview}>
+              Save & Continue
+            </KorbanButton>
+          </>
+        }
+      />
 
-            {menuOpen && (
-              <div className="absolute left-0 top-11 z-[999] w-56 rounded-2xl border border-orange-500/20 bg-black p-2 shadow-2xl">
-                <a
-                  href="/"
-                  className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
-                >
-                  Bid Room
-                </a>
-                <a
-                  href="/projects"
-                  className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
-                >
-                  Projects
-                </a>
-                <a
-                  href="/estimate-review"
-                  className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
-                >
-                  Estimate Review
-                </a>
-                <a
-                  href="/backend"
-                  className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
-                >
-                  Backend
-                </a>
-                <a
-                  href="/settings"
-                  className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
-                >
-                  Settings
-                </a>
-              </div>
-            )}
-          </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">
-              KORBAN
-            </h1>
-            <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
-              Takeoff Workspace
-            </p>
-          </div>
-        </div>
+      <KorbanEngineeringWorkspace
+        canvas={
+          <>
+            <KorbanWorkspaceGrid />
 
-        <div className="flex items-center gap-3">
-          <a
-            href="/"
-            className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-300 transition hover:border-orange-500/40 hover:bg-orange-500/10"
-          >
-            Bid Room
-          </a>
-
-          <button
-            onClick={saveToEstimateReview}
-            className="rounded-full bg-orange-500 px-5 py-2 text-sm font-semibold text-black hover:bg-orange-400"
-          >
-            Estimate Review
-          </button>
-        </div>
-      </header>
-
-      <ProjectDebugStrip projectName={activeProjectName} elevation={debugElevation} />
-
-      <section className="flex h-[calc(100vh-92px)] flex-col bg-[#070707]">
-        <div className="border-b border-orange-500/20 bg-black/80 px-6 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <label
-                className={`cursor-pointer rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${activeTool === "Upload PDF" ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]" : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"}`}
+            <KorbanWorkspaceHud position="top-left">
+              <KorbanButton
+                as="label"
+                variant={activeTool === "Upload PDF" ? "tool-active" : "tool-inactive"}
               >
                 Upload PDF
                 <input
@@ -1199,7 +1155,7 @@ source: "Manual" as const,
                   onChange={handlePdfUpload}
                   className="hidden"
                 />
-              </label>
+              </KorbanButton>
 
               {[
                 "Scale",
@@ -1209,248 +1165,223 @@ source: "Manual" as const,
                 "Create Section View",
                 "Edit Takeoff",
               ].map((tool) => (
-                <button
+                <KorbanButton
                   key={tool}
+                  variant={activeTool === tool ? "tool-active" : "tool-inactive"}
                   onClick={() => activateTool(tool)}
-                  className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${activeTool === tool ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]" : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"}`}
                 >
                   {tool}
-                </button>
+                </KorbanButton>
               ))}
 
               <ActiveElevationMini
                 activeElevation={activeElevation}
                 setActiveElevation={setActiveElevation}
               />
-            </div>
 
-            <div className="rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-500">
-              Active: {activeTool}
-            </div>
-          </div>
-
-          {scaleMode && (
-            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-orange-500/20 bg-orange-500/5 px-3 py-2 text-xs">
-              <span className="font-semibold text-orange-300">Scale</span>
-              <span className="text-zinc-500">
-                Click 2 points, enter known length:
-              </span>
-              <input
-                value={knownScaleFeet}
-                onChange={(event) => setKnownScaleFeet(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") calibrateScale();
-                }}
-                placeholder={`ex: 20'-6"`}
-                className="w-32 rounded-lg border border-zinc-800 bg-black px-2 py-1 text-zinc-200 outline-none focus:border-orange-500"
+              <KorbanStatusPill
+                label="Scale"
+                value={pageUnitsPerFoot ? "Locked" : "Not Set"}
+                active={Boolean(pageUnitsPerFoot)}
               />
-              <button
-                onClick={calibrateScale}
-                className="rounded-lg bg-orange-500 px-3 py-1 font-semibold text-black hover:bg-orange-400"
-              >
-                Set
-              </button>
-              <button
-                onClick={clearScale}
-                className="rounded-lg border border-zinc-800 px-3 py-1 text-zinc-300 hover:border-orange-500/50"
-              >
-                Clear
-              </button>
-              <span className="ml-auto text-zinc-500">
-                Points: {scalePoints.length}/2 ·{" "}
-                {pageUnitsPerFoot ? "Scale Locked" : "Not Set"}
+
+              {scaleMode && (
+                <>
+                  <input
+                    value={knownScaleFeet}
+                    onChange={(event) => setKnownScaleFeet(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") calibrateScale();
+                    }}
+                    placeholder={`ex: 20'-6"`}
+                    className="w-32 rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-orange-500"
+                  />
+                  <KorbanButton variant="primary" className="px-3 py-1.5" onClick={calibrateScale}>
+                    Set
+                  </KorbanButton>
+                  <KorbanButton variant="ghost" className="px-3 py-1.5" onClick={clearScale}>
+                    Clear
+                  </KorbanButton>
+                  <KorbanStatusPill label="Points" value={`${scalePoints.length}/2`} />
+                </>
+              )}
+
+              {overlayMode && pickTarget && (
+                <KorbanStatusPill
+                  label="Pick"
+                  value={
+                    pickTarget.type === "heightOverall" || pickTarget.type === "heightArea"
+                      ? `${pickTarget.elevation} Height`
+                      : pickTarget.type === "full"
+                        ? "Full Overlay"
+                        : `${pickTarget.elevation} Elevation`
+                  }
+                  active
+                />
+              )}
+            </KorbanWorkspaceHud>
+
+            <KorbanWorkspaceHud position="bottom-right" className="max-w-none rounded-2xl border border-orange-500/20 bg-black/80 px-3 py-2 backdrop-blur">
+              <span className="max-w-[180px] truncate rounded-full border border-orange-500/20 bg-black px-3 py-1.5 text-[10px] text-zinc-400">
+                {pdfFileName || "No PDF Loaded"}
               </span>
-            </div>
-          )}
-        </div>
 
-        <div className="sticky top-0 z-50 border-b border-zinc-800 bg-[#050505]/95 px-6 py-3 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-center gap-2 text-xs">
-            <span className="max-w-[320px] truncate rounded-full border border-orange-500/20 bg-black px-3 py-1.5 text-zinc-400">
-              {pdfFileName || "No PDF Loaded"}
-            </span>
-
-            <button
-              disabled={!pdfDoc || pageNumber <= 1}
-              onClick={() => {
-                const nextPage = Math.max(1, pageNumber - 1);
-                setPageNumber(nextPage);
-                setPageJump(String(nextPage));
-              }}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              Prev
-            </button>
-
-            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1">
-              <span className="text-zinc-500">Page</span>
-              <input
-                value={pageJump}
-                onChange={(event) => setPageJump(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") goToPage();
+              <KorbanButton
+                variant="ghost"
+                className="px-2 py-1.5 text-[10px]"
+                disabled={!pdfDoc || pageNumber <= 1}
+                onClick={() => {
+                  const nextPage = Math.max(1, pageNumber - 1);
+                  setPageNumber(nextPage);
+                  setPageJump(String(nextPage));
                 }}
-                className="w-16 rounded bg-zinc-950 px-2 py-1 text-center text-zinc-200 outline-none focus:ring-1 focus:ring-orange-500"
-              />
-              <span className="text-zinc-500">/ {numPages || 0}</span>
-              <button
-                disabled={!pdfDoc}
-                onClick={goToPage}
-                className="rounded bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
               >
-                Go
-              </button>
-            </div>
+                Prev
+              </KorbanButton>
 
-            <button
-              disabled={!pdfDoc || pageNumber >= numPages}
-              onClick={() => {
-                const nextPage = Math.min(numPages, pageNumber + 1);
-                setPageNumber(nextPage);
-                setPageJump(String(nextPage));
-              }}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              Next
-            </button>
-
-            <button
-              disabled={!pdfDoc}
-              onClick={() => setZoom((current) => Math.max(0.1, current - 0.1))}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              -
-            </button>
-            <span className="w-14 text-center font-mono text-orange-400">
-              {Math.round(zoom * 100)}%
-            </span>
-            <button
-              disabled={!pdfDoc}
-              onClick={() => setZoom((current) => Math.min(3, current + 0.1))}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              +
-            </button>
-
-            <button
-              disabled={!pdfDoc}
-              onClick={() => setZoom(0.25)}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              Fit Page
-            </button>
-            <button
-              disabled={!pdfDoc}
-              onClick={() => setZoom(0.5)}
-              className="rounded-lg border border-zinc-800 px-3 py-1.5 text-zinc-300 disabled:opacity-40"
-            >
-              Fit Width
-            </button>
-
-            {overlayMode && pickTarget && (
-              <span className="rounded-full bg-orange-500/10 px-3 py-1.5 text-orange-300">
-                {pickTarget.type === "heightOverall" ||
-                pickTarget.type === "heightArea"
-                  ? `Setting: ${pickTarget.elevation} Height`
-                  : pickTarget.type === "full"
-                    ? "Setting: Full Overlay"
-                    : `Setting: ${pickTarget.elevation} Elevation`}
-              </span>
-            )}
-          </div>
-        </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_440px]">
-          <div className="relative overflow-auto bg-black">
-            <div className="pointer-events-none absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#f97316_1px,transparent_1px),linear-gradient(to_bottom,#f97316_1px,transparent_1px)] bg-[size:38px_38px]" />
-
-            {pdfLoading && (
-              <div className="relative z-10 flex h-full items-center justify-center text-sm text-zinc-500">
-                Loading PDF...
-              </div>
-            )}
-            {pdfError && (
-              <div className="relative z-10 flex h-full items-center justify-center text-sm text-red-400">
-                {pdfError}
-              </div>
-            )}
-
-            {!pdfDoc && !pdfLoading && !pdfError && (
-              <button
-                onClick={() => uploadRef.current?.click()}
-                className="relative z-10 flex h-full w-full cursor-pointer items-center justify-center"
-              >
-                <div className="text-center">
-                  <div className="mx-auto mb-5 flex h-24 w-24 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-5xl text-orange-500">
-                    +
-                  </div>
-                  <h2 className="text-2xl font-semibold">Upload Plan PDF</h2>
-                  <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">
-                    Full-screen takeoff workspace for scale, overlays,
-                    elevations, and height references.
-                  </p>
-                </div>
-              </button>
-            )}
-
-            {pdfDoc && (
-              <div className="relative z-10 flex min-h-full min-w-max justify-start p-10">
-                <div
-                  onClick={handleWorkspaceClick}
-                  className={`relative h-fit rounded-2xl bg-white p-4 shadow-[0_0_60px_rgba(0,0,0,0.65)] ${scaleMode || overlayMode ? "cursor-crosshair" : ""}`}
+              <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1 text-[10px]">
+                <input
+                  value={pageJump}
+                  onChange={(event) => setPageJump(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") goToPage();
+                  }}
+                  className="w-10 rounded bg-zinc-950 px-1 py-0.5 text-center text-zinc-200 outline-none"
+                />
+                <span className="text-zinc-500">/ {numPages || 0}</span>
+                <button
+                  disabled={!pdfDoc}
+                  onClick={goToPage}
+                  className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
                 >
-                  <canvas ref={canvasRef} />
-
-                  {/* Stored takeoff geometry is intentionally not drawn back on the PDF.
-                      The PDF Viewer is only the temporary measuring surface.
-                      Stored geometry lives in the Takeoff Viewer below. */}
-
-                  {!pageUnitsPerFoot && scalePoints.map((point, index) => (
-                    <Marker
-                      key={`scale-${index}`}
-                      point={point}
-                      label={`S${index + 1}`}
-                      zoom={zoom}
-                    />
-                  ))}
-
-                  {!pageUnitsPerFoot && scalePoints.length === 2 && (
-                    <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full">
-                      <line
-                        x1={scalePoints[0].x * zoom + 16}
-                        y1={scalePoints[0].y * zoom + 16}
-                        x2={scalePoints[1].x * zoom + 16}
-                        y2={scalePoints[1].y * zoom + 16}
-                        stroke="#f97316"
-                        strokeWidth="3"
-                        strokeDasharray="8 8"
-                      />
-                    </svg>
-                  )}
-
-                  {tracePoints.map((point, index) => (
-                    <Marker
-                      key={`trace-${index}`}
-                      point={point}
-                      label={String(index + 1)}
-                      zoom={zoom}
-                    />
-                  ))}
-
-                  {drawOverlayPolyline(
-                    tracePoints,
-                    traceClosed || overlayLockedOpen,
-                    getActivePickColor(),
-                    "current",
-                    pickTarget?.type !== "full",
-                  )}
-                </div>
+                  Go
+                </button>
               </div>
-            )}
-          </div>
 
-          <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#090909] p-4">
-            <TakeoffHub
+              <KorbanButton
+                variant="ghost"
+                className="px-2 py-1.5 text-[10px]"
+                disabled={!pdfDoc || pageNumber >= numPages}
+                onClick={() => {
+                  const nextPage = Math.min(numPages, pageNumber + 1);
+                  setPageNumber(nextPage);
+                  setPageJump(String(nextPage));
+                }}
+              >
+                Next
+              </KorbanButton>
+
+              <KorbanButton
+                variant="ghost"
+                className="px-2 py-1.5 text-[10px]"
+                disabled={!pdfDoc}
+                onClick={() => setZoom((current) => Math.max(0.1, current - 0.1))}
+              >
+                -
+              </KorbanButton>
+              <KorbanStatusPill label="Zoom" value={`${Math.round(zoom * 100)}%`} />
+              <KorbanButton
+                variant="ghost"
+                className="px-2 py-1.5 text-[10px]"
+                disabled={!pdfDoc}
+                onClick={() => setZoom((current) => Math.min(3, current + 0.1))}
+              >
+                +
+              </KorbanButton>
+              <KorbanButton variant="ghost" className="px-2 py-1.5 text-[10px]" disabled={!pdfDoc} onClick={() => setZoom(0.25)}>
+                Fit Page
+              </KorbanButton>
+              <KorbanButton variant="ghost" className="px-2 py-1.5 text-[10px]" disabled={!pdfDoc} onClick={() => setZoom(0.5)}>
+                Fit Width
+              </KorbanButton>
+            </KorbanWorkspaceHud>
+
+            <div className="absolute inset-0 overflow-auto pb-24 pt-16">
+              {pdfLoading && (
+                <div className="relative z-10 flex h-full items-center justify-center text-sm text-zinc-500">
+                  Loading PDF...
+                </div>
+              )}
+              {pdfError && (
+                <div className="relative z-10 flex h-full items-center justify-center text-sm text-red-400">
+                  {pdfError}
+                </div>
+              )}
+
+              {!pdfDoc && !pdfLoading && !pdfError && (
+                <button
+                  onClick={() => uploadRef.current?.click()}
+                  className="relative z-10 flex h-full w-full cursor-pointer items-center justify-center"
+                >
+                  <div className="rounded-[2rem] border border-zinc-800 bg-[#050505] p-12 text-center shadow-2xl">
+                    <div className="mx-auto mb-5 flex h-24 w-24 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-5xl text-orange-500">
+                      +
+                    </div>
+                    <h2 className="text-2xl font-semibold">Upload Plan PDF</h2>
+                    <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">
+                      Full-screen takeoff workspace for scale, overlays, elevations, and height references.
+                    </p>
+                  </div>
+                </button>
+              )}
+
+              {pdfDoc && (
+                <div className="relative z-10 flex min-h-full min-w-max justify-center p-10">
+                  <div
+                    onClick={handleWorkspaceClick}
+                    className={`relative h-fit rounded-[2rem] border border-zinc-800 bg-[#050505] p-4 shadow-2xl ${scaleMode || overlayMode ? "cursor-crosshair" : ""}`}
+                  >
+                    <div className="overflow-hidden rounded-[1.25rem] bg-white p-4 shadow-inner">
+                      <canvas ref={canvasRef} />
+                    </div>
+
+                    {!pageUnitsPerFoot && scalePoints.map((point, index) => (
+                      <Marker
+                        key={`scale-${index}`}
+                        point={point}
+                        label={`S${index + 1}`}
+                        zoom={zoom}
+                      />
+                    ))}
+
+                    {!pageUnitsPerFoot && scalePoints.length === 2 && (
+                      <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full">
+                        <line
+                          x1={scalePoints[0].x * zoom + 16}
+                          y1={scalePoints[0].y * zoom + 16}
+                          x2={scalePoints[1].x * zoom + 16}
+                          y2={scalePoints[1].y * zoom + 16}
+                          stroke="#f97316"
+                          strokeWidth="3"
+                          strokeDasharray="8 8"
+                        />
+                      </svg>
+                    )}
+
+                    {tracePoints.map((point, index) => (
+                      <Marker
+                        key={`trace-${index}`}
+                        point={point}
+                        label={String(index + 1)}
+                        zoom={zoom}
+                      />
+                    ))}
+
+                    {drawOverlayPolyline(
+                      tracePoints,
+                      traceClosed || overlayLockedOpen,
+                      getActivePickColor(),
+                      "current",
+                      pickTarget?.type !== "full",
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        }
+        rail={
+          <TakeoffHub
               fullOverlayRows={fullOverlayRows}
               updateFullOverlayRow={updateFullOverlayRow}
               addFullOverlayRow={addFullOverlayRow}
@@ -1485,31 +1416,10 @@ source: "Manual" as const,
               setShowCombinedOverlay={setShowCombinedOverlay}
               showCombinedOverlay={showCombinedOverlay}
               saveToEstimateReview={saveToEstimateReview}
-            />
-          </aside>
-        </div>
-      </section>
+          />
+        }
+      />
     </main>
-  );
-}
-
-function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation }) {
-  const quantity = elevation.quantityEngine;
-  const overlayExists = hasTakeoffOverlayGeometry(elevation);
-
-  return (
-    <div className="border-b border-orange-500/20 bg-black px-6 py-2 font-mono text-[11px] text-zinc-400">
-      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
-      <span className="text-orange-300">{projectName}</span> | Level:{" "}
-      <span className="text-orange-300">{elevation.levelName ?? "Main Level"}</span> | Active Elevation:{" "}
-      <span className="text-orange-300">{elevation.elevationName}</span> | LF:{" "}
-      <span className="text-orange-300">{elevation.linearFeet}</span> | Height:{" "}
-      <span className="text-orange-300">{elevation.wallHeight}</span> | Bays:{" "}
-      <span className="text-orange-300">{quantity.bayCount}</span> | Legs:{" "}
-      <span className="text-orange-300">{quantity.legCount}</span> | Frames:{" "}
-      <span className="text-orange-300">{quantity.frameCount}</span> | overlayGeometry exists ={" "}
-      <span className="text-orange-300">{String(overlayExists)}</span>
-    </div>
   );
 }
 
@@ -1598,24 +1508,19 @@ function TakeoffHub({
   const toleranceLf = keyFloorLf * tolerancePercent;
 
   return (
-    <section className="rounded-2xl border border-orange-500/20 bg-black p-4 transition">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-xs uppercase tracking-[0.25em] text-orange-300">
-          Take Off Hub
-        </h2>
-        <button
-          onClick={() => setShowCombinedOverlay(!showCombinedOverlay)}
-          className="rounded-full border border-orange-500/30 px-3 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/10"
-        >
-          {showCombinedOverlay ? "Hide Preview" : "Show Preview"}
-        </button>
-      </div>
+    <div className="space-y-4">
+      <KorbanPanel title="Take Off Hub" compact className="border-orange-500/20">
+        <div className="mb-3 flex justify-end">
+          <KorbanButton variant="ghost" className="px-3 py-1 text-[10px]" onClick={() => setShowCombinedOverlay(!showCombinedOverlay)}>
+            {showCombinedOverlay ? "Hide Preview" : "Show Preview"}
+          </KorbanButton>
+        </div>
 
       <div
         className={`transition ${scaleReady ? "opacity-100" : "pointer-events-none opacity-35"}`}
         title={scaleReady ? "" : "Set scale to unlock Take Off Hub"}
       >
-        <SubCard title="Full Overlay">
+        <KorbanPanel title="Full Overlay" compact>
           <div className="space-y-2">
             {fullOverlayRows.map((row) => {
               const isActiveFullPick = pickTarget?.type === "full" && pickTarget.id === row.id;
@@ -1715,9 +1620,9 @@ function TakeoffHub({
               + Basement
             </button>
           </div>
-        </SubCard>
+        </KorbanPanel>
 
-        <SubCard title="Elevation Reference">
+        <KorbanPanel title="Elevation Reference" compact>
           <div className="space-y-2">
             {elevationRefs.map((item) => (
               <div
@@ -1816,9 +1721,9 @@ function TakeoffHub({
               </span>
             </div>
           </div>
-        </SubCard>
+        </KorbanPanel>
 
-        <SubCard title="Elevation Heights">
+        <KorbanPanel title="Elevation Heights" compact>
           <div className="space-y-3">
             {elevationHeights.map((item) => (
               <ElevationHeightTile
@@ -1843,9 +1748,9 @@ function TakeoffHub({
               />
             ))}
           </div>
-        </SubCard>
+        </KorbanPanel>
 
-        <SubCard title="Takeoff Viewer">
+        <KorbanPanel title="Takeoff Viewer" compact>
           <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
             <TakeoffViewer
               fullOverlayRows={fullOverlayRows}
@@ -1879,15 +1784,13 @@ function TakeoffHub({
               })}
             </div>
           </div>
-          <button
-            onClick={saveToEstimateReview}
-            className="mt-3 w-full rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-black hover:bg-orange-400"
-          >
-            Estimate Review
-          </button>
-        </SubCard>
+          <KorbanButton variant="primary" block className="mt-3" onClick={saveToEstimateReview}>
+            Save & Continue
+          </KorbanButton>
+        </KorbanPanel>
       </div>
-    </section>
+      </KorbanPanel>
+    </div>
   );
 }
 
@@ -2384,22 +2287,6 @@ function ActiveElevationMini({
   );
 }
 
-function SubCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="mt-4 rounded-2xl border border-zinc-800 bg-black/80 p-4 first:mt-3">
-      <h3 className="text-[10px] uppercase tracking-[0.22em] text-orange-400">
-        {title}
-      </h3>
-      <div className="mt-3">{children}</div>
-    </section>
-  );
-}
 
 function Marker({
   point,

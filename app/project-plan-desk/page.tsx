@@ -2,6 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  KorbanButton,
+  KorbanHeader,
+  KorbanHeaderMeta,
+  KorbanMetricTile,
+  KorbanPanel,
+  KorbanManagementShell,
+  KorbanSummaryStrip,
+  KorbanDemoPanel,
+  type KorbanMenuLink,
+} from "@/components/korban";
+import {
   getActiveElevation,
   getActiveProject,
   getActiveProjectId,
@@ -9,6 +20,7 @@ import {
   type ProjectElevation,
   type ProjectRecord,
 } from "@/lib/projectStore";
+import { formatStoredCount, formatStoredFeet } from "@/lib/workflowDisplay";
 
 type DeskTileStatus = "Ready" | "In Progress" | "Waiting" | "Needs Review";
 type ProjectPhase = "Budget / ROM" | "Design Development" | "50% CD" | "75% CD" | "100% CD" | "GMP" | "Final Round";
@@ -78,6 +90,14 @@ const newsItems = [
   "Bay Area mixed-use projects remain active despite financing pressure",
 ];
 
+const deskMenuLinks: KorbanMenuLink[] = [
+  { href: "/projects", label: "Projects" },
+  { href: "/takeoff-workspace", label: "Takeoff Workspace" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
+];
+
 export default function ProjectPlanDeskPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeOverlay, setActiveOverlay] = useState("Level 2");
@@ -86,10 +106,21 @@ export default function ProjectPlanDeskPage() {
   const [storedElevation, setStoredElevation] = useState<ProjectElevation | null>(null);
 
   useEffect(() => {
-    const activeProjectId = getActiveProjectId();
-    setActiveProjectId(activeProjectId);
-    setStoredProject(getActiveProject());
-    setStoredElevation(getActiveElevation());
+    function loadStoredProject() {
+      const activeProjectId = getActiveProjectId();
+      setActiveProjectId(activeProjectId);
+      setStoredProject(getActiveProject());
+      setStoredElevation(getActiveElevation());
+    }
+
+    loadStoredProject();
+    window.addEventListener("focus", loadStoredProject);
+    window.addEventListener("pageshow", loadStoredProject);
+
+    return () => {
+      window.removeEventListener("focus", loadStoredProject);
+      window.removeEventListener("pageshow", loadStoredProject);
+    };
   }, []);
 
   const displayProject = storedProject ?? {
@@ -103,6 +134,15 @@ export default function ProjectPlanDeskPage() {
     takeoff: { levels: [] },
   };
   const activeQuantities = storedElevation?.quantityEngine;
+  const displayLinearFeet = formatStoredCount(storedElevation?.linearFeet);
+  const displayFrameCount = formatStoredCount(activeQuantities?.frameCount);
+  const displayPlankCount = formatStoredCount(activeQuantities?.plankCount);
+  const displayBayCount = formatStoredCount(activeQuantities?.bayCount);
+  const displayLegCount = formatStoredCount(activeQuantities?.legCount);
+  const displayWallHeight =
+    storedElevation?.wallHeight != null && Number.isFinite(storedElevation.wallHeight) && storedElevation.wallHeight > 0
+      ? `${storedElevation.wallHeight}'-0"`
+      : "—";
 
   const selectedOverlay = useMemo(
     () => overlayLevels.find((level) => level.label === activeOverlay) ?? overlayLevels[3],
@@ -114,61 +154,66 @@ export default function ProjectPlanDeskPage() {
     [activeSection],
   );
 
+  const activeSectionLf = formatStoredFeet(
+    storedElevation?.elevationName === activeSection ? storedElevation.linearFeet : undefined,
+  );
+  const activeSectionHeight =
+    storedElevation?.elevationName === activeSection ? displayWallHeight : selectedSection.height;
+  const activeSectionLfLabel =
+    storedElevation?.elevationName === activeSection ? activeSectionLf : selectedSection.lf;
+
   return (
-    <main className="min-h-screen overflow-hidden bg-[#070604] text-white">
-      <header className="border-b border-orange-500/20 bg-black px-6 py-4">
-        <div className="flex items-center justify-between gap-5">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <button
-                onClick={() => setMenuOpen((current) => !current)}
-                className="flex h-10 w-10 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/10 text-orange-400 hover:bg-orange-500/20"
-              >
-                ▾
-              </button>
-
-              {menuOpen && (
-                <div className="absolute left-0 top-12 z-[999] w-60 rounded-2xl border border-orange-500/20 bg-black p-2 shadow-2xl">
-                  <MenuLink href="/projects" label="Projects" />
-                  <MenuLink href="/takeoff-workspace" label="Takeoff Workspace" />
-                  <MenuLink href="/estimate-review" label="Estimate Review" />
-                  <MenuLink href="/backend" label="Backend" />
-                  <MenuLink href="/settings" label="Settings" />
-                </div>
-              )}
-            </div>
-
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
-              <h1 className="mt-1 text-3xl font-black tracking-tight">Project Plan Desk</h1>
-              <p className="mt-1 text-xs uppercase tracking-[0.25em] text-zinc-600">
-                Estimator command center
-              </p>
-            </div>
-          </div>
-
-          <div className="hidden items-center gap-3 xl:flex">
-            <DeskAction href="/takeoff-workspace" label="Open Takeoff" />
-            <DeskAction href="/set-scaffold" label="Set Scaffold" />
-            <DeskAction href="/section-view" label="Section View" />
-            <DeskAction href="/estimate-review" label="Estimate Review" primary />
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 md:grid-cols-4 xl:grid-cols-8">
-          <TopStat label="Project" value={displayProject.projectName} wide />
-          <TopStat label="Client" value={displayProject.customer} />
-          <TopStat label="Phase" value={project.currentPhase} />
-          <TopStat label="Status" value={project.projectStatus} />
-          <TopStat label="Bid Due" value={project.bidDueDate} />
-          <TopStat label="Last Saved" value={storedProject ? new Date(displayProject.updatedAt).toLocaleString() : project.lastSaved} />
-        </div>
-      </header>
-
-      <InventoryTicker />
-
-      <section className="grid gap-4 p-4 xl:grid-cols-12">
-        <Tile className="xl:col-span-3" title="Project Information" subtitle="Current bid profile">
+    <KorbanManagementShell
+      header={
+        <KorbanHeader
+          title="Project Plan Desk"
+          subtitle="Estimator command center"
+          menuLinks={deskMenuLinks}
+          menuOpen={menuOpen}
+          onMenuToggle={() => setMenuOpen((current) => !current)}
+          actionsClassName="gap-3"
+          actions={
+            <>
+              <KorbanHeaderMeta label="Project" value={displayProject.projectName} />
+              <KorbanButton as="a" href="/takeoff-workspace" variant="ghost">
+                Open Takeoff
+              </KorbanButton>
+              <KorbanButton as="a" href="/set-scaffold" variant="ghost">
+                Set Scaffold
+              </KorbanButton>
+              <KorbanButton as="a" href="/section-view" variant="ghost">
+                Section View
+              </KorbanButton>
+              <KorbanButton as="a" href="/estimate-review" variant="primary">
+                Save & Continue
+              </KorbanButton>
+            </>
+          }
+        />
+      }
+      summary={
+        <KorbanSummaryStrip title="Live Project Metrics">
+          <KorbanMetricTile label="Linear Ft" value={displayLinearFeet} />
+          <KorbanMetricTile label="Bay Count" value={displayBayCount} />
+          <KorbanMetricTile label="Leg Count" value={displayLegCount} />
+          <KorbanMetricTile label="Frame Count" value={displayFrameCount} />
+          <KorbanMetricTile label="Plank Count" value={displayPlankCount} />
+        </KorbanSummaryStrip>
+      }
+      banner={
+        <InventoryTicker
+          frameCount={activeQuantities?.frameCount}
+          plankCount={activeQuantities?.plankCount}
+          crossBraceCount={activeQuantities?.crossBraceCount}
+          guardrailCount={activeQuantities?.guardrailCount}
+          basePlateCount={activeQuantities?.basePlateCount}
+          screwJackCount={activeQuantities?.screwJackCount}
+        />
+      }
+      bodyClassName="p-4"
+    >
+      <section className="grid gap-4 xl:grid-cols-12">
+        <KorbanPanel className="xl:col-span-3" title="Project Information" subtitle="Current bid profile">
           <div className="space-y-2">
             <InfoRow label="Project No." value={project.projectNumber} />
             <InfoRow label="Address" value={displayProject.projectAddress} />
@@ -177,9 +222,10 @@ export default function ProjectPlanDeskPage() {
             <InfoRow label="Union" value={project.unionStatus} />
           </div>
           <TileButton href="/projects" label="Open Project Record" />
-        </Tile>
+        </KorbanPanel>
 
-        <Tile className="xl:col-span-3" title="Customer Database" subtitle="Client profile + history">
+        <KorbanPanel className="xl:col-span-3" title="Customer Database" subtitle="Reference data · demo profile">
+          <KorbanDemoPanel>
           <div className="space-y-2">
             <InfoRow label="Company" value={displayProject.customer} />
             <InfoRow label="Contact" value="Marcus Lee" />
@@ -188,26 +234,29 @@ export default function ProjectPlanDeskPage() {
             <InfoRow label="Past Jobs" value="7" />
           </div>
           <TileButton href="/projects" label="Open Customer" />
-        </Tile>
+          </KorbanDemoPanel>
+        </KorbanPanel>
 
-        <Tile className="xl:col-span-3" title="Scaffold Workspace" subtitle="Layout + scaffold design">
+        <KorbanPanel className="xl:col-span-3" title="Scaffold Workspace" subtitle="Reference progress · demo">
+          <KorbanDemoPanel>
           <ProgressRow label="Set Scaffold" value={68} />
           <ProgressRow label="Frame Config" value={85} />
           <ProgressRow label="Section Design" value={35} />
           <TileButton href="/set-scaffold" label="Continue Scaffold Setup" />
-        </Tile>
+          </KorbanDemoPanel>
+        </KorbanPanel>
 
-        <Tile className="xl:col-span-3" title="Estimate Status" subtitle="Quantity engine + review">
+        <KorbanPanel className="xl:col-span-3" title="Estimate Status" subtitle="Quantity engine + review">
           <div className="grid grid-cols-2 gap-2">
-            <MiniMetric label="LF" value={(storedElevation?.linearFeet ?? 1240).toLocaleString()} />
-            <MiniMetric label="Frames" value={(activeQuantities?.frameCount ?? 496).toLocaleString()} />
-            <MiniMetric label="Planks" value={(activeQuantities?.plankCount ?? 620).toLocaleString()} />
-            <MiniMetric label="Bid" value="$196K" />
+            <KorbanMetricTile label="LF" value={displayLinearFeet} />
+            <KorbanMetricTile label="Frames" value={displayFrameCount} />
+            <KorbanMetricTile label="Planks" value={displayPlankCount} />
+            <KorbanMetricTile label="Bid" value="$196K" />
           </div>
           <TileButton href="/estimate-review" label="Open Estimate Review" />
-        </Tile>
+        </KorbanPanel>
 
-        <HeroTile className="xl:col-span-7" title="Combined Overlay Viewer" subtitle="Stored takeoff geometry from all levels">
+        <KorbanPanel hero className="xl:col-span-7" title="Combined Overlay Viewer" subtitle="Stored takeoff geometry from all levels">
           <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
             <div className="relative min-h-[370px] overflow-hidden rounded-[1.5rem] border border-zinc-800 bg-black">
               <div className="absolute inset-0 opacity-[0.12] bg-[linear-gradient(to_right,#f97316_1px,transparent_1px),linear-gradient(to_bottom,#f97316_1px,transparent_1px)] bg-[size:34px_34px]" />
@@ -274,9 +323,9 @@ export default function ProjectPlanDeskPage() {
               ))}
             </div>
           </div>
-        </HeroTile>
+        </KorbanPanel>
 
-        <HeroTile className="xl:col-span-5" title="Section View Viewer" subtitle="Elevation and section design workspace">
+        <KorbanPanel hero className="xl:col-span-5" title="Section View Viewer" subtitle="Elevation and section design workspace">
           <div className="grid gap-4 lg:grid-cols-[1fr_150px]">
             <div className="relative min-h-[370px] overflow-hidden rounded-[1.5rem] border border-zinc-800 bg-black">
               <div className="absolute inset-0 opacity-[0.10] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:28px_28px]" />
@@ -290,7 +339,7 @@ export default function ProjectPlanDeskPage() {
                   {selectedSection.elevation} Elevation
                 </text>
                 <text x="78" y="315" fill="#a1a1aa" fontSize="12">
-                  LF {selectedSection.lf} · Height {selectedSection.height}
+                  LF {activeSectionLfLabel} · Height {activeSectionHeight}
                 </text>
               </svg>
 
@@ -320,9 +369,10 @@ export default function ProjectPlanDeskPage() {
               ))}
             </div>
           </div>
-        </HeroTile>
+        </KorbanPanel>
 
-        <Tile className="xl:col-span-4" title="Project Communications" subtitle="Internal notes and messages">
+        <KorbanDemoPanel className="xl:col-span-4">
+        <KorbanPanel title="Project Communications" subtitle="Reference data · demo messages">
           <div className="space-y-2">
             {messages.map((message) => (
               <div key={`${message.from}-${message.time}`} className="rounded-2xl border border-zinc-800 bg-black p-3">
@@ -334,9 +384,11 @@ export default function ProjectPlanDeskPage() {
               </div>
             ))}
           </div>
-        </Tile>
+        </KorbanPanel>
+        </KorbanDemoPanel>
 
-        <Tile className="xl:col-span-3" title="Project Calendar" subtitle="Bid, award, and mobilization dates">
+        <KorbanDemoPanel className="xl:col-span-3">
+        <KorbanPanel title="Project Calendar" subtitle="Reference data · demo schedule">
           <div className="space-y-2">
             {calendarItems.map((item) => (
               <div key={`${item.date}-${item.title}`} className="flex items-center gap-3 rounded-2xl border border-zinc-800 bg-black p-3">
@@ -350,17 +402,21 @@ export default function ProjectPlanDeskPage() {
               </div>
             ))}
           </div>
-        </Tile>
+        </KorbanPanel>
+        </KorbanDemoPanel>
 
-        <Tile className="xl:col-span-2" title="Market Watch" subtitle="Construction trend">
+        <KorbanDemoPanel className="xl:col-span-2">
+        <KorbanPanel title="Market Watch" subtitle="Reference data · demo index">
           <div className="rounded-3xl border border-green-500/20 bg-green-500/10 p-4">
             <p className="text-[10px] uppercase tracking-[0.18em] text-green-300/70">Industry Index</p>
             <p className="mt-2 font-mono text-3xl font-black text-green-300">+1.8%</p>
             <p className="mt-2 text-xs text-green-200/50">Commercial starts trending up.</p>
           </div>
-        </Tile>
+        </KorbanPanel>
+        </KorbanDemoPanel>
 
-        <Tile className="xl:col-span-3" title="Construction News" subtitle="US + international">
+        <KorbanDemoPanel className="xl:col-span-3">
+        <KorbanPanel title="Construction News" subtitle="Reference data · demo feed">
           <div className="space-y-2">
             {newsItems.map((item) => (
               <button key={item} className="w-full rounded-2xl border border-zinc-800 bg-black p-3 text-left text-xs leading-5 text-zinc-400 hover:border-orange-500/30 hover:text-orange-200">
@@ -368,9 +424,11 @@ export default function ProjectPlanDeskPage() {
               </button>
             ))}
           </div>
-        </Tile>
+        </KorbanPanel>
+        </KorbanDemoPanel>
 
-        <Tile className="xl:col-span-4" title="Task Tracker" subtitle="Project action list">
+        <KorbanDemoPanel className="xl:col-span-4">
+        <KorbanPanel title="Task Tracker" subtitle="Reference data · demo tasks">
           <div className="grid gap-2 md:grid-cols-2">
             {tasks.map((task) => (
               <div key={task.item} className="rounded-2xl border border-zinc-800 bg-black p-3">
@@ -387,9 +445,10 @@ export default function ProjectPlanDeskPage() {
               </div>
             ))}
           </div>
-        </Tile>
+        </KorbanPanel>
+        </KorbanDemoPanel>
 
-        <Tile className="xl:col-span-4" title="Project Edit Tools" subtitle="Future overlay corrections">
+        <KorbanPanel className="xl:col-span-4" title="Project Edit Tools" subtitle="Future overlay corrections">
           <div className="grid grid-cols-2 gap-2">
             <MiniTool label="Auto Straighten" />
             <MiniTool label="Break Linework" />
@@ -398,23 +457,62 @@ export default function ProjectPlanDeskPage() {
             <MiniTool label="Change Colors" />
             <MiniTool label="Reference Point" />
           </div>
-        </Tile>
+        </KorbanPanel>
 
-        <Tile className="xl:col-span-4" title="Drafting / Imports / Exports" subtitle="Files, reports, and integrations">
+        <KorbanPanel className="xl:col-span-4" title="Drafting / Imports / Exports" subtitle="Files, reports, and integrations">
           <div className="grid grid-cols-2 gap-2">
             <TileButton href="/takeoff-workspace" label="Upload PDF" compact />
             <TileButton href="/estimate-review" label="Send Report" compact />
             <TileButton href="/backend" label="Backend" compact />
             <TileButton href="/settings" label="Settings" compact />
           </div>
-        </Tile>
+        </KorbanPanel>
       </section>
-    </main>
+    </KorbanManagementShell>
   );
 }
 
-function InventoryTicker() {
-  const tickerItems = [...inventoryTickerItems, ...inventoryTickerItems];
+function InventoryTicker({
+  frameCount,
+  plankCount,
+  crossBraceCount,
+  guardrailCount,
+  basePlateCount,
+  screwJackCount,
+}: {
+  frameCount?: number;
+  plankCount?: number;
+  crossBraceCount?: number;
+  guardrailCount?: number;
+  basePlateCount?: number;
+  screwJackCount?: number;
+}) {
+  const resolvedItems = inventoryTickerItems.map((item) => {
+    const storeRequired =
+      item.item === "Frames"
+        ? frameCount
+        : item.item === "Planks"
+          ? plankCount
+          : item.item === "Cross Braces"
+            ? crossBraceCount
+            : item.item === "Guardrails"
+              ? guardrailCount
+              : item.item === "Base Plates"
+                ? basePlateCount
+                : item.item === "Screw Jacks"
+                  ? screwJackCount
+                  : undefined;
+
+    return {
+      ...item,
+      required:
+        storeRequired != null && Number.isFinite(storeRequired) && storeRequired > 0
+          ? storeRequired
+          : item.required,
+    };
+  });
+
+  const tickerItems = [...resolvedItems, ...resolvedItems];
 
   return (
     <section className="border-b border-orange-500/10 bg-black/80 px-4 py-2">
@@ -478,114 +576,35 @@ function InventoryTicker() {
   );
 }
 
-function Tile({
-  title,
-  subtitle,
-  children,
-  className = "",
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`rounded-[1.75rem] border border-zinc-800 bg-[#0b0b0b] p-4 shadow-2xl ${className}`}>
-      <TileHeader title={title} subtitle={subtitle} />
-      <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-function HeroTile({
-  title,
-  subtitle,
-  children,
-  className = "",
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`rounded-[2rem] border border-orange-500/20 bg-[#0b0b0b] p-4 shadow-2xl ${className}`}>
-      <TileHeader title={title} subtitle={subtitle} hero />
-      <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-function TileHeader({ title, subtitle, hero = false }: { title: string; subtitle?: string; hero?: boolean }) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <div>
-        <h2 className={`${hero ? "text-sm" : "text-xs"} font-black uppercase tracking-[0.24em] text-orange-400`}>
-          {title}
-        </h2>
-        {subtitle && <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>}
-      </div>
-      <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
-    </div>
-  );
-}
-
-function MenuLink({ href, label }: { href: string; label: string }) {
-  return (
-    <a href={href} className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">
-      {label}
-    </a>
-  );
-}
-
-function DeskAction({ href, label, primary = false }: { href: string; label: string; primary?: boolean }) {
-  return (
-    <a
-      href={href}
-      className={`rounded-xl px-4 py-2 text-xs font-bold transition ${
-        primary
-          ? "bg-orange-500 text-black hover:bg-orange-400"
-          : "border border-zinc-800 bg-black text-zinc-300 hover:border-orange-500/40 hover:text-orange-300"
-      }`}
-    >
-      {label}
-    </a>
-  );
-}
-
 function TileButton({ href, label, compact = false }: { href: string; label: string; compact?: boolean }) {
   return (
-    <a
-      href={href}
-      className={`mt-4 block rounded-xl border border-orange-500/30 bg-orange-500/10 text-center font-bold text-orange-300 hover:bg-orange-500/20 ${
-        compact ? "px-3 py-2 text-xs" : "px-4 py-3 text-sm"
-      }`}
-    >
+    <KorbanButton as="a" href={href} variant="ghost" block compact={compact} className={compact ? undefined : "mt-4"}>
       {label}
-    </a>
+    </KorbanButton>
   );
 }
 
 function SmallTool({ label, href }: { label: string; href?: string }) {
-  const className = "rounded-xl border border-zinc-700 bg-black/80 px-3 py-2 text-[10px] font-bold text-zinc-300 backdrop-blur hover:border-orange-500/40 hover:text-orange-300";
-  if (href) return <a href={href} className={className}>{label}</a>;
-  return <button className={className}>{label}</button>;
+  if (href) {
+    return (
+      <KorbanButton as="a" href={href} variant="ghost" className="border-zinc-700 bg-black/80 px-3 py-2 text-[10px] backdrop-blur">
+        {label}
+      </KorbanButton>
+    );
+  }
+
+  return (
+    <KorbanButton variant="ghost" className="border-zinc-700 bg-black/80 px-3 py-2 text-[10px] backdrop-blur">
+      {label}
+    </KorbanButton>
+  );
 }
 
 function MiniTool({ label }: { label: string }) {
   return (
-    <button className="rounded-xl border border-zinc-800 bg-black px-3 py-3 text-xs font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">
+    <KorbanButton variant="ghost" className="px-3 py-3 text-xs text-zinc-400">
       {label}
-    </button>
-  );
-}
-
-function TopStat({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
-  return (
-    <div className={`rounded-2xl border border-zinc-800 bg-[#0b0b0b] px-4 py-3 ${wide ? "md:col-span-2 xl:col-span-3" : ""}`}>
-      <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-600">{label}</p>
-      <p className="mt-1 truncate text-xs font-bold text-zinc-200">{value}</p>
-    </div>
+    </KorbanButton>
   );
 }
 
@@ -594,15 +613,6 @@ function InfoRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between gap-3 border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
       <span className="text-xs text-zinc-600">{label}</span>
       <span className="text-right text-xs font-bold text-zinc-300">{value}</span>
-    </div>
-  );
-}
-
-function MiniMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-600">{label}</p>
-      <p className="mt-1 font-mono text-lg font-black text-orange-300">{value}</p>
     </div>
   );
 }

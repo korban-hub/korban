@@ -2,11 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  KorbanButton,
+  KorbanHeader,
+  KorbanHeaderMeta,
+  type KorbanMenuLink,
+} from "@/components/korban";
+import {
   calculateQuantityEngine,
   getActiveElevation,
   getActiveProject,
-  getActiveProjectId,
-  hasTakeoffOverlayGeometry,
   saveActiveElevation,
   type ProjectElevation,
   type ScaffoldInput,
@@ -63,6 +67,14 @@ const runSummary = [
   { label: "East Return", lf: "68'-0\"", bays: 7, legs: 8 },
   { label: "South Run", lf: "162'-0\"", bays: 17, legs: 18 },
   { label: "West Run", lf: "72'-0\"", bays: 8, legs: 9 },
+];
+
+const scaffoldMenuLinks: KorbanMenuLink[] = [
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/takeoff-workspace", label: "Takeoff Workspace" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
 ];
 
 function parseFeetValue(value: string) {
@@ -186,49 +198,28 @@ export default function SetScaffoldPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#070604] text-white">
-      <header className="border-b border-orange-500/20 bg-black px-6 py-4">
-        <div className="flex items-center justify-between gap-5">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <button
-                onClick={() => setMenuOpen((current) => !current)}
-                className="flex h-10 w-10 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/10 text-orange-400 hover:bg-orange-500/20"
-              >
-                ▾
-              </button>
-
-              {menuOpen && (
-                <div className="absolute left-0 top-12 z-[999] w-60 rounded-2xl border border-orange-500/20 bg-black p-2 shadow-2xl">
-                  <MenuLink href="/project-plan-desk" label="Project Plan Desk" />
-                  <MenuLink href="/takeoff-workspace" label="Takeoff Workspace" />
-                  <MenuLink href="/estimate-review" label="Estimate Review" />
-                  <MenuLink href="/backend" label="Backend" />
-                  <MenuLink href="/settings" label="Settings" />
-                </div>
-              )}
-            </div>
-
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
-              <h1 className="mt-1 text-3xl font-black tracking-tight">Set Scaffold</h1>
-              <p className="mt-1 text-xs uppercase tracking-[0.25em] text-zinc-600">
-                Combined overlay to scaffold bay layout
-              </p>
-            </div>
-          </div>
-
-          <div className="hidden items-center gap-4 xl:flex">
-            <HeaderMeta label="Project" value={activeProjectName} />
-            <HeaderMeta label="Job No." value={projectInfo.jobNumber} />
-            <HeaderMeta label="Reference" value={projectInfo.reference} />
-            <TopAction href="/project-plan-desk" label="Project Plan Desk" />
-            <TopAction href="/estimate-review" label="Save & Continue" primary />
-          </div>
-        </div>
-      </header>
-
-      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanHeader
+        title="Set Scaffold"
+        subtitle="Combined overlay to scaffold bay layout"
+        menuLinks={scaffoldMenuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((current) => !current)}
+        actionsClassName="gap-4"
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={activeProjectName} />
+            <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
+            <KorbanHeaderMeta label="Reference" value={projectInfo.reference} />
+            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">
+              Project Plan Desk
+            </KorbanButton>
+            <KorbanButton as="a" href="/estimate-review" variant="primary">
+              Save & Continue
+            </KorbanButton>
+          </>
+        }
+      />
 
       <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
@@ -1210,18 +1201,9 @@ function GridAxisLabels() {
   );
 }
 
-function HeaderMeta({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-36">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-600">{label}</p>
-      <p className="mt-1 truncate text-xs font-bold text-zinc-200">{value}</p>
-    </div>
-  );
-}
-
 function Panel({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <section className="mb-4 rounded-[1.6rem] border border-zinc-800 bg-[#0b0b0b] p-4 shadow-2xl last:mb-0">
+    <section className="mb-4 rounded-[1.6rem] border border-zinc-800 bg-korban-raised p-4 shadow-2xl last:mb-0">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">{title}</h2>
@@ -1272,55 +1254,8 @@ function StatusPill({ label, value, active, onClick }: { label: string; value?: 
 
 function ViewerTool({ label, primary = false }: { label: string; primary?: boolean }) {
   return (
-    <button className={`rounded-xl px-3 py-2 text-[10px] font-bold ${
-      primary
-        ? "bg-orange-500 text-black hover:bg-orange-400"
-        : "border border-zinc-700 bg-black/80 text-zinc-300 hover:border-orange-500/40 hover:text-orange-300"
-    }`}>
+    <KorbanButton variant={primary ? "primary" : "ghost"} className="px-3 py-2 text-[10px]">
       {label}
-    </button>
-  );
-}
-
-function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
-  const quantity = elevation?.quantityEngine;
-  const overlayExists = hasTakeoffOverlayGeometry(elevation);
-
-  return (
-    <div className="border-b border-orange-500/20 bg-black px-6 py-2 font-mono text-[11px] text-zinc-400">
-      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
-      <span className="text-orange-300">{projectName}</span> | Level:{" "}
-      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
-      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
-      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
-      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
-      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
-      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
-      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
-      <span className="text-orange-300">{String(overlayExists)}</span>
-    </div>
-  );
-}
-
-function MenuLink({ href, label }: { href: string; label: string }) {
-  return (
-    <a href={href} className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">
-      {label}
-    </a>
-  );
-}
-
-function TopAction({ href, label, primary = false }: { href: string; label: string; primary?: boolean }) {
-  return (
-    <a
-      href={href}
-      className={`rounded-xl px-4 py-2 text-xs font-bold transition ${
-        primary
-          ? "bg-orange-500 text-black hover:bg-orange-400"
-          : "border border-zinc-800 bg-black text-zinc-300 hover:border-orange-500/40 hover:text-orange-300"
-      }`}
-    >
-      {label}
-    </a>
+    </KorbanButton>
   );
 }

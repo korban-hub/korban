@@ -1,12 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanMetricTile, KorbanManagementShell, KorbanSummaryStrip, type KorbanMenuLink } from "@/components/korban";
 import {
   getActiveElevation,
   getActiveProject,
-  getActiveProjectId,
-  hasTakeoffOverlayGeometry,
-  type ProjectElevation,
 } from "@/lib/projectStore";
 
 type RentalDuration = "30 Days" | "60 Days" | "90 Days" | "120 Days" | "Custom";
@@ -133,6 +131,14 @@ const baseEstimate = {
 };
 
 type EstimateData = typeof baseEstimate;
+
+const estimateMenuLinks: KorbanMenuLink[] = [
+  { href: "/", label: "Bid Room" },
+  { href: "/takeoff-workspace", label: "Takeoff Workspace" },
+  { href: "/projects", label: "Projects" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
+];
 
 const standardMaterialInputs = [
   {
@@ -274,8 +280,6 @@ export default function EstimateReviewPage() {
   );
   const [isHydrated, setIsHydrated] = useState(false);
   const [storedEstimate, setStoredEstimate] = useState<EstimateData | null>(null);
-  const [activeProjectName, setActiveProjectName] = useState(baseEstimate.projectName);
-  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
 
   useEffect(() => {
     function loadStoredEstimate() {
@@ -283,8 +287,6 @@ export default function EstimateReviewPage() {
       const elevation = getActiveElevation();
       const quantityEngine = elevation.quantityEngine;
       console.log("ESTIMATE REVIEW LOADED LF:", elevation.linearFeet);
-      setActiveProjectName(project.projectName || baseEstimate.projectName);
-      setActiveElevationData(elevation);
 
       setStoredEstimate({
         ...baseEstimate,
@@ -540,64 +542,45 @@ export default function EstimateReviewPage() {
   }
 
   if (!isHydrated) {
-    return <main className="min-h-screen bg-[#080604] text-white" />;
+    return <main className="min-h-screen bg-korban-base text-white" />;
   }
 
   return (
-    <main className="min-h-screen bg-[#080604] text-white">
-      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
-      <section className="border-b border-orange-500/20 bg-black px-8 py-5">
-        <div className="flex items-center justify-between gap-5">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <button
-                onClick={() => setMenuOpen((current) => !current)}
-                className="flex h-10 w-10 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/10 text-orange-400 hover:bg-orange-500/20"
-              >
-                ▾
-              </button>
-
-              {menuOpen && (
-                <div className="absolute left-0 top-12 z-[999] w-56 rounded-2xl border border-orange-500/20 bg-black p-2 shadow-2xl">
-                  <a href="/" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Bid Room</a>
-                  <a href="/takeoff-workspace" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Takeoff Workspace</a>
-                  <a href="/projects" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Projects</a>
-                  <a href="/backend" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Backend</a>
-                  <a href="/settings" className="block rounded-xl px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300">Settings</a>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
-              <h1 className="mt-2 text-3xl font-bold">Estimate Review</h1>
-              <p className="mt-1 text-sm text-zinc-500">
-                Finalize estimate numbers, approve proposal content, and submit price to client.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <StatusBadge status={proposalStatus} />
-
-            <button
-              onClick={approveProposal}
-              className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
-            >
-              Approve Proposal
-            </button>
-
-            <button
-              onClick={submitPrice}
-              className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
-            >
-              Submit Price
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-5 p-6 xl:grid-cols-[minmax(0,6.5fr)_minmax(280px,2.5fr)_minmax(150px,1fr)]">
+    <KorbanManagementShell
+      header={
+        <KorbanHeader
+          title="Estimate Review"
+          subtitle="Finalize estimate numbers, approve proposal content, and submit price to client"
+          menuLinks={estimateMenuLinks}
+          menuOpen={menuOpen}
+          onMenuToggle={() => setMenuOpen((current) => !current)}
+          actionsClassName="gap-3"
+          actions={
+            <>
+              <KorbanHeaderMeta label="Project" value={estimate.projectName} />
+              <StatusBadge status={proposalStatus} />
+              <KorbanButton variant="ghost" onClick={approveProposal}>
+                Approve Proposal
+              </KorbanButton>
+              <KorbanButton variant="primary" onClick={submitPrice}>
+                Submit Price
+              </KorbanButton>
+            </>
+          }
+        />
+      }
+      summary={
+        <KorbanSummaryStrip title="Live Project Metrics">
+          <KorbanMetricTile label="Linear Ft" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
+          <KorbanMetricTile label="Bay Count" value={formatNumber(estimate.bays)} />
+          <KorbanMetricTile label="Leg Count" value={formatNumber(estimate.legs)} />
+          <KorbanMetricTile label="Frame Count" value={formatNumber(estimate.frames)} />
+          <KorbanMetricTile label="Plank Count" value={formatNumber(estimate.planks)} />
+        </KorbanSummaryStrip>
+      }
+      bodyClassName="p-4"
+    >
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,6.5fr)_minmax(280px,2.5fr)_minmax(150px,1fr)]">
         <section className="space-y-5">
           <ProposalSheet>
             <div className="flex items-start justify-between gap-6 border-b border-zinc-800 pb-5">
@@ -620,9 +603,9 @@ export default function EstimateReviewPage() {
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-3">
-              <SummaryTile label="Total Linear Feet" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
-              <SummaryTile label="Frame Count" value={formatNumber(estimate.frames)} />
-              <SummaryTile label="Plank Count" value={formatNumber(estimate.planks)} />
+              <KorbanMetricTile size="hero" label="Total Linear Feet" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
+              <KorbanMetricTile size="hero" label="Frame Count" value={formatNumber(estimate.frames)} />
+              <KorbanMetricTile size="hero" label="Plank Count" value={formatNumber(estimate.planks)} />
             </div>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
@@ -808,7 +791,7 @@ export default function EstimateReviewPage() {
           />
         </aside>
       </section>
-    </main>
+    </KorbanManagementShell>
   );
 }
 
@@ -1152,26 +1135,6 @@ function RentalDurationSection({
           <p className="mt-2 font-mono text-lg font-bold text-orange-400">{formatMoney(rentalRevenue)}</p>
         </div>
       </div>
-    </div>
-  );
-}
-
-function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
-  const quantity = elevation?.quantityEngine;
-  const overlayExists = hasTakeoffOverlayGeometry(elevation);
-
-  return (
-    <div className="border-b border-orange-500/20 bg-black px-8 py-2 font-mono text-[11px] text-zinc-400">
-      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
-      <span className="text-orange-300">{projectName}</span> | Level:{" "}
-      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
-      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
-      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
-      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
-      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
-      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
-      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
-      <span className="text-orange-300">{String(overlayExists)}</span>
     </div>
   );
 }
@@ -1753,18 +1716,6 @@ function QuantityRow({ label, value }: { label: string; value: number }) {
     <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-2 last:border-b-0">
       <span className="text-xs text-zinc-500">{label}</span>
       <span className="font-mono text-xs font-bold text-zinc-300">{formatNumber(value)}</span>
-    </div>
-  );
-}
-
-function SummaryTile({ label, value, suffix }: { label: string; value: string; suffix?: string }) {
-  return (
-    <div className="rounded-3xl border border-orange-500/20 bg-black p-5">
-      <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">{label}</p>
-      <p className="mt-3 font-mono text-3xl font-bold text-orange-500">
-        {value}
-        {suffix && <span className="ml-2 text-sm text-zinc-500">{suffix}</span>}
-      </p>
     </div>
   );
 }

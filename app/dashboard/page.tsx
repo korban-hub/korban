@@ -1,5 +1,5 @@
 "use client";
-
+import { KorbanHeader } from "@/components/korban";
 import { useMemo, useState } from "react";
 
 type BidStatus = "Won" | "Lost" | "Still Chasing" | "No Response" | "Not Sent";
@@ -338,24 +338,38 @@ const internationalConstructionNews = [
   },
 ];
 
+// ── Weekly Bid Calendar — new signature element ──
+// Live 7-day strip of upcoming bid due dates, pulled from the same
+// bidPipeline data already on this page (bidDate field), so it stays
+// in sync with everything else automatically.
+const weekDayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function getUpcomingWeek() {
+  const today = new Date("2026-06-18"); // matches current app date context
+  const dayOfWeek = (today.getDay() + 6) % 7; // 0 = Monday
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - dayOfWeek);
+
+  return weekDayLabels.map((label, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    const dateKey = `${mm}/${dd}/26`;
+    const isToday = dateKey === "06/18/26";
+
+    return { label, dateKey, dayNumber: date.getDate(), isToday };
+  });
+}
+
 export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<Timeframe>("This Month");
   const [topCompanyTimeframe, setTopCompanyTimeframe] = useState<Timeframe>("This Month");
-  const [graphFilter, setGraphFilter] = useState<BidStatus | "All">("All");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
 
   const filteredBids = useMemo(() => {
     return bidPipeline.filter((bid) => bid.timeframe.includes(timeframe));
   }, [timeframe]);
-
-  const filteredGraphBids = useMemo(() => {
-    if (selectedProject) {
-      return filteredBids.filter((bid) => bid.project === selectedProject);
-    }
-
-    if (graphFilter === "All") return filteredBids;
-    return filteredBids.filter((bid) => bid.status === graphFilter);
-  }, [filteredBids, graphFilter, selectedProject]);
 
   const topCompanyBids = useMemo(() => {
     return bidPipeline.filter((bid) => bid.timeframe.includes(topCompanyTimeframe));
@@ -375,6 +389,17 @@ export default function DashboardPage() {
 
   const topCompanies = getTopWonCompanies(topCompanyBids);
   const marketDirection = getMarketDirection();
+  const upcomingWeek = useMemo(() => getUpcomingWeek(), []);
+
+  const bidsByDate = useMemo(() => {
+    const map = new Map<string, typeof bidPipeline>();
+    bidPipeline.forEach((bid) => {
+      const existing = map.get(bid.bidDate) ?? [];
+      existing.push(bid);
+      map.set(bid.bidDate, existing);
+    });
+    return map;
+  }, []);
 
   function sendReport() {
     window.print();
@@ -382,53 +407,41 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-[#080604] text-white">
-      <section className="border-b border-orange-500/20 bg-black px-8 py-5">
-        <div className="flex items-center justify-between gap-5">
-          <div>
-            <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">
-              KORBAN
-            </p>
-            <h1 className="mt-2 text-3xl font-bold">Project Dashboard</h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              Bid tracking, follow-ups, inventory pressure, and market awareness.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
+      <KorbanHeader
+        title="Bid Room"
+        subtitle="Bid tracking, follow-ups, inventory pressure, and market awareness."
+        actionsAlwaysVisible
+        actions={
+          <>
             <button
               onClick={sendReport}
               className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
             >
               Send Report
             </button>
-
             <a
-              href="/"
-              className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
+              href="/project-plan-desk"
+              className="flex items-center gap-2 rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
             >
-              Open Main Shell
+              <span className="text-base leading-none">+</span> Project
             </a>
-          </div>
-        </div>
-      </section>
+          </>
+        }
+      />
+
+      {/* Subtle inline timeframe filter — replaces the old full-width "Dashboard Timeframe" card */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-900 bg-[#0b0b0b] px-6 py-3">
+        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-600">
+          Filtered by{" "}
+          <span className="font-mono font-bold normal-case tracking-normal text-orange-400">
+            {timeframe}
+          </span>
+        </p>
+        <TimeframeSelector value={timeframe} onChange={setTimeframe} compact />
+      </div>
 
       <section className="grid gap-5 bg-[#080604] p-6 xl:grid-cols-[minmax(0,1fr)_440px] 2xl:grid-cols-[minmax(0,1fr)_480px]">
         <div className="space-y-5">
-          <DashboardCard
-            title={
-              <>
-                Dashboard Timeframe
-                <span className="ml-4 text-[11px] normal-case tracking-normal text-zinc-500">
-                  Dashboard results are currently filtered by:{" "}
-                  <span className="font-mono text-orange-400">{timeframe}</span>
-                </span>
-              </>
-            }
-            rightSlot={<TimeframeSelector value={timeframe} onChange={setTimeframe} />}
-          >
-            <div />
-          </DashboardCard>
-
           <div className="grid gap-4 md:grid-cols-5">
             <MetricCard label="Active Bids" value={String(activeBids)} />
             <MetricCard label="Bid Sent" value={String(bidsSent)} />
@@ -437,21 +450,159 @@ export default function DashboardPage() {
             <MetricCard label="Lost Jobs" value={String(lost)} />
           </div>
 
-          <DashboardCard title="Bid Track">
-            <BidResultsChart
-              bids={filteredGraphBids}
-              selectedStatus={graphFilter}
-              selectedProject={selectedProject}
-              onStatusChange={(status) => {
-                setSelectedProject(null);
-                setGraphFilter(status);
-              }}
-              onClearSelectedProject={() => setSelectedProject(null)}
-            />
+          <DashboardCard
+            title="Bid Follow-Up Tracker"
+            rightSlot={
+              <a
+                href="/projects"
+                className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.1em] text-orange-300 transition hover:bg-orange-500/20"
+              >
+                Bid Log
+              </a>
+            }
+          >
+            <div className="rounded-2xl border border-zinc-800">
+              <table className="w-full table-fixed text-left text-[10px]">
+                <thead className="bg-zinc-950 text-zinc-500">
+                  <tr>
+                    <th className="w-[14%] px-2 py-3">Project</th>
+                    <th className="w-[15%] px-2 py-3">GC / Contact</th>
+                    <th className="w-[8%] px-2 py-3">Bid Date</th>
+                    {roundLabels.map((label) => (
+                      <th key={label} className="w-[7%] px-1 py-3 text-center">
+                        {label}
+                      </th>
+                    ))}
+                    <th className="w-[8%] px-2 py-3">Sent</th>
+                    <th className="w-[9%] px-2 py-3">Result</th>
+                    <th className="w-[8%] px-2 py-3 text-right">Current</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-900 bg-black/60">
+                  {filteredBids.map((bid) => (
+                    <tr
+                      key={bid.project}
+                      onClick={() => setSelectedProject(bid.project)}
+                      className={`cursor-pointer transition hover:bg-orange-500/5 ${
+                        selectedProject === bid.project ? "bg-orange-500/10" : ""
+                      }`}
+                    >
+                      <td className="px-2 py-3 font-semibold text-zinc-200">{bid.project}</td>
+                      <td className="px-2 py-3">
+                        <div className="flex items-center gap-2">
+                          <p className="truncate text-zinc-300">{bid.gc}</p>
+                          <UnionBadge type={bid.union} />
+                        </div>
+                        <p className="truncate text-[9px] text-zinc-600">{bid.contactEmail}</p>
+                        <p className="truncate text-[9px] text-zinc-600">{bid.contactName} · {bid.contactPhone}</p>
+                      </td>
+                      <td className="px-2 py-3 font-mono text-zinc-400">{bid.bidDate}</td>
+                      {bid.rounds.map((round) => (
+                        <td key={`${bid.project}-${round.label}`} className="px-1 py-3 text-center">
+                          <p className="font-mono text-[9px] text-zinc-500">{round.date}</p>
+                          <p className="font-mono text-[9px] text-orange-400">
+                            {round.value === null ? "—" : formatCompactMoney(round.value)}
+                          </p>
+                        </td>
+                      ))}
+                      <td className="px-2 py-3 font-mono text-zinc-400">{bid.sentDate}</td>
+                      <td className="px-2 py-3">
+                        <StatusPill status={bid.status} />
+                      </td>
+                      <td className="px-2 py-3 text-right font-mono text-orange-400">
+                        {bid.value === null ? "—" : formatMoney(bid.value)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </DashboardCard>
+
+          <DashboardCard title="Construction News Feed">
+            <div className="grid gap-5 xl:grid-cols-2">
+              <NewsBlock title="United States Construction News" items={usConstructionNews} />
+              <NewsBlock title="International Construction News" items={internationalConstructionNews} />
+            </div>
           </DashboardCard>
         </div>
 
         <div className="space-y-5">
+          {/* Weekly Bid Calendar — signature element */}
+          <DashboardCard
+            title="This Week's Bid Calendar"
+            accent="sky"
+            rightSlot={
+              <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.14em] text-sky-300">
+                Live
+              </span>
+            }
+          >
+            <div className="grid grid-cols-7 gap-1.5">
+              {upcomingWeek.map((day) => {
+                const dayBids = bidsByDate.get(day.dateKey) ?? [];
+                return (
+                  <div
+                    key={day.dateKey}
+                    className={`flex min-h-[88px] flex-col rounded-xl border p-2 ${
+                      day.isToday
+                        ? "border-sky-500/40 bg-sky-500/10"
+                        : "border-zinc-800 bg-black"
+                    }`}
+                  >
+                    <p
+                      className={`text-[9px] font-bold uppercase tracking-[0.1em] ${
+                        day.isToday ? "text-sky-300" : "text-zinc-600"
+                      }`}
+                    >
+                      {day.label}
+                    </p>
+                    <p
+                      className={`font-mono text-sm font-bold ${
+                        day.isToday ? "text-sky-200" : "text-zinc-400"
+                      }`}
+                    >
+                      {day.dayNumber}
+                    </p>
+                    <div className="mt-1 flex-1 space-y-1">
+                      {dayBids.slice(0, 2).map((bid) => (
+                        <div
+                          key={bid.project}
+                          title={`${bid.project} — ${bid.gc}`}
+                          className="truncate rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-200"
+                        >
+                          {bid.project.split(" ")[0]}
+                        </div>
+                      ))}
+                      {dayBids.length > 2 && (
+                        <p className="text-[8px] text-zinc-600">+{dayBids.length - 2} more</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-3 space-y-1.5">
+              {Array.from(bidsByDate.entries())
+                .filter(([date]) => upcomingWeek.some((day) => day.dateKey === date))
+                .flatMap(([, bids]) => bids)
+                .slice(0, 3)
+                .map((bid) => (
+                  <div
+                    key={bid.project}
+                    className="flex items-center justify-between rounded-lg border border-sky-500/15 bg-sky-500/5 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-[11px] font-semibold text-zinc-200">{bid.project}</p>
+                      <p className="text-[9px] text-zinc-500">{bid.gc} · Due {bid.bidDate}</p>
+                    </div>
+                    <StatusPill status={bid.status} />
+                  </div>
+                ))}
+            </div>
+          </DashboardCard>
+
           <DashboardCard title="Inventory Track">
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
               {inventory.map((row) => {
@@ -517,135 +668,63 @@ export default function DashboardPage() {
               ))}
             </div>
           </DashboardCard>
-        </div>
 
-        <div className="xl:col-span-2">
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_440px] 2xl:grid-cols-[minmax(0,1fr)_480px]">
-            <DashboardCard title="Bid Follow-Up Tracker">
-              <div className="rounded-2xl border border-zinc-800">
-                <table className="w-full table-fixed text-left text-[10px]">
-                  <thead className="bg-zinc-950 text-zinc-500">
-                    <tr>
-                      <th className="w-[12%] px-2 py-3">Project</th>
-                      <th className="w-[13%] px-2 py-3">GC / Contact</th>
-                      <th className="w-[7%] px-2 py-3">Bid Date</th>
-                      {roundLabels.map((label) => (
-                        <th key={label} className="w-[7%] px-1 py-3 text-center">
-                          {label}
-                        </th>
-                      ))}
-                      <th className="w-[7%] px-2 py-3">Sent</th>
-                      <th className="w-[8%] px-2 py-3">Result</th>
-                      <th className="w-[7%] px-2 py-3 text-right">Current</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-900 bg-black/60">
-                    {filteredBids.map((bid) => (
-                      <tr
-                        key={bid.project}
-                        onClick={() => setSelectedProject(bid.project)}
-                        className={`cursor-pointer transition hover:bg-orange-500/5 ${
-                          selectedProject === bid.project ? "bg-orange-500/10" : ""
-                        }`}
-                      >
-                        <td className="px-2 py-3 font-semibold text-zinc-200">{bid.project}</td>
-                        <td className="px-2 py-3">
-                          <div className="flex items-center gap-2">
-                            <p className="truncate text-zinc-300">{bid.gc}</p>
-                            <UnionBadge type={bid.union} />
-                          </div>
-                          <p className="truncate text-[9px] text-zinc-600">{bid.contactEmail}</p>
-                          <p className="truncate text-[9px] text-zinc-600">{bid.contactName} · {bid.contactPhone}</p>
-                        </td>
-                        <td className="px-2 py-3 font-mono text-zinc-400">{bid.bidDate}</td>
-                        {bid.rounds.map((round) => (
-                          <td key={`${bid.project}-${round.label}`} className="px-1 py-3 text-center">
-                            <p className="font-mono text-[9px] text-zinc-500">{round.date}</p>
-                            <p className="font-mono text-[9px] text-orange-400">
-                              {round.value === null ? "—" : formatCompactMoney(round.value)}
-                            </p>
-                          </td>
-                        ))}
-                        <td className="px-2 py-3 font-mono text-zinc-400">{bid.sentDate}</td>
-                        <td className="px-2 py-3">
-                          <StatusPill status={bid.status} />
-                        </td>
-                        <td className="px-2 py-3 text-right font-mono text-orange-400">
-                          {bid.value === null ? "—" : formatMoney(bid.value)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <DashboardCard title="Construction Market Watch">
+            <div className="mb-4 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                Construction Industry Overall
+              </p>
+              <div className="mt-2 flex items-end justify-between gap-4">
+                <div>
+                  <p
+                    className={`font-mono text-3xl font-bold ${
+                      marketDirection.isUp ? "text-emerald-400" : "text-red-400"
+                    }`}
+                  >
+                    {marketDirection.averageMove}
+                  </p>
+                  <p className="text-xs text-zinc-500">
+                    Overall day direction:{" "}
+                    <span className={marketDirection.isUp ? "text-emerald-400" : "text-red-400"}>
+                      {marketDirection.isUp ? "Up" : "Down"}
+                    </span>
+                  </p>
+                </div>
+
+                <MiniMarketChart points={constructionIndustryTrend} />
               </div>
-            </DashboardCard>
+            </div>
 
-            <DashboardCard title="Construction Market Watch">
-              <div className="mb-4 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-                  Construction Industry Overall
-                </p>
-                <div className="mt-2 flex items-end justify-between gap-4">
-                  <div>
+            <div className="mb-4 h-px bg-orange-500/20" />
+
+            <div className="grid gap-3">
+              {marketWatch.map((stock) => (
+                <div key={stock.ticker} className="rounded-2xl border border-zinc-800 bg-black p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-mono text-lg font-bold text-orange-400">{stock.ticker}</p>
+                      <p className="text-[11px] text-zinc-500">{stock.name}</p>
+                    </div>
+
                     <p
-                      className={`font-mono text-3xl font-bold ${
-                        marketDirection.isUp ? "text-emerald-400" : "text-red-400"
+                      className={`font-mono text-sm font-bold ${
+                        stock.move.startsWith("+") ? "text-emerald-400" : "text-red-400"
                       }`}
                     >
-                      {marketDirection.averageMove}
-                    </p>
-                    <p className="text-xs text-zinc-500">
-                      Overall day direction:{" "}
-                      <span className={marketDirection.isUp ? "text-emerald-400" : "text-red-400"}>
-                        {marketDirection.isUp ? "Up" : "Down"}
-                      </span>
+                      {stock.move}
                     </p>
                   </div>
 
-                  <MiniMarketChart points={constructionIndustryTrend} />
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-zinc-500">
+                    <p>Price: <span className="font-mono text-zinc-300">{stock.price}</span></p>
+                    <p>Vol: <span className="font-mono text-zinc-300">{stock.volume}</span></p>
+                    <p>Range: <span className="font-mono text-zinc-300">{stock.dayRange}</span></p>
+                    <p>Sector: <span className="font-mono text-zinc-300">{stock.sector}</span></p>
+                  </div>
+
+                  <p className="mt-2 text-[11px] text-zinc-500">{stock.note}</p>
                 </div>
-              </div>
-
-              <div className="mb-4 h-px bg-orange-500/20" />
-
-              <div className="grid gap-3">
-                {marketWatch.map((stock) => (
-                  <div key={stock.ticker} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-mono text-lg font-bold text-orange-400">{stock.ticker}</p>
-                        <p className="text-[11px] text-zinc-500">{stock.name}</p>
-                      </div>
-
-                      <p
-                        className={`font-mono text-sm font-bold ${
-                          stock.move.startsWith("+") ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {stock.move}
-                      </p>
-                    </div>
-
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-zinc-500">
-                      <p>Price: <span className="font-mono text-zinc-300">{stock.price}</span></p>
-                      <p>Vol: <span className="font-mono text-zinc-300">{stock.volume}</span></p>
-                      <p>Range: <span className="font-mono text-zinc-300">{stock.dayRange}</span></p>
-                      <p>Sector: <span className="font-mono text-zinc-300">{stock.sector}</span></p>
-                    </div>
-
-                    <p className="mt-2 text-[11px] text-zinc-500">{stock.note}</p>
-                  </div>
-                ))}
-              </div>
-            </DashboardCard>
-          </div>
-        </div>
-
-        <div className="xl:col-span-2">
-          <DashboardCard title="Construction News Feed">
-            <div className="grid gap-5 xl:grid-cols-2">
-              <NewsBlock title="United States Construction News" items={usConstructionNews} />
-              <NewsBlock title="International Construction News" items={internationalConstructionNews} />
+              ))}
             </div>
           </DashboardCard>
         </div>
@@ -723,15 +802,19 @@ function DashboardCard({
   title,
   children,
   rightSlot,
+  accent = "orange",
 }: {
   title: React.ReactNode;
   children: React.ReactNode;
   rightSlot?: React.ReactNode;
+  accent?: "orange" | "sky";
 }) {
+  const titleColor = accent === "sky" ? "text-sky-300" : "text-orange-400";
+
   return (
     <section className="rounded-3xl border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
       <div className="mb-4 flex items-start justify-between gap-4">
-        <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">{title}</h2>
+        <h2 className={`text-sm font-bold uppercase tracking-[0.25em] ${titleColor}`}>{title}</h2>
         {rightSlot}
       </div>
       {children}
@@ -809,189 +892,6 @@ function InventoryStatus({ status }: { status: string }) {
   };
 
   return <span className={`text-[10px] font-bold ${styles[status]}`}>{status}</span>;
-}
-
-function BidResultsChart({
-  bids,
-  selectedStatus,
-  selectedProject,
-  onStatusChange,
-  onClearSelectedProject,
-}: {
-  bids: typeof bidPipeline;
-  selectedStatus: BidStatus | "All";
-  selectedProject: string | null;
-  onStatusChange: (status: BidStatus | "All") => void;
-  onClearSelectedProject: () => void;
-}) {
-  const allRoundValues = bids.flatMap((bid) =>
-    bid.rounds.map((round) => round.value).filter((value): value is number => value !== null)
-  );
-  const maxValue = Math.max(...allRoundValues, 450000);
-  const yTicks = [maxValue, maxValue * 0.75, maxValue * 0.5, maxValue * 0.25, 0];
-  const groupedLines = groupRoundLinesByBid(bids, maxValue);
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-[1fr_170px]">
-      <div className="relative h-[560px] rounded-2xl border border-zinc-800 bg-black p-5">
-        <div className="absolute bottom-20 left-16 right-6 top-6 border-l border-b border-zinc-700">
-          <div className="absolute inset-0">
-            {yTicks.map((tick, index) => (
-              <div
-                key={tick}
-                className="absolute left-0 right-0 border-t border-zinc-900"
-                style={{ top: `${index * 25}%` }}
-              >
-                <span className="absolute -left-14 -top-2 font-mono text-[10px] text-zinc-600">
-                  {formatShortMoney(tick)}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <svg
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-            className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
-          >
-            {groupedLines.map((line) => {
-              if (line.points.length < 2) return null;
-
-              return (
-                <polyline
-                  key={line.key}
-                  points={line.points.map((point) => `${point.x},${point.y}`).join(" ")}
-                  fill="none"
-                  stroke={line.stroke}
-                  strokeWidth="0.28"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  opacity="0.7"
-                />
-              );
-            })}
-          </svg>
-
-          {roundLabels.map((label, index) => (
-            <div
-              key={label}
-              className="absolute bottom-[-46px] w-16 -translate-x-1/2 text-center text-[9px] leading-3 text-zinc-600"
-              style={{ left: `${(index / (roundLabels.length - 1)) * 100}%` }}
-            >
-              {label}
-            </div>
-          ))}
-
-          {groupedLines.flatMap((line) =>
-            line.points.map((point) => (
-              <div
-                key={`${line.key}-${point.x}-${point.y}`}
-                className={`absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-black ${line.dot}`}
-                style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                title={point.title}
-              />
-            ))
-          )}
-        </div>
-
-        <div className="absolute bottom-5 left-16 right-6 text-center text-[10px] uppercase tracking-[0.2em] text-zinc-600">
-          Bid Round / Award Progression
-        </div>
-
-        <div className="absolute left-2 top-1/2 -translate-y-1/2 -rotate-90 text-[10px] uppercase tracking-[0.2em] text-zinc-600">
-          Bid Amount
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-zinc-800 bg-black p-4">
-        <p className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-zinc-500">
-          Isolate Results
-        </p>
-
-        {selectedProject && (
-          <div className="mb-3 rounded-xl border border-orange-500/30 bg-orange-500/10 p-2">
-            <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300">
-              Project selected
-            </p>
-            <p className="mt-1 text-xs font-bold text-zinc-200">{selectedProject}</p>
-            <button
-              onClick={onClearSelectedProject}
-              className="mt-2 text-[10px] font-bold text-zinc-500 hover:text-orange-300"
-            >
-              Clear selection
-            </button>
-          </div>
-        )}
-
-        {(["All", "No Response", "Won", "Lost", "Still Chasing"] as (BidStatus | "All")[]).map(
-          (status) => (
-            <button
-              key={status}
-              onClick={() => onStatusChange(status)}
-              className={`mb-2 flex w-full items-center justify-between rounded-xl border px-3 py-2 text-xs transition last:mb-0 ${
-                selectedStatus === status
-                  ? "border-orange-500 bg-orange-500/10 text-orange-300"
-                  : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/40"
-              }`}
-            >
-              <span>{status}</span>
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${
-                  status === "All" ? "bg-orange-500" : getStatusDotColor(status)
-                }`}
-              />
-            </button>
-          )
-        )}
-      </div>
-    </div>
-  );
-}
-
-function groupRoundLinesByBid(bids: typeof bidPipeline, maxValue: number) {
-  return bids
-    .filter((bid) => bid.status !== "Not Sent")
-    .map((bid) => {
-      const points = bid.rounds
-        .map((round, index) => {
-          if (round.value === null) return null;
-
-          return {
-            x: (index / (roundLabels.length - 1)) * 100,
-            y: 100 - (round.value / maxValue) * 100,
-            title: `${bid.project} • ${round.label} • ${round.date} • ${formatMoney(round.value)}`,
-          };
-        })
-        .filter((point): point is { x: number; y: number; title: string } => point !== null);
-
-      return {
-        key: bid.project,
-        points,
-        stroke: getStatusStroke(bid.status),
-        dot: getStatusDotColor(bid.status),
-      };
-    });
-}
-
-function getStatusStroke(status: BidStatus) {
-  if (status === "Won") return "#10b981";
-  if (status === "Lost") return "#ef4444";
-  if (status === "Still Chasing") return "#d4d4d8";
-  if (status === "No Response") return "#facc15";
-  return "#3f3f46";
-}
-
-function getStatusDotColor(status: BidStatus) {
-  if (status === "Won") return "bg-emerald-500";
-  if (status === "Lost") return "bg-red-500";
-  if (status === "Still Chasing") return "bg-zinc-300";
-  if (status === "No Response") return "bg-yellow-400";
-  return "bg-zinc-700";
-}
-
-function formatShortMoney(value: number) {
-  if (value >= 1000000) return `$${Math.round(value / 1000000)}M`;
-  return `$${Math.round(value / 1000)}K`;
 }
 
 function MiniMarketChart({

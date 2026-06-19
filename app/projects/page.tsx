@@ -1072,15 +1072,15 @@ export default function ProjectsPage() {
             <p className="text-xs font-bold uppercase tracking-[0.5em] text-orange-500">KORBAN</p>
             <h1 className="mt-2 text-3xl font-bold">Projects</h1>
             <p className="mt-1 text-sm text-zinc-500">
-              Compact estimating board for high-volume bid tracking and quick Estimate Review access.
+              Every bid in motion — status, follow-ups, and what needs your attention next.
             </p>
           </div>
 
           <a
-            href="/estimate-review"
-            className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
+            href="/project-plan-desk"
+            className="flex items-center gap-2 rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
           >
-            + New Estimate
+            <span className="text-base leading-none">+</span> Project
           </a>
         </div>
       </section>

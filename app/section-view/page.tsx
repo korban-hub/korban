@@ -2,14 +2,34 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  KorbanButton,
+  KorbanHeader,
+  KorbanHeaderMeta,
+  KorbanPanel,
+  KorbanEngineeringWorkspace,
+  KorbanViewerFrame,
+  KorbanWorkspaceHud,
+  KorbanWorkspaceGrid,
+  KorbanStatusPill,
+  type KorbanMenuLink,
+} from "@/components/korban";
+import {
   getActiveElevation,
   getActiveProject,
-  getActiveProjectId,
-  hasTakeoffOverlayGeometry,
   type ProjectElevation,
 } from "@/lib/projectStore";
+import { formatStoredCount } from "@/lib/workflowDisplay";
 
 type ToolName = "Notes" | "Callouts" | "Leaders" | "Highlight" | "Draw" | "Dimension" | "Erase" | "Select";
+
+const sectionMenuLinks: KorbanMenuLink[] = [
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/takeoff-workspace", label: "Takeoff Workspace" },
+  { href: "/set-scaffold", label: "Set Scaffold" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
+];
 
 const frameConfig = [
   ["Frame Width", "3'-0\""],
@@ -36,6 +56,7 @@ const primaryParts = [
 const tools: ToolName[] = ["Notes", "Callouts", "Leaders", "Highlight", "Draw", "Dimension", "Erase", "Select"];
 
 export default function SectionViewPage() {
+  const [menuOpen, setMenuOpen] = useState(false);
   const [activePart, setActivePart] = useState("6'-4\" Frame");
   const [activeTool, setActiveTool] = useState<ToolName>("Select");
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
@@ -77,81 +98,104 @@ export default function SectionViewPage() {
   const activeQuantity = activeElevationData?.quantityEngine;
 
   return (
-    <main className="h-screen overflow-hidden bg-[#030303] text-zinc-100">
-      <header className="flex h-[76px] items-center justify-between border-b border-orange-500/25 bg-[#050403] px-5 shadow-[0_8px_26px_rgba(0,0,0,0.55)]">
-        <div className="flex items-center gap-4">
-          <div>
-            <p className="text-[11px] font-black uppercase tracking-[0.48em] text-orange-500">KORBAN</p>
-            <h1 className="mt-1 text-xl font-semibold tracking-tight text-zinc-100">Section View Design</h1>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] uppercase tracking-[0.1em] text-zinc-600">
-              <span className="text-zinc-500">Generated From:</span>
-              <span>Level: <span className="text-zinc-400">{activeElevationData?.levelName ?? "Main Level"}</span></span>
-              <span>Elevation: <span className="text-zinc-400">{activeElevationData?.elevationName ?? "North"}</span></span>
-              <span>Frame Width: <span className="text-zinc-400">{activeElevationData ? `${activeElevationData.scaffoldInput.scaffoldWidth}'-0"` : "3'-0\""}</span></span>
-              <span>Frames Tall: <span className="text-zinc-400">{activeQuantity?.frameTall ?? 7}</span></span>
-              <span>Bay Count: <span className="text-zinc-400">{activeQuantity?.bayCount ?? 54}</span></span>
-              <span>Leg Count: <span className="text-zinc-400">{activeQuantity?.legCount ?? 54}</span></span>
+    <main className="h-screen overflow-hidden bg-korban-base text-white">
+      <KorbanHeader
+        title="Section View Design"
+        subtitle="Active section build from set scaffold output"
+        menuLinks={sectionMenuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((current) => !current)}
+        actionsClassName="gap-3"
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={activeProjectName} />
+            <KorbanHeaderMeta label="Level" value={activeElevationData?.levelName ?? "—"} />
+            <KorbanHeaderMeta label="Elevation" value={activeElevationData?.elevationName ?? "—"} />
+            <KorbanHeaderMeta
+              label="Linear Ft"
+              value={formatStoredCount(activeElevationData?.linearFeet, "—")}
+            />
+            <KorbanHeaderMeta
+              label="Bay Count"
+              value={formatStoredCount(activeQuantity?.bayCount, "—")}
+            />
+            <KorbanHeaderMeta
+              label="Leg Count"
+              value={formatStoredCount(activeQuantity?.legCount, "—")}
+            />
+            <KorbanHeaderMeta
+              label="Frame Count"
+              value={formatStoredCount(activeQuantity?.frameCount, "—")}
+            />
+            <KorbanButton as="a" href="/set-scaffold" variant="ghost">
+              Back to Set Scaffold
+            </KorbanButton>
+            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">
+              Project Plan Desk
+            </KorbanButton>
+            <KorbanButton as="a" href="#" variant="ghost">
+              Save Section View
+            </KorbanButton>
+            <KorbanButton as="a" href="#" variant="ghost">
+              Export Section PDF
+            </KorbanButton>
+            <KorbanButton as="a" href="/estimate-review" variant="primary">
+              Save & Continue
+            </KorbanButton>
+          </>
+        }
+      />
+
+      <KorbanEngineeringWorkspace
+        canvas={
+          <>
+            <KorbanWorkspaceGrid />
+
+            <KorbanWorkspaceHud position="top-left">
+              <KorbanStatusPill
+                label="Section"
+                value={`${activeElevationData?.sectionView.selectedRun ?? "North Run N-01"} / ${activeElevationData?.sectionView.sectionType ?? "A-A"}`}
+              />
+              <KorbanStatusPill label="Level" value={activeElevationData?.levelName ?? "—"} />
+              <KorbanStatusPill label="Elevation" value={activeElevationData?.elevationName ?? "—"} />
+            </KorbanWorkspaceHud>
+
+            <div className="absolute inset-0 flex flex-col p-6 pt-16 pb-4">
+              <div className="grid min-h-0 flex-1 grid-cols-[minmax(160px,1fr)_minmax(0,2.2fr)_minmax(160px,1fr)] gap-3">
+                <ViewerSlot title="PDF / Plan" subtitle="Section line reference">
+                  <PdfViewer elevation={activeElevationData} />
+                </ViewerSlot>
+
+                <ViewerSlot title="Elevation View" subtitle="Primary scaffold drafting elevation" dominant>
+                  <ElevationView elevation={activeElevationData} />
+                </ViewerSlot>
+
+                <ViewerSlot title="Section View" subtitle="Wall edge assembly">
+                  <SectionViewer elevation={activeElevationData} />
+                </ViewerSlot>
+              </div>
+
+              <div className="mt-3 grid min-h-[148px] shrink-0 grid-cols-[minmax(0,1fr)_280px] gap-3">
+                <UtilityDock title="Drafting Parts Library">
+                  <LibraryPanel activePart={activePart} setActivePart={setActivePart} docked />
+                </UtilityDock>
+                <UtilityDock title="Drawing Tools">
+                  <DrawingTools activeTool={activeTool} setActiveTool={setActiveTool} docked />
+                </UtilityDock>
+              </div>
             </div>
-          </div>
-          <div className="hidden h-8 border-l border-zinc-700/70 lg:block" />
-          <p className="hidden max-w-xl text-[11px] uppercase tracking-[0.24em] text-zinc-600 xl:block">
-            {activeProjectName} / CAD section assembly workspace
-          </p>
-        </div>
-
-        <nav className="hidden items-center gap-2 xl:flex">
-          <TopAction href="/set-scaffold" label="Back to Set Scaffold" />
-          <TopAction href="/project-plan-desk" label="Project Plan Desk" />
-          <TopAction href="#" label="Save Section View" />
-          <TopAction href="#" label="Export Section PDF" />
-          <TopAction href="/estimate-review" label="Continue to Estimate Review" primary />
-        </nav>
-      </header>
-
-      <ProjectDebugStrip projectName={activeProjectName} elevation={activeElevationData} />
-
-      <section className="grid h-[calc(100vh-104px)] grid-rows-[128px_minmax(0,1fr)_172px] overflow-hidden bg-[#030303]">
-        <section className="relative border-b border-orange-500/35 bg-[#0b0805] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),inset_0_-2px_0_rgba(249,115,22,0.16),0_10px_28px_rgba(0,0,0,0.45)]">
-          <div className="mb-2.5 flex items-center justify-between">
-            <div>
-              <h2 className="text-xs font-bold uppercase tracking-[0.28em] text-orange-400">
-                Frame Configuration Summary
-              </h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-zinc-600">
-                Active section build from set scaffold output
-              </p>
+          </>
+        }
+        rail={
+          <KorbanPanel title="Frame Configuration" subtitle="Active section build from set scaffold output" compact>
+            <div className="grid grid-cols-2 gap-2">
+              {sharedFrameConfig.map(([label, value]) => (
+                <ConfigCard key={label} label={label} value={value} />
+              ))}
             </div>
-            <span className="border border-orange-500/35 bg-[#120904] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-orange-300 shadow-[inset_0_0_12px_rgba(249,115,22,0.08)]">
-              {activeElevationData?.sectionView.selectedRun ?? "North Run N-01"} / {activeElevationData?.sectionView.sectionType ?? "A-A"}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-[0.9fr_0.9fr_2.15fr_0.72fr_0.62fr_0.82fr_1.15fr_0.8fr] gap-px border border-zinc-800/80 bg-zinc-800/80">
-            {sharedFrameConfig.map(([label, value]) => (
-              <ConfigCard key={label} label={label} value={value} />
-            ))}
-          </div>
-        </section>
-
-        <section className="grid min-h-0 grid-cols-[30fr_45fr_25fr] border-b border-t border-zinc-700/70 bg-[#050607] shadow-[inset_0_10px_20px_rgba(0,0,0,0.4)]">
-          <ViewerPanel title="PDF / Plan Viewer" subtitle="Sheet A2.11 / selected section line">
-            <PdfViewer elevation={activeElevationData} />
-          </ViewerPanel>
-
-          <ViewerPanel title="Elevation View" subtitle="Primary scaffold drafting elevation">
-            <ElevationView elevation={activeElevationData} />
-          </ViewerPanel>
-
-          <ViewerPanel title="Section Viewer" subtitle="Wall edge and scaffold section assembly">
-            <SectionViewer elevation={activeElevationData} />
-          </ViewerPanel>
-        </section>
-
-        <section className="grid min-h-0 grid-cols-[70fr_30fr] border-t border-orange-500/20 bg-[#090806] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-          <LibraryPanel activePart={activePart} setActivePart={setActivePart} />
-          <DrawingTools activeTool={activeTool} setActiveTool={setActiveTool} />
-        </section>
-      </section>
+          </KorbanPanel>
+        }
+      />
     </main>
   );
 }
@@ -257,12 +301,12 @@ function PdfViewer({ elevation }: { elevation: ProjectElevation | null }) {
   return (
     <div className="relative h-full overflow-hidden border border-zinc-700/80 bg-[#050505] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.025),0_14px_28px_rgba(0,0,0,0.5)]">
       <Grid size={28} opacity="0.09" />
-      <div className="absolute inset-x-0 top-0 z-20 flex h-9 items-center justify-between border-b border-zinc-700/80 bg-[#080808]/95 px-2 shadow-[0_6px_16px_rgba(0,0,0,0.45)]">
+      <div className="absolute inset-x-0 top-0 z-20 flex h-9 items-center justify-between border-b border-zinc-800 bg-black/95 px-2 backdrop-blur">
         <div className="flex items-center gap-1">
           {["Change PDF", "100%", "Pan", "Fit", "Rotate"].map((label) => (
-            <button key={label} className="border border-zinc-700/70 bg-[#050505] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+            <KorbanButton key={label} variant="ghost" className="px-2 py-1 text-[10px] uppercase tracking-[0.12em]">
               {label}
-            </button>
+            </KorbanButton>
           ))}
         </div>
         <span className="font-mono text-[10px] text-zinc-600">A2.11 / Level 02</span>
@@ -443,82 +487,111 @@ function SectionViewer({ elevation }: { elevation: ProjectElevation | null }) {
   );
 }
 
+function ViewerSlot({
+  title,
+  subtitle,
+  children,
+  dominant = false,
+}: {
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+  dominant?: boolean;
+}) {
+  return (
+    <div className={`flex min-h-0 flex-col ${dominant ? "min-w-0" : "min-w-0 opacity-95"}`}>
+      <div className="mb-2 flex items-start justify-between gap-2 px-1">
+        <div>
+          <h2 className={`font-black uppercase tracking-[0.2em] text-orange-400 ${dominant ? "text-xs" : "text-[10px]"}`}>
+            {title}
+          </h2>
+          <p className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-zinc-600">{subtitle}</p>
+        </div>
+        <span className="h-2 w-2 shrink-0 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+      </div>
+      <KorbanViewerFrame fill className={dominant ? "flex-1" : "flex-1"}>
+        {children}
+      </KorbanViewerFrame>
+    </div>
+  );
+}
+
+function UtilityDock({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <KorbanViewerFrame fill className="flex flex-col p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-orange-400">{title}</h2>
+        <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+    </KorbanViewerFrame>
+  );
+}
+
 function LibraryPanel({
   activePart,
   setActivePart,
+  docked = false,
 }: {
   activePart: string;
   setActivePart: (part: string) => void;
+  docked?: boolean;
 }) {
   return (
-    <section className="min-h-0 border-r border-zinc-700/80 bg-[#080806] p-3 shadow-[inset_-1px_0_0_rgba(255,255,255,0.025)]">
-      <h2 className="mb-2 text-xs font-bold uppercase tracking-[0.28em] text-orange-400">Drafting Parts Library</h2>
-      <div className="grid h-[calc(100%-28px)] grid-cols-9 gap-2">
+    <div className={`h-full ${docked ? "" : "min-h-0 border-r border-zinc-800 bg-korban-raised p-3"}`}>
+      {!docked && (
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Drafting Parts Library</h2>
+          <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+        </div>
+      )}
+      <div className={`grid h-full gap-2 ${docked ? "grid-cols-9" : "grid-cols-9"}`}>
         {primaryParts.map((item) => (
-          <button
+          <KorbanButton
             key={item}
             onClick={() => setActivePart(item)}
-            className={`border p-2 text-left transition ${
-              activePart === item
-                ? "border-orange-500/40 bg-[#100804]"
-                : "border-zinc-800 bg-[#090909] hover:border-zinc-600"
-            }`}
+            variant={activePart === item ? "tool-active" : "tool-inactive"}
+            className="h-auto flex-col items-start gap-1 p-1.5 text-left"
           >
-            <p className="mb-1.5 truncate font-mono text-[10px] uppercase tracking-[0.04em] text-zinc-500">{item}</p>
+            <p className="w-full truncate font-mono text-[9px] uppercase tracking-[0.04em] opacity-80">{item}</p>
             <PartSymbol name={item} />
-          </button>
+          </KorbanButton>
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 
 function DrawingTools({
   activeTool,
   setActiveTool,
+  docked = false,
 }: {
   activeTool: ToolName;
   setActiveTool: (tool: ToolName) => void;
+  docked?: boolean;
 }) {
   return (
-    <section className="min-h-0 bg-[#070707] p-3 shadow-[inset_1px_0_0_rgba(255,255,255,0.025)]">
-      <h2 className="mb-2 text-xs font-bold uppercase tracking-[0.28em] text-orange-400">Drawing Tools</h2>
-      <div className="grid grid-cols-4 gap-2">
+    <div className={`h-full ${docked ? "" : "min-h-0 bg-korban-raised p-3"}`}>
+      {!docked && (
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Drawing Tools</h2>
+          <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+        </div>
+      )}
+      <div className="grid h-full grid-cols-2 gap-1.5">
         {tools.map((tool) => (
-          <button
+          <KorbanButton
             key={tool}
             onClick={() => setActiveTool(tool)}
-            className={`flex h-[56px] flex-col items-center justify-center gap-1 border text-center text-[10px] font-semibold uppercase tracking-[0.08em] transition ${
-              activeTool === tool
-                ? "border-orange-500/45 bg-[#120904] text-orange-300"
-                : "border-zinc-800 bg-[#050505] text-zinc-500 hover:border-zinc-600"
-            }`}
+            variant={activeTool === tool ? "tool-active" : "tool-inactive"}
+            className="flex h-12 flex-col items-center justify-center gap-0.5 px-1 text-[9px] uppercase tracking-[0.06em]"
           >
             <ToolIcon name={tool} />
             <span>{tool}</span>
-          </button>
+          </KorbanButton>
         ))}
       </div>
-    </section>
-  );
-}
-
-function ProjectDebugStrip({ projectName, elevation }: { projectName: string; elevation: ProjectElevation | null }) {
-  const quantity = elevation?.quantityEngine;
-  const overlayExists = hasTakeoffOverlayGeometry(elevation);
-
-  return (
-    <div className="border-b border-orange-500/20 bg-black px-5 py-2 font-mono text-[11px] text-zinc-400">
-      Project ID: <span className="text-orange-300">{getActiveProjectId()}</span> | Active Project:{" "}
-      <span className="text-orange-300">{projectName}</span> | Level:{" "}
-      <span className="text-orange-300">{elevation?.levelName ?? "Main Level"}</span> | Elevation:{" "}
-      <span className="text-orange-300">{elevation?.elevationName ?? "None"}</span> | LF:{" "}
-      <span className="text-orange-300">{elevation?.linearFeet ?? "--"}</span> | Height:{" "}
-      <span className="text-orange-300">{elevation?.wallHeight ?? "--"}</span> | Bays:{" "}
-      <span className="text-orange-300">{quantity?.bayCount ?? "--"}</span> | Legs:{" "}
-      <span className="text-orange-300">{quantity?.legCount ?? "--"}</span> | Frames:{" "}
-      <span className="text-orange-300">{quantity?.frameCount ?? "--"}</span> | overlayGeometry exists ={" "}
-      <span className="text-orange-300">{String(overlayExists)}</span>
     </div>
   );
 }
@@ -527,27 +600,12 @@ function ConfigCard({ label, value }: { label: string; value: string }) {
   const isDominant = label === "Frame Heights / Frame Makeup";
 
   return (
-    <div className="bg-[#0a0a0a] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+    <div className="bg-korban-raised px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
       <p className="text-[9px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
       <p className={`mt-1 truncate font-mono font-semibold ${isDominant ? "text-sm text-orange-200" : "text-xs text-zinc-200"}`}>
         {value}
       </p>
     </div>
-  );
-}
-
-function ViewerPanel({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
-  return (
-    <section className="min-h-0 border-r border-zinc-700/80 bg-[#060707] p-3 last:border-r-0">
-      <div className="mb-2 flex items-end justify-between gap-3">
-        <div>
-          <h2 className="text-xs font-bold uppercase tracking-[0.24em] text-orange-400">{title}</h2>
-          <p className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-600">{subtitle}</p>
-        </div>
-        <span className="h-1.5 w-1.5 bg-orange-500 shadow-[0_0_12px_rgba(249,115,22,0.8)]" />
-      </div>
-      <div className="h-[calc(100%-38px)] min-h-0 border border-zinc-900/80 bg-[#030303] p-1 shadow-[inset_0_0_18px_rgba(0,0,0,0.45)]">{children}</div>
-    </section>
   );
 }
 
@@ -632,20 +690,5 @@ function ToolIcon({ name }: { name: ToolName }) {
       {name === "Erase" && <path d="M6 16 L14 8 L19 13 L13 19 H8 Z M10 12 L15 17" />}
       {name === "Select" && <path d="M6 4 L17 14 L12 15 L10 20 Z" />}
     </svg>
-  );
-}
-
-function TopAction({ href, label, primary = false }: { href: string; label: string; primary?: boolean }) {
-  return (
-    <a
-      href={href}
-      className={`border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.14em] transition ${
-        primary
-          ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_18px_rgba(249,115,22,0.18)] hover:bg-orange-400"
-          : "border-zinc-700/80 bg-[#080808] text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] hover:border-orange-500/40 hover:text-orange-300"
-      }`}
-    >
-      {label}
-    </a>
   );
 }
