@@ -516,6 +516,19 @@ export default function TakeoffWorkspace() {
   }, [pdfDoc, pageNumber, zoom]);
 
   function activateTool(tool: string) {
+    if (tool === "Set Scaffold") {
+      saveWorkspaceElevation(activeElevation);
+      window.location.href = "/set-scaffold";
+      return;
+    }
+
+    if (tool === "Frame Configuration") {
+      setActiveTool(tool);
+      setScaleMode(false);
+      setOverlayMode(false);
+      return;
+    }
+
     setActiveTool(tool);
     setScaleMode(tool === "Scale");
     setOverlayMode(tool === "Overlay" && Boolean(pickTarget));

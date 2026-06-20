@@ -1,442 +1,616 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
-
-type FieldType = "select" | "toggle" | "readonly";
-
-type SettingField = {
-  key: string;
-  name: string;
-  description: string;
-  type: FieldType;
-  options?: string[];
-  defaultValue: string | boolean;
-};
-
-type SettingsTile = {
-  number: string;
-  title: string;
-  description: string;
-  fields: SettingField[];
-};
-
-const STORAGE_KEY = "korban_app_settings_v1";
-const SAVED_AT_KEY = "korban_app_settings_saved_at_v1";
-
-const tiles: SettingsTile[] = [
-  {
-    number: "01",
-    title: "Measurement Display",
-    description: "Controls how measurements appear throughout KORBAN.",
-    fields: [
-      {
-        key: "measurementType",
-        name: "Measurement Type",
-        description: "Primary measurement system used in the app.",
-        type: "select",
-        options: ["Feet & Inches", "Decimal Feet", "Inches Only", "Metric"],
-        defaultValue: "Feet & Inches",
-      },
-      {
-        key: "fractionPrecision",
-        name: "Fraction Precision",
-        description: "Smallest displayed fraction for standard measurements.",
-        type: "select",
-        options: [`1"`, `1/2"`, `1/4"`, `1/8"`],
-        defaultValue: `1/4"`,
-      },
-      {
-        key: "showDecimalEquivalent",
-        name: "Show Decimal Equivalent",
-        description: "Display decimal feet next to standard measurements.",
-        type: "toggle",
-        defaultValue: false,
-      },
-    ],
-  },
-  {
-    number: "02",
-    title: "App Workflow",
-    description: "Controls how users move through the estimating process.",
-    fields: [
-      {
-        key: "defaultStartPage",
-        name: "Default Start Page",
-        description: "Page shown first after login.",
-        type: "select",
-        options: ["Dashboard", "Projects", "Upload PDF", "Settings"],
-        defaultValue: "Dashboard",
-      },
-      {
-        key: "guidedMode",
-        name: "Guided Mode",
-        description: "Walk users step-by-step through the estimate flow.",
-        type: "toggle",
-        defaultValue: true,
-      },
-      {
-        key: "confirmBeforeReset",
-        name: "Confirm Before Reset",
-        description: "Ask before clearing project or overlay data.",
-        type: "toggle",
-        defaultValue: true,
-      },
-    ],
-  },
-  {
-    number: "03",
-    title: "PDF Viewer Options",
-    description: "Controls how plan files display inside the workspace.",
-    fields: [
-      {
-        key: "defaultZoom",
-        name: "Default Zoom",
-        description: "Initial plan zoom level when opening a project.",
-        type: "select",
-        options: ["Fit Width", "Fit Page", "100%", "Last Used"],
-        defaultValue: "Fit Width",
-      },
-      {
-        key: "rememberLastPage",
-        name: "Remember Last Page",
-        description: "Reopen PDFs on the last viewed page.",
-        type: "toggle",
-        defaultValue: true,
-      },
-      {
-        key: "showPlanToolbar",
-        name: "Show Plan Toolbar",
-        description: "Display PDF controls inside the plan viewer.",
-        type: "toggle",
-        defaultValue: true,
-      },
-    ],
-  },
-  {
-    number: "04",
-    title: "Save Behavior",
-    description: "Controls when KORBAN stores app progress.",
-    fields: [
-      {
-        key: "manualSaveMode",
-        name: "Manual Save Mode",
-        description: "Require users to click save before storing settings.",
-        type: "readonly",
-        defaultValue: "On",
-      },
-      {
-        key: "autosaveProjects",
-        name: "Autosave Projects",
-        description: "Automatically save project edits while working.",
-        type: "toggle",
-        defaultValue: false,
-      },
-      {
-        key: "autosaveInterval",
-        name: "Autosave Interval",
-        description: "How often autosave runs when enabled.",
-        type: "select",
-        options: ["30 Seconds", "1 Minute", "5 Minutes"],
-        defaultValue: "1 Minute",
-      },
-    ],
-  },
-  {
-    number: "05",
-    title: "Export Options",
-    description: "Controls default output formats for estimates and proposals.",
-    fields: [
-      {
-        key: "defaultExportFormat",
-        name: "Default Export Format",
-        description: "Preferred file type for proposal exports.",
-        type: "select",
-        options: ["PDF", "Excel", "CSV"],
-        defaultValue: "PDF",
-      },
-      {
-        key: "includeMaterialSummary",
-        name: "Include Material Summary",
-        description: "Add material counts to proposal exports.",
-        type: "toggle",
-        defaultValue: true,
-      },
-      {
-        key: "includeEstimatorNotes",
-        name: "Include Estimator Notes",
-        description: "Add internal notes to exported estimate packages.",
-        type: "toggle",
-        defaultValue: false,
-      },
-    ],
-  },
-  {
-    number: "06",
-    title: "Interface Options",
-    description: "Controls general display and interface preferences.",
-    fields: [
-      {
-        key: "theme",
-        name: "Theme",
-        description: "App appearance preference.",
-        type: "select",
-        options: ["KORBAN Dark", "Light", "System"],
-        defaultValue: "KORBAN Dark",
-      },
-      {
-        key: "compactMode",
-        name: "Compact Mode",
-        description: "Reduce spacing for smaller screens.",
-        type: "toggle",
-        defaultValue: false,
-      },
-      {
-        key: "showHelpfulTips",
-        name: "Show Helpful Tips",
-        description: "Display short guidance notes during workflows.",
-        type: "toggle",
-        defaultValue: true,
-      },
-    ],
-  },
-];
-
-const defaultSettings = tiles.reduce<Record<string, string | boolean>>((acc, tile) => {
-  tile.fields.forEach((field) => {
-    acc[field.key] = field.defaultValue;
-  });
-  return acc;
-}, {});
-
-function formatSavedAt(value: string | null) {
-  if (!value) return "Not saved yet";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
+import { KorbanHeader } from "@/components/korban";
+import { useEffect, useRef, useState } from "react";
+import {
+  getSettings,
+  saveSettings,
+  resetSettings,
+  exportSettingsAsJson,
+  importSettingsFromJson,
+  clearDemoData,
+  clearLocalCache,
+  type SettingsData,
+  type LandingPage,
+  type DisplayFormat,
+  type DimensionPrecision,
+  type GridSize,
+  type DefaultZoom,
+} from "@/lib/settingsStore";
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState(defaultSettings);
-  const [savedAt, setSavedAt] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState("Unsaved changes are kept on this screen until you save.");
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [settings, setSettings] = useState<SettingsData | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const savedSettings = localStorage.getItem(STORAGE_KEY);
-    const savedTime = localStorage.getItem(SAVED_AT_KEY);
-
-    if (savedSettings) {
-      try {
-        setSettings({ ...defaultSettings, ...JSON.parse(savedSettings) });
-      } catch {
-        setSettings(defaultSettings);
-      }
-    }
-
-    if (savedTime) setSavedAt(savedTime);
+    setSettings(getSettings());
+    setIsHydrated(true);
   }, []);
 
-  const savedAtLabel = useMemo(() => formatSavedAt(savedAt), [savedAt]);
-
-  function updateSetting(key: string, value: string | boolean) {
-    setSettings((current) => ({
-      ...current,
-      [key]: value,
-    }));
-    setStatusMessage("Unsaved changes");
+  function flashSaved() {
+    setSavedFlash(true);
+    window.setTimeout(() => setSavedFlash(false), 1800);
   }
 
-  function saveSettings() {
-    const now = new Date().toISOString();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    localStorage.setItem(SAVED_AT_KEY, now);
-    setSavedAt(now);
-    setStatusMessage("Settings saved");
+  function handleSaveAll() {
+    if (!settings) return;
+    saveSettings(settings);
+    flashSaved();
   }
 
-  function resetDefaults() {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(SAVED_AT_KEY);
-    setSettings(defaultSettings);
-    setSavedAt(null);
-    setStatusMessage("Defaults restored. Click Save Settings to keep them.");
+  function handleResetAll() {
+    const confirmed = window.confirm("Reset all preferences to KORBAN defaults?");
+    if (!confirmed) return;
+    resetSettings();
+    setSettings(getSettings());
+    flashSaved();
+  }
+
+  function handleClearDemoData() {
+    const confirmed = window.confirm(
+      "Clear demo project data? Your real saved projects and settings are not affected.",
+    );
+    if (!confirmed) return;
+    clearDemoData();
+    flashSaved();
+  }
+
+  function handleClearLocalCache() {
+    const confirmed = window.confirm(
+      "Clear ALL local KORBAN data — settings, backend config, and project data? This cannot be undone.",
+    );
+    if (!confirmed) return;
+    clearLocalCache();
+    setSettings(getSettings());
+    flashSaved();
+  }
+
+  function handleExport() {
+    const json = exportSettingsAsJson();
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "korban-settings.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportClick() {
+    importInputRef.current?.click();
+  }
+
+  function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      const success = importSettingsFromJson(text);
+      if (success) {
+        setSettings(getSettings());
+        flashSaved();
+      } else {
+        window.alert("Couldn't read that settings file. Make sure it's a valid KORBAN settings export.");
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  }
+
+  if (!isHydrated || !settings) {
+    return (
+      <main className="min-h-screen bg-[#080604] text-white flex items-center justify-center">
+        <p className="text-zinc-500 text-sm">Loading settings...</p>
+      </main>
+    );
   }
 
   return (
-    <main className="min-h-screen bg-[#14110d] px-6 py-8 text-white">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(180,83,9,0.12),transparent_32%),radial-gradient(circle_at_bottom_right,rgba(120,53,15,0.08),transparent_34%)]" />
-
-      <div className="relative mx-auto max-w-[1500px]">
-        <header className="sticky top-4 z-20 mb-8 rounded-3xl border border-[#7c4a1f]/50 bg-[#1b1712]/95 p-5 shadow-2xl backdrop-blur">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-sm font-bold tracking-[0.55em] text-[#9a5a22]">
-                KORBAN
-              </p>
-              <h1 className="mt-2 text-3xl font-bold text-neutral-100">
-                Settings
-              </h1>
-              <p className="mt-2 max-w-4xl text-sm leading-6 text-neutral-400">
-                App-level controls for measurement display, workflow behavior, PDF viewing, saving, exporting, and interface preferences.
-              </p>
-            </div>
-
-            <div className="flex min-w-[280px] flex-col gap-3 rounded-2xl border border-[#30261c] bg-[#120f0b]/70 p-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.25em] text-[#9a5a22]">
-                  Last Saved
-                </p>
-                <p className="mt-1 text-sm text-neutral-300">{savedAtLabel}</p>
-                <p className="mt-1 text-xs text-neutral-500">{statusMessage}</p>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={saveSettings}
-                  className="rounded-xl border border-[#ff8a1f] bg-[#ff8a1f] px-4 py-2 text-sm font-bold text-black shadow-[0_0_18px_rgba(255,138,31,0.35)] transition hover:shadow-[0_0_24px_rgba(255,138,31,0.55)]"
-                >
-                  Save Settings
-                </button>
-
-                <button
-                  type="button"
-                  onClick={resetDefaults}
-                  className="rounded-xl border border-[#3a2b1c] bg-[#18130f] px-4 py-2 text-sm font-bold text-neutral-400 transition hover:border-[#7c4a1f] hover:text-neutral-200"
-                >
-                  Reset Defaults
-                </button>
-              </div>
-            </div>
-          </div>
-        </header>
-
-        <section className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-          {tiles.map((tile) => (
-            <SettingsTile
-              key={tile.number}
-              tile={tile}
-              settings={settings}
-              updateSetting={updateSetting}
-            />
-          ))}
-        </section>
+    <main className="min-h-screen bg-[#080604] text-white">
+      <div className="sticky top-0 z-20">
+        <KorbanHeader
+          title="Settings"
+          subtitle="Display, viewer, and workflow preferences for your KORBAN session."
+          actionsAlwaysVisible
+          actions={
+            <>
+              {savedFlash && (
+                <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-300">
+                  ✓ Saved
+                </span>
+              )}
+              <button
+                onClick={handleResetAll}
+                className="rounded-xl border border-zinc-700 bg-black px-5 py-3 text-sm font-bold text-zinc-400 hover:border-red-500/40 hover:text-red-300"
+              >
+                Reset All
+              </button>
+              <a
+                href="/dashboard"
+                className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
+              >
+                Cancel
+              </a>
+              <button
+                onClick={handleSaveAll}
+                className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
+              >
+                Save Settings
+              </button>
+            </>
+          }
+        />
       </div>
+
+      <section className="columns-1 gap-5 p-6 lg:columns-2 xl:columns-3 [&>*]:mb-5 [&>*]:break-inside-avoid">
+        {/* 1. User Preferences */}
+        <SettingsTile title="User Preferences">
+          <FieldRow label="Display Name">
+            <TextInput
+              value={settings.user.displayName}
+              onChange={(v) => setSettings({ ...settings, user: { ...settings.user, displayName: v } })}
+              placeholder="H. Pierre"
+            />
+          </FieldRow>
+          <FieldRow label="Email">
+            <TextInput
+              value={settings.user.email}
+              onChange={(v) => setSettings({ ...settings, user: { ...settings.user, email: v } })}
+              placeholder="estimator@korban.com"
+            />
+          </FieldRow>
+          <FieldRow label="Role">
+            <TextInput
+              value={settings.user.role}
+              onChange={(v) => setSettings({ ...settings, user: { ...settings.user, role: v } })}
+              placeholder="Estimator"
+            />
+          </FieldRow>
+          <FieldRow label="Default Landing Page">
+            <SelectInput
+              value={settings.user.defaultLandingPage}
+              options={["Project Dashboard", "Takeoff Workspace", "Set Scaffold", "Section View", "Estimate Review"]}
+              onChange={(v) => setSettings({ ...settings, user: { ...settings.user, defaultLandingPage: v as LandingPage } })}
+            />
+          </FieldRow>
+        </SettingsTile>
+
+        {/* 2. Measurement Preferences */}
+        <SettingsTile title="Measurement Preferences">
+          <FieldRow label="Display Format">
+            <RadioGroup
+              value={settings.measurement.displayFormat}
+              options={["Feet/Inches", "Decimal Feet", "Metric"]}
+              onChange={(v) =>
+                setSettings({ ...settings, measurement: { ...settings.measurement, displayFormat: v as DisplayFormat } })
+              }
+            />
+          </FieldRow>
+          <FieldRow label="Dimension Precision">
+            <RadioGroup
+              value={settings.measurement.dimensionPrecision}
+              options={[`1"`, `1/2"`, `1/4"`]}
+              onChange={(v) =>
+                setSettings({
+                  ...settings,
+                  measurement: { ...settings.measurement, dimensionPrecision: v as DimensionPrecision },
+                })
+              }
+            />
+          </FieldRow>
+          <ToggleField
+            label="Show Fractions"
+            checked={settings.measurement.showFractions}
+            onChange={(v) => setSettings({ ...settings, measurement: { ...settings.measurement, showFractions: v } })}
+          />
+        </SettingsTile>
+
+        {/* 3. Viewer Preferences */}
+        <SettingsTile title="Viewer Preferences">
+          <ToggleField
+            label="Show Grid"
+            checked={settings.viewer.showGrid}
+            onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, showGrid: v } })}
+          />
+          <FieldRow label="Grid Size">
+            <RadioGroup
+              value={settings.viewer.gridSize}
+              options={["1'", "5'", "10'"]}
+              onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, gridSize: v as GridSize } })}
+            />
+          </FieldRow>
+          <ToggleField
+            label="Show Wall Offset"
+            checked={settings.viewer.showWallOffset}
+            onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, showWallOffset: v } })}
+          />
+          <ToggleField
+            label="Show Level Labels"
+            checked={settings.viewer.showLevelLabels}
+            onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, showLevelLabels: v } })}
+          />
+          <ToggleField
+            label="Show Elevation Labels"
+            checked={settings.viewer.showElevationLabels}
+            onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, showElevationLabels: v } })}
+          />
+          <ToggleField
+            label="Show Measurement Labels"
+            checked={settings.viewer.showMeasurementLabels}
+            onChange={(v) => setSettings({ ...settings, viewer: { ...settings.viewer, showMeasurementLabels: v } })}
+          />
+        </SettingsTile>
+
+        {/* 4. Takeoff Preferences */}
+        <SettingsTile title="Takeoff Preferences">
+          <ToggleField
+            label="Auto Save Overlay"
+            checked={settings.takeoff.autoSaveOverlay}
+            onChange={(v) => setSettings({ ...settings, takeoff: { ...settings.takeoff, autoSaveOverlay: v } })}
+          />
+          <ToggleField
+            label="Confirm Before Clear"
+            checked={settings.takeoff.confirmBeforeClear}
+            onChange={(v) => setSettings({ ...settings, takeoff: { ...settings.takeoff, confirmBeforeClear: v } })}
+          />
+          <ToggleField
+            label="Show Overlay Labels"
+            checked={settings.takeoff.showOverlayLabels}
+            onChange={(v) => setSettings({ ...settings, takeoff: { ...settings.takeoff, showOverlayLabels: v } })}
+          />
+          <ToggleField
+            label="Show Previous Levels"
+            checked={settings.takeoff.showPreviousLevels}
+            onChange={(v) => setSettings({ ...settings, takeoff: { ...settings.takeoff, showPreviousLevels: v } })}
+          />
+          <ToggleField
+            label="Auto Store Elevation"
+            checked={settings.takeoff.autoStoreElevation}
+            onChange={(v) => setSettings({ ...settings, takeoff: { ...settings.takeoff, autoStoreElevation: v } })}
+          />
+        </SettingsTile>
+
+        {/* 5. Set Scaffold Preferences */}
+        <SettingsTile title="Set Scaffold Preferences">
+          <ToggleField
+            label="Show Bay Markers"
+            checked={settings.setScaffold.showBayMarkers}
+            onChange={(v) => setSettings({ ...settings, setScaffold: { ...settings.setScaffold, showBayMarkers: v } })}
+          />
+          <ToggleField
+            label="Show Leg Markers"
+            checked={settings.setScaffold.showLegMarkers}
+            onChange={(v) => setSettings({ ...settings, setScaffold: { ...settings.setScaffold, showLegMarkers: v } })}
+          />
+          <ToggleField
+            label="Show Corner Legs"
+            checked={settings.setScaffold.showCornerLegs}
+            onChange={(v) => setSettings({ ...settings, setScaffold: { ...settings.setScaffold, showCornerLegs: v } })}
+          />
+          <ToggleField
+            label="Show Diagonal Braces"
+            checked={settings.setScaffold.showDiagonalBraces}
+            onChange={(v) =>
+              setSettings({ ...settings, setScaffold: { ...settings.setScaffold, showDiagonalBraces: v } })
+            }
+          />
+          <ToggleField
+            label="Show Frame Counts"
+            checked={settings.setScaffold.showFrameCounts}
+            onChange={(v) => setSettings({ ...settings, setScaffold: { ...settings.setScaffold, showFrameCounts: v } })}
+          />
+          <FieldRow label="Default Zoom">
+            <RadioGroup
+              value={settings.setScaffold.defaultZoom}
+              options={["100%", "125%", "150%"]}
+              onChange={(v) =>
+                setSettings({ ...settings, setScaffold: { ...settings.setScaffold, defaultZoom: v as DefaultZoom } })
+              }
+            />
+          </FieldRow>
+        </SettingsTile>
+
+        {/* 6. Section View Preferences */}
+        <SettingsTile title="Section View Preferences">
+          <ToggleField
+            label="Show Section Labels"
+            checked={settings.sectionView.showSectionLabels}
+            onChange={(v) =>
+              setSettings({ ...settings, sectionView: { ...settings.sectionView, showSectionLabels: v } })
+            }
+          />
+          <ToggleField
+            label="Show Frame Makeup"
+            checked={settings.sectionView.showFrameMakeup}
+            onChange={(v) => setSettings({ ...settings, sectionView: { ...settings.sectionView, showFrameMakeup: v } })}
+          />
+          <ToggleField
+            label="Show Part Quantities"
+            checked={settings.sectionView.showPartQuantities}
+            onChange={(v) =>
+              setSettings({ ...settings, sectionView: { ...settings.sectionView, showPartQuantities: v } })
+            }
+          />
+          <ToggleField
+            label="Show Drafting Library"
+            checked={settings.sectionView.showDraftingLibrary}
+            onChange={(v) =>
+              setSettings({ ...settings, sectionView: { ...settings.sectionView, showDraftingLibrary: v } })
+            }
+          />
+          <ToggleField
+            label="Show Drawing Tools"
+            checked={settings.sectionView.showDrawingTools}
+            onChange={(v) =>
+              setSettings({ ...settings, sectionView: { ...settings.sectionView, showDrawingTools: v } })
+            }
+          />
+          <ToggleField
+            label="Auto Populate Section"
+            checked={settings.sectionView.autoPopulateSection}
+            onChange={(v) =>
+              setSettings({ ...settings, sectionView: { ...settings.sectionView, autoPopulateSection: v } })
+            }
+          />
+        </SettingsTile>
+
+        {/* 7. Estimate Review Preferences */}
+        <SettingsTile title="Estimate Review Preferences">
+          <ToggleField
+            label="Show Revenue Panel"
+            checked={settings.estimateReview.showRevenuePanel}
+            onChange={(v) =>
+              setSettings({ ...settings, estimateReview: { ...settings.estimateReview, showRevenuePanel: v } })
+            }
+          />
+          <ToggleField
+            label="Show Labor Panel"
+            checked={settings.estimateReview.showLaborPanel}
+            onChange={(v) =>
+              setSettings({ ...settings, estimateReview: { ...settings.estimateReview, showLaborPanel: v } })
+            }
+          />
+          <ToggleField
+            label="Show Internal Review"
+            checked={settings.estimateReview.showInternalReview}
+            onChange={(v) =>
+              setSettings({ ...settings, estimateReview: { ...settings.estimateReview, showInternalReview: v } })
+            }
+          />
+          <ToggleField
+            label="Show Alternates"
+            checked={settings.estimateReview.showAlternates}
+            onChange={(v) =>
+              setSettings({ ...settings, estimateReview: { ...settings.estimateReview, showAlternates: v } })
+            }
+          />
+          <ToggleField
+            label="Show Breakout Areas"
+            checked={settings.estimateReview.showBreakoutAreas}
+            onChange={(v) =>
+              setSettings({ ...settings, estimateReview: { ...settings.estimateReview, showBreakoutAreas: v } })
+            }
+          />
+        </SettingsTile>
+
+        {/* 8. Appearance — locked, display only */}
+        <SettingsTile title="Appearance" subtitle="Locked for MVP — no theme switching yet">
+          <FieldRow label="Theme">
+            <LockedPill label={settings.appearance.theme} />
+          </FieldRow>
+          <FieldRow label="Accent Color">
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+              <span className="h-4 w-4 rounded-full" style={{ background: settings.appearance.accentColor }} />
+              <span className="font-mono text-sm font-bold text-zinc-300">{settings.appearance.accentColor}</span>
+              <span className="ml-auto text-[9px] uppercase tracking-wider text-zinc-600">Locked</span>
+            </div>
+          </FieldRow>
+          <FieldRow label="Typography">
+            <div className="space-y-2">
+              <TypeRow label="Page Titles" value={settings.appearance.typography.titles} />
+              <TypeRow label="App UI" value={settings.appearance.typography.app} />
+              <TypeRow label="Engineering Data" value={settings.appearance.typography.engineering} />
+            </div>
+          </FieldRow>
+        </SettingsTile>
+
+        {/* 9. Data & Storage */}
+        <SettingsTile title="Data & Storage" subtitle="Manage local app data">
+          <ActionButton label="Export User Settings" onClick={handleExport} />
+          <ActionButton label="Import User Settings" onClick={handleImportClick} />
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json"
+            onChange={handleImportFile}
+            className="hidden"
+          />
+          <ActionButton label="Clear Demo Data" onClick={handleClearDemoData} />
+          <ActionButton label="Reset App Preferences" onClick={handleResetAll} />
+          <ActionButton label="Clear Local Cache" onClick={handleClearLocalCache} danger />
+        </SettingsTile>
+      </section>
     </main>
   );
 }
 
+// Tile shell
+
 function SettingsTile({
-  tile,
-  settings,
-  updateSetting,
+  title,
+  subtitle,
+  children,
 }: {
-  tile: SettingsTile;
-  settings: Record<string, string | boolean>;
-  updateSetting: (key: string, value: string | boolean) => void;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-3xl border border-[#3a2b1c] bg-[#1a1611]/95 p-5 shadow-2xl">
-      <div className="mb-5 flex items-start gap-4">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-[#7c4a1f]/60 bg-[#120f0b] text-sm font-bold text-[#a1622a]">
-          {tile.number}
-        </div>
-
-        <div>
-          <h2 className="text-xl font-bold text-[#b66a2c]">{tile.title}</h2>
-          <div className="mt-2 h-px w-24 bg-[#8a541f]/40" />
-          <p className="mt-3 text-sm leading-5 text-neutral-400">
-            {tile.description}
-          </p>
-        </div>
+    <section className="rounded-3xl border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
+      <div className="mb-4">
+        <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">{title}</h2>
+        {subtitle && <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>}
       </div>
-
-      <div className="overflow-hidden rounded-2xl border border-[#30261c]">
-        <div className="grid grid-cols-[1fr_1.6fr_1fr] border-b border-[#30261c] bg-[#120f0b]/90 text-xs font-bold uppercase tracking-[0.2em] text-[#9a5a22]">
-          <div className="p-3">Option</div>
-          <div className="border-l border-[#30261c] p-3">Description</div>
-          <div className="border-l border-[#30261c] p-3">Selection</div>
-        </div>
-
-        {tile.fields.map((field) => (
-          <div
-            key={`${tile.number}-${field.key}`}
-            className="grid grid-cols-[1fr_1.6fr_1fr] border-b border-[#2a2118] last:border-b-0"
-          >
-            <div className="bg-[#18130f] p-3 text-sm font-semibold text-neutral-100">
-              {field.name}
-            </div>
-
-            <div className="border-l border-[#2a2118] bg-[#1a1611] p-3 text-sm leading-5 text-neutral-400">
-              {field.description}
-            </div>
-
-            <div className="border-l border-[#2a2118] bg-[#18130f] p-3 text-sm text-neutral-300">
-              <FieldInput
-                field={field}
-                value={settings[field.key]}
-                onChange={(value) => updateSetting(field.key, value)}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
+      <div className="space-y-3">{children}</div>
     </section>
   );
 }
 
-function FieldInput({
-  field,
+// Field primitives
+
+function FieldRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-500">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+function TextInput({
   value,
   onChange,
+  placeholder,
 }: {
-  field: SettingField;
-  value: string | boolean;
-  onChange: (value: string | boolean) => void;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
 }) {
-  const baseClass =
-    "w-full rounded-xl border border-[#3a2b1c] bg-[#18130f] px-3 py-2 text-sm text-neutral-100 outline-none transition focus:border-[#9a5a22]";
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-orange-500/40 placeholder:text-zinc-700"
+    />
+  );
+}
 
-  if (field.type === "readonly") {
-    return (
-      <div className="rounded-xl border border-[#3a2b1c] bg-[#15110d] px-3 py-2 text-sm text-neutral-500">
-        {String(value)}
-      </div>
-    );
-  }
+function SelectInput({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-orange-500/40"
+    >
+      {options.map((option) => (
+        <option key={option} value={option}>
+          {option}
+        </option>
+      ))}
+    </select>
+  );
+}
 
-  if (field.type === "select") {
-    return (
-      <select
-        className={baseClass}
-        value={String(value)}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {field.options?.map((option) => (
-          <option key={option}>{option}</option>
-        ))}
-      </select>
-    );
-  }
+function RadioGroup({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((option) => (
+        <button
+          key={option}
+          onClick={() => onChange(option)}
+          className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition ${
+            value === option
+              ? "border-orange-500 bg-orange-500 text-black"
+              : "border-zinc-800 bg-black text-zinc-500 hover:border-orange-500/40"
+          }`}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
 
-  if (field.type === "toggle") {
-    return (
-      <button
-        type="button"
-        onClick={() => onChange(!Boolean(value))}
-        className={`w-24 rounded-xl border px-3 py-2 text-sm font-bold transition ${
-          value
-            ? "border-[#ff8a1f] bg-[#ff8a1f] text-black shadow-[0_0_18px_rgba(255,138,31,0.45)]"
-            : "border-[#3a2b1c] bg-[#18130f] text-neutral-500"
+/**
+ * A simple labeled toggle row — this is the workhorse component for this
+ * page, since most settings are just on/off switches per the spec.
+ */
+function ToggleField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className="flex w-full items-center justify-between rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-left transition hover:border-zinc-700"
+    >
+      <span className="text-xs font-semibold text-zinc-300">{label}</span>
+      <span
+        className={`flex h-5 w-9 items-center rounded-full border px-0.5 transition ${
+          checked ? "border-orange-500 bg-orange-500/30 justify-end" : "border-zinc-700 bg-zinc-900 justify-start"
         }`}
       >
-        {value ? "On" : "Off"}
-      </button>
-    );
-  }
+        <span className={`h-3.5 w-3.5 rounded-full ${checked ? "bg-orange-400" : "bg-zinc-600"}`} />
+      </span>
+    </button>
+  );
+}
 
-  return null;
+function LockedPill({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+      <span className="flex items-center gap-2 text-sm font-bold text-zinc-300">
+        <span className="h-2 w-2 rounded-full bg-orange-500" />
+        {label}
+      </span>
+      <span className="text-[9px] uppercase tracking-wider text-zinc-600">Locked</span>
+    </div>
+  );
+}
+
+function TypeRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black px-3 py-2">
+      <span className="text-[11px] text-zinc-500">{label}</span>
+      <span className="text-xs font-bold text-zinc-300">{value}</span>
+    </div>
+  );
+}
+
+function ActionButton({
+  label,
+  onClick,
+  danger = false,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full rounded-xl border px-4 py-2.5 text-left text-xs font-bold transition ${
+        danger
+          ? "border-red-500/20 bg-red-500/5 text-red-300 hover:bg-red-500/10"
+          : "border-zinc-800 bg-black text-zinc-300 hover:border-orange-500/40 hover:text-orange-300"
+      }`}
+    >
+      {label}
+    </button>
+  );
 }

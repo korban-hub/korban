@@ -77,19 +77,6 @@ const messages = [
   { from: "Ops", text: "Need delivery window once awarded.", time: "Mon" },
 ];
 
-const calendarItems = [
-  { date: "Jun 14", title: "Bid Due", type: "Deadline" },
-  { date: "Jun 18", title: "Client Follow-Up", type: "Follow-Up" },
-  { date: "Jul 01", title: "Possible Award", type: "Award" },
-  { date: "Jul 08", title: "Projected Mobilization", type: "Mobilization" },
-];
-
-const newsItems = [
-  "California commercial construction starts rise in Q2",
-  "Material pricing stabilizes across access equipment rentals",
-  "Bay Area mixed-use projects remain active despite financing pressure",
-];
-
 const deskMenuLinks: KorbanMenuLink[] = [
   { href: "/projects", label: "Projects" },
   { href: "/takeoff-workspace", label: "Takeoff Workspace" },
@@ -100,8 +87,21 @@ const deskMenuLinks: KorbanMenuLink[] = [
 
 export default function ProjectPlanDeskPage() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [collapsedTiles, setCollapsedTiles] = useState<Record<string, boolean>>({
+    scaffoldWorkspace: true,
+    estimateStatus: true,
+    frameConfiguration: true,
+    overlayViewer: true,
+    sectionViewer: true,
+  });
+
+  function toggleTile(key: string) {
+    setCollapsedTiles((current) => ({ ...current, [key]: !current[key] }));
+  }
   const [activeOverlay, setActiveOverlay] = useState("Level 2");
   const [activeSection, setActiveSection] = useState("North");
+  const [overlayRecentlyChanged, setOverlayRecentlyChanged] = useState(false);
+  const [sectionRecentlyChanged, setSectionRecentlyChanged] = useState(false);
   const [storedProject, setStoredProject] = useState<ProjectRecord | null>(null);
   const [storedElevation, setStoredElevation] = useState<ProjectElevation | null>(null);
 
@@ -123,6 +123,18 @@ export default function ProjectPlanDeskPage() {
     };
   }, []);
 
+  function handleOverlaySelect(label: string) {
+    setActiveOverlay(label);
+    setOverlayRecentlyChanged(true);
+    window.setTimeout(() => setOverlayRecentlyChanged(false), 1200);
+  }
+
+  function handleSectionSelect(elevation: string) {
+    setActiveSection(elevation);
+    setSectionRecentlyChanged(true);
+    window.setTimeout(() => setSectionRecentlyChanged(false), 1200);
+  }
+
   const displayProject = storedProject ?? {
     projectId: project.projectNumber,
     projectName: project.projectName,
@@ -143,6 +155,14 @@ export default function ProjectPlanDeskPage() {
     storedElevation?.wallHeight != null && Number.isFinite(storedElevation.wallHeight) && storedElevation.wallHeight > 0
       ? `${storedElevation.wallHeight}'-0"`
       : "—";
+
+  // Takeoff is considered "started" once we have a real linear-feet value
+  // stored from the Takeoff Workspace. This is the single source of truth
+  // that decides whether the "Takeoff Results" zone shows live content or
+  // a not-yet-started placeholder.
+  const hasTakeoffData = Boolean(
+    storedElevation?.linearFeet != null && Number.isFinite(storedElevation.linearFeet) && storedElevation.linearFeet > 0,
+  );
 
   const selectedOverlay = useMemo(
     () => overlayLevels.find((level) => level.label === activeOverlay) ?? overlayLevels[3],
@@ -193,7 +213,7 @@ export default function ProjectPlanDeskPage() {
       }
       summary={
         <KorbanSummaryStrip title="Live Project Metrics">
-          <KorbanMetricTile label="Linear Ft" value={displayLinearFeet} />
+          <KorbanMetricTile label="Lineal Ft" value={displayLinearFeet} />
           <KorbanMetricTile label="Bay Count" value={displayBayCount} />
           <KorbanMetricTile label="Leg Count" value={displayLegCount} />
           <KorbanMetricTile label="Frame Count" value={displayFrameCount} />
@@ -212,8 +232,18 @@ export default function ProjectPlanDeskPage() {
       }
       bodyClassName="p-4"
     >
-      <section className="grid gap-4 xl:grid-cols-12">
-        <KorbanPanel className="xl:col-span-3" title="Project Information" subtitle="Current bid profile">
+      {/* ══════════════════════════════════════════════════════════════
+          ZONE A — PROJECT SETUP
+          Information that exists before any takeoff work happens.
+          Light background distinguishes this as a fundamentally
+          different kind of zone from the dark workspace below.
+          ══════════════════════════════════════════════════════════════ */}
+      <ZoneHeader
+        label="Project Setup"
+        description="Set once when the project starts — before takeoff begins"
+      />
+      <section className="grid gap-4 rounded-[1.75rem] border border-orange-300/30 bg-[#2a2420] p-4 xl:grid-cols-12">
+        <KorbanPanel className="xl:col-span-4" title="Project Information" subtitle="Current bid profile">
           <div className="space-y-2">
             <InfoRow label="Project No." value={project.projectNumber} />
             <InfoRow label="Address" value={displayProject.projectAddress} />
@@ -221,42 +251,123 @@ export default function ProjectPlanDeskPage() {
             <InfoRow label="Estimator" value={displayProject.estimator} />
             <InfoRow label="Union" value={project.unionStatus} />
           </div>
-          <TileButton href="/projects" label="Open Project Record" />
+          <TileButton href="/dashboard" label="Open Bid Room" />
         </KorbanPanel>
 
-        <KorbanPanel className="xl:col-span-3" title="Customer Database" subtitle="Reference data · demo profile">
+        <KorbanDemoPanel className="xl:col-span-4">
+          <KorbanPanel title="Customer Database" subtitle="Reference data · demo profile">
+            <div className="space-y-2">
+              <InfoRow label="Company" value={displayProject.customer} />
+              <InfoRow label="Contact" value="Marcus Lee" />
+              <InfoRow label="Phone" value="(510) 555-0138" />
+              <InfoRow label="Email" value="estimating@turner.com" />
+              <InfoRow label="Past Jobs" value="7" />
+            </div>
+            <TileButton href="/contacts" label="Open Contacts" />
+          </KorbanPanel>
+        </KorbanDemoPanel>
+
+        <KorbanPanel className="xl:col-span-4" title="Getting Started" subtitle="Next step for this project">
+          {hasTakeoffData ? (
+            <div className="flex h-full flex-col justify-center gap-2">
+              <p className="text-xs text-zinc-500">
+                Takeoff data is in. Continue building this estimate in Takeoff Workspace, or move forward to Set Scaffold and Estimate Review.
+              </p>
+              <TileButton href="/takeoff-workspace" label="Open Takeoff Workspace" />
+            </div>
+          ) : (
+            <div className="flex h-full flex-col justify-center gap-2">
+              <p className="text-xs text-zinc-500">
+                No takeoff data yet for this project. Start in Takeoff Workspace to capture lineal footage and heights — that data feeds Set Scaffold, Frame Configuration, Section View, and Estimate Review automatically.
+              </p>
+              <TileButton href="/takeoff-workspace" label="Start Takeoff Workspace" />
+            </div>
+          )}
+        </KorbanPanel>
+      </section>
+
+      {/* ══════════════════════════════════════════════════════════════
+          ZONE B — TAKEOFF RESULTS
+          Populated only after Takeoff Workspace has real data. Shows a
+          clear placeholder state instead of fake/demo numbers when a
+          project hasn't been taken off yet.
+          ══════════════════════════════════════════════════════════════ */}
+      <ZoneHeader
+        label="Takeoff Results"
+        description="Updates automatically once Takeoff Workspace has linear footage and heights"
+        className="mt-6"
+      />
+
+      {!hasTakeoffData && (
+        <div className="mb-4 rounded-2xl border border-dashed border-zinc-800 bg-black/40 p-4 text-center">
+          <p className="text-xs text-zinc-500">
+            This section will populate once you run a takeoff. The Overlay Viewer, Section View, scaffold quantities, and estimate status all read live from Takeoff Workspace.
+          </p>
+        </div>
+      )}
+
+      <section className="grid gap-4 rounded-[1.75rem] border border-orange-500/20 bg-orange-500/[0.06] p-4 xl:grid-cols-12">
+        <CollapsibleTile
+          className="xl:col-span-4"
+          title="Scaffold Workspace"
+          subtitle="Reference progress · demo"
+          collapsed={collapsedTiles.scaffoldWorkspace}
+          onToggle={() => toggleTile("scaffoldWorkspace")}
+        >
           <KorbanDemoPanel>
-          <div className="space-y-2">
-            <InfoRow label="Company" value={displayProject.customer} />
-            <InfoRow label="Contact" value="Marcus Lee" />
-            <InfoRow label="Phone" value="(510) 555-0138" />
-            <InfoRow label="Email" value="estimating@turner.com" />
-            <InfoRow label="Past Jobs" value="7" />
-          </div>
-          <TileButton href="/projects" label="Open Customer" />
+            <KorbanPanel title="Scaffold Workspace" subtitle="Reference progress · demo">
+              <ProgressRow label="Set Scaffold" value={68} />
+              <ProgressRow label="Frame Config" value={85} />
+              <ProgressRow label="Section Design" value={35} />
+              <TileButton href="/set-scaffold" label="Continue Scaffold Layout" />
+            </KorbanPanel>
           </KorbanDemoPanel>
-        </KorbanPanel>
+        </CollapsibleTile>
 
-        <KorbanPanel className="xl:col-span-3" title="Scaffold Workspace" subtitle="Reference progress · demo">
-          <KorbanDemoPanel>
-          <ProgressRow label="Set Scaffold" value={68} />
-          <ProgressRow label="Frame Config" value={85} />
-          <ProgressRow label="Section Design" value={35} />
-          <TileButton href="/set-scaffold" label="Continue Scaffold Setup" />
-          </KorbanDemoPanel>
-        </KorbanPanel>
+        <CollapsibleTile
+          className="xl:col-span-4"
+          title="Estimate Status"
+          subtitle="Quantity engine + review"
+          collapsed={collapsedTiles.estimateStatus}
+          onToggle={() => toggleTile("estimateStatus")}
+        >
+          <KorbanPanel title="Estimate Status" subtitle="Quantity engine + review">
+            <div className="grid grid-cols-2 gap-2">
+              <KorbanMetricTile label="LF" value={displayLinearFeet} />
+              <KorbanMetricTile label="Frames" value={displayFrameCount} />
+              <KorbanMetricTile label="Planks" value={displayPlankCount} />
+              <KorbanMetricTile label="Bid" value="$196K" />
+            </div>
+            <TileButton href="/estimate-review" label="Open Estimate Review" />
+          </KorbanPanel>
+        </CollapsibleTile>
 
-        <KorbanPanel className="xl:col-span-3" title="Estimate Status" subtitle="Quantity engine + review">
-          <div className="grid grid-cols-2 gap-2">
-            <KorbanMetricTile label="LF" value={displayLinearFeet} />
-            <KorbanMetricTile label="Frames" value={displayFrameCount} />
-            <KorbanMetricTile label="Planks" value={displayPlankCount} />
-            <KorbanMetricTile label="Bid" value="$196K" />
-          </div>
-          <TileButton href="/estimate-review" label="Open Estimate Review" />
-        </KorbanPanel>
+        <CollapsibleTile
+          className="xl:col-span-4"
+          title="Frame Configuration"
+          subtitle="Quick view · full detail available"
+          collapsed={collapsedTiles.frameConfiguration}
+          onToggle={() => toggleTile("frameConfiguration")}
+        >
+          <KorbanPanel title="Frame Configuration" subtitle="Quick view · full detail available">
+            <div className="grid grid-cols-2 gap-2">
+              <KorbanMetricTile label="Bays" value={displayBayCount} />
+              <KorbanMetricTile label="Legs" value={displayLegCount} />
+              <KorbanMetricTile label="Frames" value={displayFrameCount} />
+              <KorbanMetricTile label="Jumps" value={formatStoredCount(activeQuantities?.jumps)} />
+            </div>
+            <TileButton href="/frame-configuration" label="Open Frame Configuration" />
+          </KorbanPanel>
+        </CollapsibleTile>
 
-        <KorbanPanel hero className="xl:col-span-7" title="Combined Overlay Viewer" subtitle="Stored takeoff geometry from all levels">
+        <CollapsibleTile
+          className="xl:col-span-7"
+          title="Combined Overlay Viewer"
+          subtitle="Stored takeoff geometry from all levels"
+          collapsed={collapsedTiles.overlayViewer}
+          onToggle={() => toggleTile("overlayViewer")}
+        >
+        <KorbanPanel hero active={overlayRecentlyChanged} title="Combined Overlay Viewer" subtitle="Stored takeoff geometry from all levels">
           <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
             <div className="relative min-h-[370px] overflow-hidden rounded-[1.5rem] border border-zinc-800 bg-black">
               <div className="absolute inset-0 opacity-[0.12] bg-[linear-gradient(to_right,#f97316_1px,transparent_1px),linear-gradient(to_bottom,#f97316_1px,transparent_1px)] bg-[size:34px_34px]" />
@@ -302,7 +413,7 @@ export default function ProjectPlanDeskPage() {
               {overlayLevels.map((level) => (
                 <button
                   key={level.label}
-                  onClick={() => setActiveOverlay(level.label)}
+                  onClick={() => handleOverlaySelect(level.label)}
                   className={`w-full rounded-2xl border p-3 text-left transition ${
                     activeOverlay === level.label
                       ? "border-orange-500/50 bg-orange-500/10"
@@ -324,8 +435,16 @@ export default function ProjectPlanDeskPage() {
             </div>
           </div>
         </KorbanPanel>
+        </CollapsibleTile>
 
-        <KorbanPanel hero className="xl:col-span-5" title="Section View Viewer" subtitle="Elevation and section design workspace">
+        <CollapsibleTile
+          className="xl:col-span-5"
+          title="Section View Viewer"
+          subtitle="Elevation and section design workspace"
+          collapsed={collapsedTiles.sectionViewer}
+          onToggle={() => toggleTile("sectionViewer")}
+        >
+        <KorbanPanel hero active={sectionRecentlyChanged} title="Section View Viewer" subtitle="Elevation and section design workspace">
           <div className="grid gap-4 lg:grid-cols-[1fr_150px]">
             <div className="relative min-h-[370px] overflow-hidden rounded-[1.5rem] border border-zinc-800 bg-black">
               <div className="absolute inset-0 opacity-[0.10] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:28px_28px]" />
@@ -353,7 +472,7 @@ export default function ProjectPlanDeskPage() {
               {sectionViews.map((section) => (
                 <button
                   key={section.elevation}
-                  onClick={() => setActiveSection(section.elevation)}
+                  onClick={() => handleSectionSelect(section.elevation)}
                   className={`w-full rounded-2xl border p-3 text-left transition ${
                     activeSection === section.elevation
                       ? "border-white/35 bg-white/10"
@@ -370,105 +489,175 @@ export default function ProjectPlanDeskPage() {
             </div>
           </div>
         </KorbanPanel>
+        </CollapsibleTile>
+      </section>
 
-        <KorbanDemoPanel className="xl:col-span-4">
-        <KorbanPanel title="Project Communications" subtitle="Reference data · demo messages">
-          <div className="space-y-2">
-            {messages.map((message) => (
-              <div key={`${message.from}-${message.time}`} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-zinc-300">{message.from}</span>
-                  <span className="text-[10px] text-zinc-600">{message.time}</span>
-                </div>
-                <p className="mt-2 text-xs leading-5 text-zinc-500">{message.text}</p>
-              </div>
-            ))}
-          </div>
-        </KorbanPanel>
-        </KorbanDemoPanel>
-
-        <KorbanDemoPanel className="xl:col-span-3">
-        <KorbanPanel title="Project Calendar" subtitle="Reference data · demo schedule">
-          <div className="space-y-2">
-            {calendarItems.map((item) => (
-              <div key={`${item.date}-${item.title}`} className="flex items-center gap-3 rounded-2xl border border-zinc-800 bg-black p-3">
-                <div className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-center">
-                  <p className="font-mono text-xs font-bold text-orange-300">{item.date}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-zinc-300">{item.title}</p>
-                  <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">{item.type}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </KorbanPanel>
-        </KorbanDemoPanel>
-
-        <KorbanDemoPanel className="xl:col-span-2">
-        <KorbanPanel title="Market Watch" subtitle="Reference data · demo index">
-          <div className="rounded-3xl border border-green-500/20 bg-green-500/10 p-4">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-green-300/70">Industry Index</p>
-            <p className="mt-2 font-mono text-3xl font-black text-green-300">+1.8%</p>
-            <p className="mt-2 text-xs text-green-200/50">Commercial starts trending up.</p>
-          </div>
-        </KorbanPanel>
-        </KorbanDemoPanel>
-
-        <KorbanDemoPanel className="xl:col-span-3">
-        <KorbanPanel title="Construction News" subtitle="Reference data · demo feed">
-          <div className="space-y-2">
-            {newsItems.map((item) => (
-              <button key={item} className="w-full rounded-2xl border border-zinc-800 bg-black p-3 text-left text-xs leading-5 text-zinc-400 hover:border-orange-500/30 hover:text-orange-200">
-                {item}
+      {/* ══════════════════════════════════════════════════════════════
+          ZONE C — REFERENCE / DEMO
+          Trimmed to the two panels that matter most day-to-day:
+          Communications and Task Tracker, split evenly across the row.
+          ══════════════════════════════════════════════════════════════ */}
+      <ZoneHeader
+        label="Reference & Tools"
+        description="Demo data — not yet connected to live project data"
+        className="mt-6"
+      />
+      <section className="grid gap-4 xl:grid-cols-2">
+        <KorbanDemoPanel>
+          <KorbanPanel
+            title="Project Communications"
+            subtitle="Reference data · demo messages"
+            headerAction={
+              <button className="rounded-lg border border-orange-500/25 bg-orange-500/10 px-2.5 py-1 text-[10px] font-bold text-orange-300 transition hover:bg-orange-500/20">
+                + Message
               </button>
-            ))}
-          </div>
-        </KorbanPanel>
+            }
+          >
+            <div className="space-y-2">
+              {messages.map((message) => (
+                <div key={`${message.from}-${message.time}`} className="rounded-2xl border border-zinc-800 bg-black p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-300">{message.from}</span>
+                    <span className="text-[10px] text-zinc-600">{message.time}</span>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-zinc-500">{message.text}</p>
+                </div>
+              ))}
+            </div>
+          </KorbanPanel>
         </KorbanDemoPanel>
 
-        <KorbanDemoPanel className="xl:col-span-4">
-        <KorbanPanel title="Task Tracker" subtitle="Reference data · demo tasks">
-          <div className="grid gap-2 md:grid-cols-2">
-            {tasks.map((task) => (
-              <div key={task.item} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                <p className="text-xs font-bold text-zinc-300">{task.item}</p>
-                <p className={`mt-2 text-[10px] uppercase tracking-[0.16em] ${
-                  task.status === "Completed"
-                    ? "text-green-300"
-                    : task.status === "Waiting"
-                      ? "text-yellow-300"
-                      : "text-orange-300"
-                }`}>
-                  {task.status}
-                </p>
-              </div>
-            ))}
-          </div>
-        </KorbanPanel>
+        <KorbanDemoPanel>
+          <KorbanPanel title="Task Tracker" subtitle="Reference data · demo tasks">
+            <div className="grid gap-2 md:grid-cols-2">
+              {tasks.map((task) => (
+                <div key={task.item} className="rounded-2xl border border-zinc-800 bg-black p-3">
+                  <p className="text-xs font-bold text-zinc-300">{task.item}</p>
+                  <p className={`mt-2 text-[10px] uppercase tracking-[0.16em] ${
+                    task.status === "Completed"
+                      ? "text-green-300"
+                      : task.status === "Waiting"
+                        ? "text-yellow-300"
+                        : "text-orange-300"
+                  }`}>
+                    {task.status}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </KorbanPanel>
         </KorbanDemoPanel>
-
-        <KorbanPanel className="xl:col-span-4" title="Project Edit Tools" subtitle="Future overlay corrections">
-          <div className="grid grid-cols-2 gap-2">
-            <MiniTool label="Auto Straighten" />
-            <MiniTool label="Break Linework" />
-            <MiniTool label="Reconnect Lines" />
-            <MiniTool label="Shift Overlay" />
-            <MiniTool label="Change Colors" />
-            <MiniTool label="Reference Point" />
-          </div>
-        </KorbanPanel>
-
-        <KorbanPanel className="xl:col-span-4" title="Drafting / Imports / Exports" subtitle="Files, reports, and integrations">
-          <div className="grid grid-cols-2 gap-2">
-            <TileButton href="/takeoff-workspace" label="Upload PDF" compact />
-            <TileButton href="/estimate-review" label="Send Report" compact />
-            <TileButton href="/backend" label="Backend" compact />
-            <TileButton href="/settings" label="Settings" compact />
-          </div>
-        </KorbanPanel>
       </section>
     </KorbanManagementShell>
+  );
+}
+
+/**
+ * Wraps a Takeoff Results tile so it can collapse down to just its
+ * title, subtitle, and a glowing expand button. The full panel content
+ * (passed as children) only renders in the DOM when expanded, so this
+ * also keeps collapsed tiles cheap to render.
+ */
+function CollapsibleTile({
+  title,
+  subtitle,
+  collapsed,
+  onToggle,
+  className,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  if (!collapsed) {
+    return (
+      <div className={className}>
+        <div className="mb-2 flex justify-end">
+          <button
+            onClick={onToggle}
+            className="rounded-lg border border-zinc-800 bg-black px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500 transition hover:border-orange-500/40 hover:text-orange-300"
+          >
+            Collapse
+          </button>
+        </div>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div className={className}>
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center justify-between rounded-[1.75rem] border border-zinc-800 bg-korban-raised p-4 text-left shadow-2xl transition hover:border-orange-500/30"
+      >
+        <div>
+          <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">{title}</h2>
+          <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>
+        </div>
+        <span className="collapsible-glow-dot shrink-0 rounded-full bg-orange-500" />
+      </button>
+
+      <style jsx>{`
+        .collapsible-glow-dot {
+          width: 10px;
+          height: 10px;
+          box-shadow: 0 0 14px rgba(249, 115, 22, 0.7);
+          animation: collapsible-pulse 2.2s ease-in-out infinite;
+        }
+
+        @keyframes collapsible-pulse {
+          0%,
+          100% {
+            box-shadow: 0 0 8px rgba(249, 115, 22, 0.5);
+            opacity: 0.85;
+          }
+          50% {
+            box-shadow: 0 0 20px rgba(249, 115, 22, 0.9);
+            opacity: 1;
+          }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function ZoneHeader({
+  label,
+  description,
+  className,
+}: {
+  label: string;
+  description: string;
+  className?: string;
+}) {
+  return (
+    <div className={`mb-3 flex items-baseline justify-between gap-4 border-b border-zinc-900 pb-2 ${className ?? ""}`}>
+      <h2 className="text-sm font-black uppercase tracking-[0.3em] text-zinc-400">{label}</h2>
+      <p className="text-[10px] text-zinc-600">{description}</p>
+    </div>
+  );
+}
+
+/**
+ * Small pulsing orange status dot used in panel headers. Pulses when the
+ * user is actively interacting within that tile (editing a field, picking
+ * an overlay, etc.) and sits still/dim otherwise.
+ */
+function ActivityDot({ active = false }: { active?: boolean }) {
+  return (
+    <span className="relative flex h-2.5 w-2.5">
+      {active && (
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
+      )}
+      <span
+        className={`relative inline-flex h-2.5 w-2.5 rounded-full ${active ? "bg-orange-400" : "bg-orange-500/40"}`}
+      />
+    </span>
   );
 }
 
@@ -522,15 +711,16 @@ function InventoryTicker({
         </div>
 
         <div className="relative min-w-0 flex-1 overflow-hidden">
-          <div className="flex w-max animate-[inventory-scroll_45s_linear_infinite] items-center gap-3">
+          <div className="inventory-ticker-track flex w-max items-center gap-3">
             {tickerItems.map((item, index) => {
               const short = Math.max(0, item.required - item.available);
               const ready = short === 0;
 
               return (
-                <div
+                <a
                   key={`${item.item}-${index}`}
-                  className="flex items-center gap-2 rounded-full border border-zinc-800 bg-[#0b0b0b] px-3 py-1.5 text-[10px]"
+                  href="/inventory"
+                  className="flex items-center gap-2 rounded-full border border-zinc-800 bg-[#0b0b0b] px-3 py-1.5 text-[10px] transition hover:border-orange-500/40"
                 >
                   <span className="font-black text-zinc-200">{item.item}</span>
                   <span className="text-zinc-600">REQ</span>
@@ -548,21 +738,37 @@ function InventoryTicker({
                   >
                     {ready ? item.status : `Short ${short.toLocaleString()}`}
                   </span>
-                </div>
+                </a>
               );
             })}
           </div>
         </div>
 
         <a
-          href="/backend"
+          href="/inventory"
           className="shrink-0 rounded-full border border-zinc-800 bg-black px-3 py-1 text-[10px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
         >
           Inventory Manager
         </a>
       </div>
 
+      {/*
+        IMPORTANT: this animation intentionally does NOT use Tailwind's
+        animate-[name_duration_timing] arbitrary-value syntax. That syntax
+        requires Tailwind's build-time JIT compiler to resolve a keyframe
+        name, but the keyframe itself is defined here in a styled-jsx
+        block, which is injected at RUNTIME by a separate system. The two
+        don't reliably hand off — especially after a .next cache clear —
+        which is what caused the ticker to silently stop animating.
+        Using a plain named class + plain CSS keyframes in the same
+        <style jsx> block keeps both halves in the same system, so there's
+        nothing for Tailwind to fail to resolve.
+      */}
       <style jsx>{`
+        .inventory-ticker-track {
+          animation: inventory-scroll 45s linear infinite;
+        }
+
         @keyframes inventory-scroll {
           from {
             transform: translateX(0);
@@ -578,10 +784,20 @@ function InventoryTicker({
 
 function TileButton({ href, label, compact = false }: { href: string; label: string; compact?: boolean }) {
   return (
-    <KorbanButton as="a" href={href} variant="ghost" block compact={compact} className={compact ? undefined : "mt-4"}>
+    <a
+      href={href}
+      className={mergeTileButtonClass(compact)}
+    >
       {label}
-    </KorbanButton>
+    </a>
   );
+}
+
+function mergeTileButtonClass(compact: boolean) {
+  return [
+    "block w-full rounded-xl border border-orange-500/25 bg-orange-500/10 text-center font-bold text-orange-300 transition hover:bg-orange-500/20 hover:border-orange-500/40",
+    compact ? "px-3 py-2 text-xs" : "mt-4 px-4 py-2.5 text-xs",
+  ].join(" ");
 }
 
 function SmallTool({ label, href }: { label: string; href?: string }) {
@@ -595,14 +811,6 @@ function SmallTool({ label, href }: { label: string; href?: string }) {
 
   return (
     <KorbanButton variant="ghost" className="border-zinc-700 bg-black/80 px-3 py-2 text-[10px] backdrop-blur">
-      {label}
-    </KorbanButton>
-  );
-}
-
-function MiniTool({ label }: { label: string }) {
-  return (
-    <KorbanButton variant="ghost" className="px-3 py-3 text-xs text-zinc-400">
       {label}
     </KorbanButton>
   );

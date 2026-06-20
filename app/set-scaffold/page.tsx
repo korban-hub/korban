@@ -116,6 +116,14 @@ export default function SetScaffoldPage() {
   );
   const scaffoldOutline = storedScaffoldOutline ?? currentLevelOutline;
 
+  // PHASE 0 FIX: when no real traced geometry exists yet, the tick
+  // marks fall back to a generic placeholder shape. Bay/leg/frame
+  // counts are still accurate (calculated from linear feet directly),
+  // but the on-screen SHAPE doesn't represent the real building until
+  // the user traces Full Overlay in Takeoff Workspace. This flag
+  // drives a visible warning so that distinction is never silent.
+  const isUsingFallbackGeometry = !storedScaffoldOutline;
+
   useEffect(() => {
     function loadActiveElevation() {
       const elevation = getActiveElevation();
@@ -223,11 +231,16 @@ export default function SetScaffoldPage() {
 
       <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
-          <div className="absolute left-6 top-5 z-20 flex items-center gap-3">
+          <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
             <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay((current) => !current)} />
             <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold((current) => !current)} />
             <StatusPill label="Grid" value="5' increments" />
             <StatusPill label="Frame Tall" value={String(frameHeightCount)} />
+            {isUsingFallbackGeometry && (
+              <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs font-bold text-yellow-300">
+                ⚠ Placeholder shape — trace Full Overlay in Takeoff Workspace for accurate tick marks
+              </div>
+            )}
           </div>
 
           <div className="absolute right-6 top-5 z-20 rounded-2xl border border-orange-500/20 bg-black/80 px-4 py-3 backdrop-blur">
@@ -371,7 +384,7 @@ export default function SetScaffoldPage() {
 
           <Panel title="Scaffold Quantities" subtitle="Generated from scaffold layout">
             <div className="space-y-2">
-              <QuantityRow label="Total Linear Ft" value={`${(activeElevationData?.linearFeet ?? 482).toLocaleString()} LF`} />
+              <QuantityRow label="Total Lineal Ft" value={`${(activeElevationData?.linearFeet ?? 482).toLocaleString()} LF`} />
               <QuantityRow label="Standard Bays" value={totals.bays.toLocaleString()} />
               <QuantityRow label="Total Legs" value={totals.legs.toLocaleString()} />
               <QuantityRow label="Frames Tall" value={String(frameHeightCount)} />

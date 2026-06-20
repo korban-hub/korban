@@ -1,25 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { KorbanHeader, KorbanPanel, type KorbanMenuLink } from "@/components/korban";
+import { getActiveElevation, getActiveProject, type ProjectElevation } from "@/lib/projectStore";
 
 type InventoryRow = {
   partNo: string;
-  category?: string;
   description: string;
-  qty?: number;
-};
-
-type LoadListData = {
-  projectName?: string;
-  projectAddress?: string;
-  companyName?: string;
-  scaffoldWidth?: string;
-  linealFeet?: number;
-  bayCount?: number;
-  legCount?: number;
-  framesPerLeg?: number;
-  generatedAt?: string;
-  rows?: InventoryRow[];
 };
 
 const catalogGroups: InventoryRow[][] = [
@@ -119,110 +106,141 @@ const catalogGroups: InventoryRow[][] = [
   ],
 ];
 
+// Maps the quantity engine's calculated counts onto specific real catalog
+// part numbers. This is the connection that closes the loop — instead of
+// reading from an orphaned localStorage key nothing writes to, quantities
+// come directly from the same live takeoff data Estimate Review uses.
+//
+// The mapping picks one representative part per category (the most common
+// size/spec) since the quantity engine calculates totals, not size
+// breakdowns. As Frame Configuration (Phase 2) comes online, this can
+// become more granular.
+const QUANTITY_ENGINE_PART_MAP: Record<string, keyof ProjectElevation["quantityEngine"]> = {
+  FO6L: "frameCount",
+  WP8: "plankCount",
+  B82: "crossBraceCount",
+  GR8: "guardrailCount",
+  BP1: "basePlateCount",
+  AL1: "screwJackCount",
+};
+
+const inventoryMenuLinks: KorbanMenuLink[] = [
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+  { href: "/settings", label: "Settings" },
+];
+
 function normalizePart(partNo: string) {
   return partNo.trim().toUpperCase();
 }
 
-function getPlankQty(rows: InventoryRow[] | undefined) {
-  return (rows || []).reduce((sum, row) => {
-    const text = `${row.partNo} ${row.description}`.toLowerCase();
-    const isPlank = text.includes("plank") || row.partNo.toUpperCase().startsWith("WP");
-    return isPlank ? sum + (row.qty || 0) : sum;
-  }, 0);
-}
-
 export default function InventoryLoadListPage() {
-  const [loadList, setLoadList] = useState<LoadListData>({});
+  const [elevation, setElevation] = useState<ProjectElevation | null>(null);
+  const [projectName, setProjectName] = useState("");
+  const [projectAddress, setProjectAddress] = useState("");
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("korbanInventoryLoadList");
-    if (!stored) return;
-
-    try {
-      setLoadList(JSON.parse(stored));
-    } catch {
-      setLoadList({});
+    function loadLiveData() {
+      const project = getActiveProject();
+      const activeElevation = getActiveElevation();
+      setProjectName(project.projectName || "Untitled Project");
+      setProjectAddress(project.projectAddress || "—");
+      setElevation(activeElevation);
     }
+
+    loadLiveData();
+    window.addEventListener("focus", loadLiveData);
+    window.addEventListener("pageshow", loadLiveData);
+    return () => {
+      window.removeEventListener("focus", loadLiveData);
+      window.removeEventListener("pageshow", loadLiveData);
+    };
   }, []);
 
+  const quantityEngine = elevation?.quantityEngine;
+
+  // Builds the qty map by reading directly from the live quantity engine,
+  // via the part-number mapping above — this replaces the old
+  // localStorage-based qtyMap entirely.
   const qtyMap = useMemo(() => {
     const map = new Map<string, number>();
+    if (!quantityEngine) return map;
 
-    for (const row of loadList.rows || []) {
-      map.set(normalizePart(row.partNo), row.qty || 0);
-    }
+    Object.entries(QUANTITY_ENGINE_PART_MAP).forEach(([partNo, field]) => {
+      const value = quantityEngine[field];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        map.set(normalizePart(partNo), value);
+      }
+    });
 
     return map;
-  }, [loadList.rows]);
+  }, [quantityEngine]);
 
   const totalQtyRequired = useMemo(() => {
     return Array.from(qtyMap.values()).reduce((sum, qty) => sum + qty, 0);
   }, [qtyMap]);
 
-  const totalPlankCount = useMemo(() => getPlankQty(loadList.rows), [loadList.rows]);
+  const totalPlankCount = quantityEngine?.plankCount ?? 0;
 
   const truckLoads = useMemo(() => {
     if (!totalPlankCount) return 0;
     return Math.ceil(totalPlankCount / 150);
   }, [totalPlankCount]);
 
-  return (
-    <main className="min-h-screen bg-zinc-950 text-white">
-      <header className="border-b border-orange-500/20 bg-black px-6 py-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">KORBAN</h1>
-            <p className="mt-1 text-[10px] uppercase tracking-[0.3em] text-zinc-500">
-              Material List / Inventory Load List
-            </p>
-          </div>
+  const hasLiveData = Boolean(elevation?.linearFeet && elevation.linearFeet > 0);
 
-          <div className="flex items-center gap-3">
+  return (
+    <main className="min-h-screen bg-[#080604] text-white">
+      <KorbanHeader
+        title="Inventory Load List"
+        subtitle="Material list driven by live takeoff quantities"
+        menuLinks={inventoryMenuLinks}
+        actionsAlwaysVisible
+        actions={
+          <>
             <a
-              href="/"
-              className="rounded-full border border-zinc-800 px-4 py-2 text-xs text-zinc-300 transition hover:border-orange-500/40 hover:bg-orange-500/10"
+              href="/project-plan-desk"
+              className="rounded-xl border border-orange-500/25 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
             >
-              Back to Estimate
+              Back to Plan Desk
             </a>
-            <button className="rounded-full bg-orange-500 px-5 py-2 text-xs font-semibold text-black transition hover:bg-orange-400">
+            <button className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400">
               Export Load List
             </button>
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
-      <section className="px-6 py-5">
+      <section className="p-6">
+        {!hasLiveData && (
+          <div className="mb-5 rounded-2xl border border-dashed border-zinc-800 bg-black/40 p-4 text-center">
+            <p className="text-xs text-zinc-500">
+              No live takeoff data yet for this project. Run a takeoff in Takeoff Workspace to populate real quantities here.
+            </p>
+          </div>
+        )}
+
         <div className="mb-5 grid grid-cols-2 gap-3 xl:grid-cols-[1.25fr_1.25fr_.55fr_.55fr_.55fr_.8fr_.9fr]">
-          <SummaryCard label="Project" value={loadList.projectName || "Not entered"} />
-          <SummaryCard label="Project Address" value={loadList.projectAddress || "Not entered"} />
-          <SummaryCard label="Width" value={loadList.scaffoldWidth || "Not set"} compact />
-          <SummaryCard label="LF" value={(loadList.linealFeet || 0).toFixed(1)} compact />
-          <SummaryCard label="Bay" value={String(loadList.bayCount || 0)} compact />
+          <SummaryCard label="Project" value={projectName || "Not entered"} />
+          <SummaryCard label="Project Address" value={projectAddress || "Not entered"} />
+          <SummaryCard label="Width" value={elevation?.scaffoldInput.scaffoldWidth ? `${elevation.scaffoldInput.scaffoldWidth}'` : "Not set"} compact />
+          <SummaryCard label="LF" value={(elevation?.linearFeet || 0).toFixed(1)} compact />
+          <SummaryCard label="Bay" value={String(quantityEngine?.bayCount || 0)} compact />
           <SummaryCard label="Truck Loads" value={String(truckLoads)} highlight />
           <SummaryCard label="Qty Required" value={String(totalQtyRequired)} highlight />
         </div>
 
-        <div className="rounded-[28px] border border-orange-500/20 bg-black p-4 shadow-[0_0_45px_rgba(249,115,22,0.08)]">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3 border-b border-zinc-900 pb-4">
-            <div>
-              <h2 className="text-sm font-semibold uppercase tracking-[0.24em] text-orange-400">
-                Load List / Inventory Tracking
-              </h2>
-              <p className="mt-1 text-xs text-zinc-500">
-                Part numbers and descriptions follow the scaffold yard inventory format. Cost columns are intentionally removed.
-              </p>
-            </div>
-            <p className="font-mono text-xs text-zinc-600">
-              Source: current KORBAN estimate
-            </p>
-          </div>
-
+        <KorbanPanel
+          title="Load List / Inventory Tracking"
+          subtitle="Part numbers and descriptions follow the scaffold yard inventory format. Quantities read live from Takeoff Workspace."
+        >
           <div className="grid gap-4 xl:grid-cols-3">
             {catalogGroups.map((group, index) => (
               <InventoryColumn key={index} rows={group} qtyMap={qtyMap} />
             ))}
           </div>
-        </div>
+        </KorbanPanel>
       </section>
     </main>
   );
@@ -259,7 +277,7 @@ function SummaryCard({
 
 function InventoryColumn({ rows, qtyMap }: { rows: InventoryRow[]; qtyMap: Map<string, number> }) {
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/70">
+    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black">
       <table className="w-full text-left text-[11px]">
         <thead className="bg-zinc-950 text-zinc-500">
           <tr>

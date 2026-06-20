@@ -1,441 +1,750 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
-
-type FieldType = "text" | "textarea" | "select" | "toggle" | "readonly" | "file";
-
-type FieldRow = {
-  key: string;
-  name: string;
-  description: string;
-  type: FieldType;
-  options?: string[];
-  defaultValue: string | boolean;
-};
-
-type SettingsTile = {
-  number: string;
-  title: string;
-  description: string;
-  fields: FieldRow[];
-};
-
-const STORAGE_KEY = "korban_estimator_settings_v1";
-const SAVED_AT_KEY = "korban_estimator_settings_saved_at_v1";
-
-const tiles: SettingsTile[] = [
-  {
-    number: "01",
-    title: "Project Defaults",
-    description: "Default values applied when a new estimate project is created.",
-    fields: [
-      { key: "companyLogo", name: "Company Logo", description: "Estimator company logo used on proposals and reports.", type: "file", defaultValue: "" },
-      { key: "companyName", name: "Company Name", description: "Default company for all projects.", type: "text", defaultValue: "" },
-      { key: "companyAddress", name: "Company Address", description: "Used for travel calculations and mobilization planning.", type: "text", defaultValue: "" },
-      { key: "estimatorName", name: "Estimator Name", description: "Default estimator assigned to projects.", type: "text", defaultValue: "" },
-      { key: "proposalTemplate", name: "Proposal Template", description: "Standard proposal format.", type: "select", options: ["Standard", "Detailed", "Simple"], defaultValue: "Standard" },
-      { key: "projectStatus", name: "Project Status", description: "Default project stage.", type: "select", options: ["Takeoff", "Estimate", "Complete"], defaultValue: "Takeoff" },
-      { key: "defaultUnits", name: "Default Units", description: "Standard dimensional format.", type: "readonly", defaultValue: "Feet & Inches" },
-    ],
-  },
-  {
-    number: "02",
-    title: "Level Setup",
-    description: "Controls how building levels are created, labeled, and stacked.",
-    fields: [
-      { key: "levelTypes", name: "Level Types", description: "Available level classifications.", type: "readonly", defaultValue: "Basement / Ground / Level / Roof / Penthouse" },
-      { key: "autoNumberLevels", name: "Auto Number Levels", description: "Ground → Level 2 → Level 3.", type: "toggle", defaultValue: true },
-      { key: "roofDisplayStyle", name: "Roof Display Style", description: "Controls roof overlay appearance.", type: "select", options: ["Dashed Dark Gray", "Standard"], defaultValue: "Dashed Dark Gray" },
-      { key: "elevationOrder", name: "Elevation Order", description: "Level stacking sequence.", type: "readonly", defaultValue: "Bottom to Top" },
-    ],
-  },
-  {
-    number: "03",
-    title: "Overlay Rules",
-    description: "Controls how overlays behave during tracing and perimeter creation.",
-    fields: [
-      { key: "snapSensitivity", name: "Snap Sensitivity", description: "How aggressively overlay points connect.", type: "select", options: ["Low", "Medium", "High"], defaultValue: "Medium" },
-      { key: "autoCloseShape", name: "Auto Close Shape", description: "Connect final point to starting point.", type: "toggle", defaultValue: true },
-      { key: "cornerDetection", name: "Corner Detection", description: "Automatically identify corners.", type: "toggle", defaultValue: true },
-      { key: "complexSetDetection", name: "Complex Set Detection", description: "Detect setbacks, pop-outs, offsets, gables, and overhangs.", type: "toggle", defaultValue: true },
-      { key: "overlayValidation", name: "Overlay Validation", description: "Warn user of open or incomplete overlays.", type: "toggle", defaultValue: true },
-    ],
-  },
-  {
-    number: "04",
-    title: "Scale Calibration",
-    description: "Controls how plan dimensions are converted into real-world measurements.",
-    fields: [
-      { key: "calibrationMethod", name: "Calibration Method", description: "Scale setup method.", type: "readonly", defaultValue: "Two Point" },
-      { key: "minimumCalibrationLength", name: "Minimum Calibration Length", description: "Smallest acceptable scale reference.", type: "text", defaultValue: `10'-0"` },
-      { key: "dimensionalFormat", name: "Dimensional Format", description: "Measurement format.", type: "readonly", defaultValue: "Feet & Inches" },
-      { key: "precision", name: "Precision", description: "Display precision.", type: "select", options: [`1"`, `1/2"`, `1/4"`], defaultValue: `1"` },
-    ],
-  },
-  {
-    number: "05",
-    title: "Scaffold System",
-    description: "Defines the scaffold system used by the estimator.",
-    fields: [
-      { key: "bayLength", name: "Bay Length", description: "Standard bay spacing.", type: "text", defaultValue: `10'-0"` },
-      { key: "frameHeight", name: "Frame Height", description: "Standard frame height.", type: "text", defaultValue: `6'-4"` },
-      { key: "scaffoldWidth", name: "Scaffold Width", description: "Standard scaffold width.", type: "select", options: [`3'`, `3'-6"`, `5'`], defaultValue: `5'` },
-      { key: "wallOffset", name: "Wall Offset", description: "Distance from structure.", type: "text", defaultValue: `5'-0"` },
-      { key: "topOffset", name: "Top Offset", description: "Distance below top of structure.", type: "text", defaultValue: `5'-0"` },
-    ],
-  },
-  {
-    number: "06",
-    title: "Bay Calculation Rules",
-    description: "Controls how measured perimeter converts into scaffold bays.",
-    fields: [
-      { key: "bayFormula", name: "Bay Formula", description: "Perimeter ÷ Bay Length.", type: "readonly", defaultValue: "Perimeter ÷ Bay Length" },
-      { key: "bayRoundRule", name: "Round Rule", description: "How partial bay lengths are handled.", type: "select", options: ["Round Up", "Round Down", "Nearest"], defaultValue: "Round Up" },
-      { key: "minimumBay", name: "Minimum Bay", description: "Smallest allowable scaffold bay.", type: "text", defaultValue: `5'-0"` },
-      { key: "partialBayRule", name: "Partial Bay Rule", description: "How leftover distance is reported.", type: "select", options: ["Extra Bay", "Filler", "Manual Review"], defaultValue: "Extra Bay" },
-    ],
-  },
-  {
-    number: "07",
-    title: "Leg Calculation Rules",
-    description: "Controls how scaffold legs are generated from bay counts.",
-    fields: [
-      { key: "legFormula", name: "Leg Formula", description: "Default relationship between bays and legs.", type: "readonly", defaultValue: "Bays = Legs" },
-      { key: "extraLegRule", name: "Extra Leg Rule", description: "Add one leg only after the first full bay.", type: "toggle", defaultValue: true },
-      { key: "cornerLegs", name: "Corner Legs", description: "Add support at corners and returns.", type: "toggle", defaultValue: true },
-      { key: "endLegRule", name: "End Leg Rule", description: "Controls how scaffold runs terminate.", type: "select", options: ["Standard", "Custom"], defaultValue: "Standard" },
-    ],
-  },
-  {
-    number: "08",
-    title: "Jump Calculation Rules",
-    description: "Controls vertical scaffold calculations.",
-    fields: [
-      { key: "jumpFormula", name: "Jump Formula", description: "Working height ÷ Frame Height.", type: "readonly", defaultValue: "Working Height ÷ Frame Height" },
-      { key: "roundUpThreshold", name: "Round Up Threshold", description: "Remaining height that triggers another jump.", type: "text", defaultValue: `6"` },
-      { key: "autoAddTopJump", name: "Auto Add Top Jump", description: "Automatically add final working level.", type: "toggle", defaultValue: true },
-      { key: "roofHandling", name: "Roof Handling", description: "Controls whether roof level affects jumps.", type: "select", options: ["Include", "Exclude", "Manual"], defaultValue: "Manual" },
-    ],
-  },
-  {
-    number: "09",
-    title: "Material Rules",
-    description: "Determines how quantities are generated from scaffold geometry.",
-    fields: [
-      { key: "framesFormula", name: "Frames Formula", description: "Legs × Jumps.", type: "readonly", defaultValue: "Legs × Jumps" },
-      { key: "plankFormula", name: "Plank Formula", description: "Based on scaffold width, bays, and deck rules.", type: "readonly", defaultValue: "Width + Bays + Deck Rule" },
-      { key: "guardrailFormula", name: "Guardrail Formula", description: "Generated by exposed scaffold levels.", type: "readonly", defaultValue: "Per Exposed Level" },
-      { key: "toeBoardFormula", name: "Toe Board Formula", description: "Generated per deck where required.", type: "readonly", defaultValue: "Per Required Deck" },
-      { key: "bracketFormula", name: "Bracket Formula", description: "Controls bracket counting.", type: "select", options: ["Manual", "Auto"], defaultValue: "Manual" },
-    ],
-  },
-  {
-    number: "10",
-    title: "Add / Alternate Items",
-    description: "Optional scope items available during estimate creation.",
-    fields: [
-      { key: "toeBoardsDefault", name: "Toe Boards", description: "Include as default alternate.", type: "toggle", defaultValue: false },
-      { key: "nettingDefault", name: "Netting", description: "Include as default alternate.", type: "toggle", defaultValue: false },
-      { key: "stairTowersDefault", name: "Stair Towers", description: "Include as default alternate.", type: "toggle", defaultValue: false },
-      { key: "pedestrianCanopyDefault", name: "Pedestrian Canopy", description: "Include as default alternate.", type: "toggle", defaultValue: false },
-      { key: "breakoutAreasDefault", name: "Breakout Areas", description: "Allow area-based scope breakouts.", type: "toggle", defaultValue: true },
-    ],
-  },
-  {
-    number: "11",
-    title: "Inventory",
-    description: "Tracks company-owned scaffold equipment and availability.",
-    fields: [
-      { key: "frameInventory", name: "Frame Inventory", description: "Total available frames.", type: "text", defaultValue: "" },
-      { key: "plankInventory", name: "Plank Inventory", description: "Total available planks.", type: "text", defaultValue: "" },
-      { key: "guardrailInventory", name: "Guardrails", description: "Total available guardrails.", type: "text", defaultValue: "" },
-      { key: "bracketInventory", name: "Brackets", description: "Total available brackets.", type: "text", defaultValue: "" },
-      { key: "specialtyItems", name: "Specialty Items", description: "User-defined inventory items.", type: "textarea", defaultValue: "" },
-    ],
-  },
-  {
-    number: "12",
-    title: "Proposal Settings",
-    description: "Controls how final estimate proposals are written.",
-    fields: [
-      { key: "clientLogo", name: "Bidding Company Logo", description: "Logo for the company or client the estimator is bidding to.", type: "file", defaultValue: "" },
-      { key: "proposalIntro", name: "Proposal Intro", description: "Standard opening language.", type: "textarea", defaultValue: "" },
-      { key: "scopeTemplate", name: "Scope Template", description: "Standard scaffold scope wording.", type: "textarea", defaultValue: "" },
-      { key: "exclusions", name: "Exclusions", description: "Standard exclusions.", type: "textarea", defaultValue: "" },
-      { key: "terms", name: "Terms & Conditions", description: "Standard terms.", type: "textarea", defaultValue: "" },
-    ],
-  },
-];
-
-const defaultSettings = tiles.reduce<Record<string, string | boolean>>((acc, tile) => {
-  tile.fields.forEach((field) => {
-    acc[field.key] = field.defaultValue;
-  });
-  return acc;
-}, {});
-
-function formatSavedAt(value: string | null) {
-  if (!value) return "Not saved yet";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
+import { KorbanHeader } from "@/components/korban";
+import { useEffect, useState } from "react";
+import {
+  getBackendSettings,
+  saveBackendSection,
+  resetBackendSettings,
+  type CompanySettings,
+  type ScaffoldDefaults,
+  type MaterialDefaults,
+  type MaterialItem,
+  type LaborDefaults,
+  type PricingDefaults,
+  type ProposalDefaults,
+  type AddAlternateDefault,
+} from "@/lib/backendStore";
 
 export default function BackendPage() {
-  const [settings, setSettings] = useState(defaultSettings);
-  const [savedAt, setSavedAt] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState("Unsaved changes are kept on this screen until you save.");
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [savedFlash, setSavedFlash] = useState<string | null>(null);
+
+  const [company, setCompany] = useState<CompanySettings | null>(null);
+  const [scaffold, setScaffold] = useState<ScaffoldDefaults | null>(null);
+  const [material, setMaterial] = useState<MaterialDefaults | null>(null);
+  const [labor, setLabor] = useState<LaborDefaults | null>(null);
+  const [pricing, setPricing] = useState<PricingDefaults | null>(null);
+  const [proposal, setProposal] = useState<ProposalDefaults | null>(null);
 
   useEffect(() => {
-    const savedSettings = localStorage.getItem(STORAGE_KEY);
-    const savedTime = localStorage.getItem(SAVED_AT_KEY);
-
-    if (savedSettings) {
-      try {
-        setSettings({ ...defaultSettings, ...JSON.parse(savedSettings) });
-      } catch {
-        setSettings(defaultSettings);
-      }
-    }
-
-    if (savedTime) setSavedAt(savedTime);
+    const settings = getBackendSettings();
+    setCompany(settings.company);
+    setScaffold(settings.scaffold);
+    setMaterial(settings.material);
+    setLabor(settings.labor);
+    setPricing(settings.pricing);
+    setProposal(settings.proposal);
+    setIsHydrated(true);
   }, []);
 
-  const savedAtLabel = useMemo(() => formatSavedAt(savedAt), [savedAt]);
-
-  function updateSetting(key: string, value: string | boolean) {
-    setSettings((current) => ({
-      ...current,
-      [key]: value,
-    }));
-    setStatusMessage("Unsaved changes");
+  function flashSaved(label: string) {
+    setSavedFlash(label);
+    window.setTimeout(() => setSavedFlash(null), 1800);
   }
 
-  function saveSettings() {
-    const now = new Date().toISOString();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    localStorage.setItem(SAVED_AT_KEY, now);
-    setSavedAt(now);
-    setStatusMessage("Settings saved");
+  function handleSaveCompany() {
+    if (!company) return;
+    saveBackendSection("company", company);
+    flashSaved("Company Setup");
   }
 
-  function resetDefaults() {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(SAVED_AT_KEY);
-    setSettings(defaultSettings);
-    setSavedAt(null);
-    setStatusMessage("Defaults restored. Click Save Settings to keep them.");
+  function handleSaveScaffold() {
+    if (!scaffold) return;
+    saveBackendSection("scaffold", scaffold);
+    flashSaved("Scaffold Defaults");
+  }
+
+  function handleSaveMaterial() {
+    if (!material) return;
+    saveBackendSection("material", material);
+    flashSaved("Frame / Material Defaults");
+  }
+
+  function handleSaveLabor() {
+    if (!labor) return;
+    saveBackendSection("labor", labor);
+    flashSaved("Labor Defaults");
+  }
+
+  function handleSavePricing() {
+    if (!pricing) return;
+    saveBackendSection("pricing", pricing);
+    flashSaved("Pricing / Rental Defaults");
+  }
+
+  function handleSaveProposal() {
+    if (!proposal) return;
+    saveBackendSection("proposal", proposal);
+    flashSaved("Proposal Defaults");
+  }
+
+  function handleResetAll() {
+    const confirmed = window.confirm(
+      "Reset ALL backend settings to KORBAN defaults? This cannot be undone.",
+    );
+    if (!confirmed) return;
+    resetBackendSettings();
+    const settings = getBackendSettings();
+    setCompany(settings.company);
+    setScaffold(settings.scaffold);
+    setMaterial(settings.material);
+    setLabor(settings.labor);
+    setPricing(settings.pricing);
+    setProposal(settings.proposal);
+    flashSaved("All Settings Reset");
+  }
+
+  if (!isHydrated || !company || !scaffold || !material || !labor || !pricing || !proposal) {
+    return (
+      <main className="min-h-screen bg-[#080604] text-white flex items-center justify-center">
+        <p className="text-zinc-500 text-sm">Loading backend settings...</p>
+      </main>
+    );
   }
 
   return (
-    <main className="min-h-screen bg-[#14110d] px-6 py-8 text-white">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,138,31,0.24),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(180,83,9,0.2),transparent_36%)]" />
+    <main className="min-h-screen bg-[#080604] text-white">
+      <div className="sticky top-0 z-20">
+        <KorbanHeader
+          title="Backend"
+          subtitle="Estimator control center — company, scaffold, material, labor, pricing, and proposal defaults."
+          actionsAlwaysVisible
+          actions={
+            <>
+              {savedFlash && (
+                <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-300">
+                  ✓ {savedFlash} saved
+                </span>
+              )}
+              <button
+                onClick={handleResetAll}
+                className="rounded-xl border border-zinc-700 bg-black px-5 py-3 text-sm font-bold text-zinc-400 hover:border-red-500/40 hover:text-red-300"
+              >
+                Reset All
+              </button>
+              <a
+                href="/dashboard"
+                className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
+              >
+                Done
+              </a>
+            </>
+          }
+        />
 
-      <div className="relative mx-auto max-w-[1600px]">
-        <header className="sticky top-4 z-20 mb-8 rounded-3xl border border-[#7c4a1f]/50 bg-[#1b1712]/95 p-5 shadow-2xl backdrop-blur">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-sm font-bold tracking-[0.55em] text-[#ff8a1f] drop-shadow-[0_0_10px_rgba(255,138,31,0.45)]">
-                KORBAN
-              </p>
-              <h1 className="mt-2 text-3xl font-bold text-neutral-100">
-                Backend
-              </h1>
-              <p className="mt-2 max-w-4xl text-sm leading-6 text-neutral-400">
-                Estimator preferences, scaffold constants, calculation behavior, inventory defaults, and proposal logic.
-              </p>
-            </div>
+        <div className="border-b border-zinc-900 bg-[#0b0b0b] px-6 py-3">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-600">
+            These defaults feed <span className="text-orange-400 font-bold normal-case tracking-normal">Takeoff Workspace</span>,{" "}
+            <span className="text-orange-400 font-bold normal-case tracking-normal">Set Scaffold</span>,{" "}
+            <span className="text-orange-400 font-bold normal-case tracking-normal">Estimate Review</span>, and{" "}
+            <span className="text-orange-400 font-bold normal-case tracking-normal">Proposal</span> automatically.
+          </p>
+        </div>
+      </div>
 
-            <div className="flex min-w-[280px] flex-col gap-3 rounded-2xl border border-[#30261c] bg-[#120f0b]/70 p-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.25em] text-[#ff8a1f] drop-shadow-[0_0_8px_rgba(255,138,31,0.35)]">
-                  Last Saved
-                </p>
-                <p className="mt-1 text-sm text-neutral-300">{savedAtLabel}</p>
-                <p className="mt-1 text-xs text-neutral-500">{statusMessage}</p>
-              </div>
+      <section className="columns-1 gap-5 p-6 xl:columns-3 [&>*]:mb-5 [&>*]:break-inside-avoid">
+        {/* 1. Company Setup */}
+        <BackendTile title="Company Setup" subtitle="Feeds proposal header, travel, and contact info" onSave={handleSaveCompany}>
+          <FieldRow label="Company Name">
+            <TextInput value={company.companyName} onChange={(v) => setCompany({ ...company, companyName: v })} placeholder="KORBAN Scaffold & Supply" />
+          </FieldRow>
+          <FieldRow label="Company Address">
+            <TextInput value={company.companyAddress} onChange={(v) => setCompany({ ...company, companyAddress: v })} placeholder="123 Industrial Way, Vallejo, CA" />
+          </FieldRow>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Phone">
+              <TextInput value={company.companyPhone} onChange={(v) => setCompany({ ...company, companyPhone: v })} placeholder="(510) 555-0100" />
+            </FieldRow>
+            <FieldRow label="Email">
+              <TextInput value={company.companyEmail} onChange={(v) => setCompany({ ...company, companyEmail: v })} placeholder="estimating@korban.com" />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="License / Contractor No.">
+              <TextInput value={company.licenseNumber} onChange={(v) => setCompany({ ...company, licenseNumber: v })} placeholder="CSLB #000000" />
+            </FieldRow>
+            <FieldRow label="Union / Non-Union Default">
+              <SegmentedControl
+                value={company.unionDefault}
+                options={["Union", "Non-Union"]}
+                onChange={(v) => setCompany({ ...company, unionDefault: v as "Union" | "Non-Union" })}
+              />
+            </FieldRow>
+          </div>
+          <FieldRow label="Main Office Location">
+            <TextInput value={company.mainOfficeLocation} onChange={(v) => setCompany({ ...company, mainOfficeLocation: v })} placeholder="Vallejo, CA" />
+          </FieldRow>
+          <FieldRow label="Travel Start Address" hint="Used for travel time / mobilization calculations">
+            <TextInput value={company.travelStartAddress} onChange={(v) => setCompany({ ...company, travelStartAddress: v })} placeholder="Same as main office, or yard address" />
+          </FieldRow>
+        </BackendTile>
 
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={saveSettings}
-                  className="rounded-xl border border-[#ff8a1f] bg-[#ff8a1f] px-4 py-2 text-sm font-bold text-black shadow-[0_0_18px_rgba(255,138,31,0.35)] transition hover:shadow-[0_0_24px_rgba(255,138,31,0.55)]"
-                >
-                  Save Settings
-                </button>
+        {/* 2. Scaffold Defaults */}
+        <BackendTile title="Scaffold Defaults" subtitle="Feeds Set Scaffold and the quantity engine" onSave={handleSaveScaffold}>
+          <FieldRow label="Scaffold Type">
+            <TextInput value={scaffold.scaffoldType} onChange={(v) => setScaffold({ ...scaffold, scaffoldType: v })} placeholder="Frame Scaffold" />
+          </FieldRow>
+          <div className="grid grid-cols-3 gap-3">
+            <FieldRow label="Default Width">
+              <FeetInput value={scaffold.defaultScaffoldWidth} onChange={(v) => setScaffold({ ...scaffold, defaultScaffoldWidth: v })} />
+            </FieldRow>
+            <FieldRow label="Bay Length">
+              <FeetInput value={scaffold.defaultBayLength} onChange={(v) => setScaffold({ ...scaffold, defaultBayLength: v })} />
+            </FieldRow>
+            <FieldRow label="Wall Offset">
+              <FeetInput value={scaffold.wallOffset} onChange={(v) => setScaffold({ ...scaffold, wallOffset: v })} />
+            </FieldRow>
+          </div>
+          <FieldRow label="Frame Height" hint={`Standard frame height in feet-inches, e.g. 6'-4"`}>
+            <FeetInchesInput value={scaffold.frameHeight} onChange={(v) => setScaffold({ ...scaffold, frameHeight: v })} />
+          </FieldRow>
+          <FieldRow label="Brace Pattern">
+            <SegmentedControl
+              value={scaffold.bracePattern}
+              options={["Every Bay", "Every Other Bay", "Custom"]}
+              onChange={(v) => setScaffold({ ...scaffold, bracePattern: v as ScaffoldDefaults["bracePattern"] })}
+            />
+          </FieldRow>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Inside Corner Logic">
+              <TextInput value={scaffold.insideCornerLogic} onChange={(v) => setScaffold({ ...scaffold, insideCornerLogic: v })} />
+            </FieldRow>
+            <FieldRow label="Outside Corner Logic">
+              <TextInput value={scaffold.outsideCornerLogic} onChange={(v) => setScaffold({ ...scaffold, outsideCornerLogic: v })} />
+            </FieldRow>
+          </div>
+          <FieldRow label="Turnaround Bays">
+            <ToggleRow
+              checked={scaffold.turnaroundBaysEnabled}
+              onChange={(v) => setScaffold({ ...scaffold, turnaroundBaysEnabled: v })}
+              label={scaffold.turnaroundBaysEnabled ? "Enabled" : "Disabled"}
+            />
+          </FieldRow>
+          <FieldRow label="Jump Logic" hint={`Frame Configuration / Section Output naming — never "Lifts" or "Stack"`}>
+            <TextInput value={scaffold.jumpLogic} onChange={(v) => setScaffold({ ...scaffold, jumpLogic: v })} />
+          </FieldRow>
+        </BackendTile>
 
-                <button
-                  type="button"
-                  onClick={resetDefaults}
-                  className="rounded-xl border border-[#3a2b1c] bg-[#18130f] px-4 py-2 text-sm font-bold text-neutral-400 transition hover:border-[#7c4a1f] hover:text-neutral-200"
-                >
-                  Reset Defaults
-                </button>
-              </div>
+        {/* 3. Frame / Material Defaults */}
+        <BackendTile title="Frame / Material Defaults" subtitle="Core inventory + specialty items, feeds quantity engine and inventory tracker" onSave={handleSaveMaterial}>
+          <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Core Inventory</p>
+          <div className="space-y-2 mb-4">
+            {material.items.filter((item) => item.isCore).map((item) => (
+              <MaterialRow
+                key={item.id}
+                item={item}
+                onChange={(updated) =>
+                  setMaterial({
+                    items: material.items.map((m) => (m.id === item.id ? updated : m)),
+                  })
+                }
+              />
+            ))}
+          </div>
+          <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Specialty / Optional</p>
+          <div className="space-y-2">
+            {material.items.filter((item) => !item.isCore).map((item) => (
+              <MaterialRow
+                key={item.id}
+                item={item}
+                onChange={(updated) =>
+                  setMaterial({
+                    items: material.items.map((m) => (m.id === item.id ? updated : m)),
+                  })
+                }
+              />
+            ))}
+          </div>
+        </BackendTile>
+
+        {/* 4. Labor Defaults */}
+        <BackendTile title="Labor Defaults" subtitle="Feeds Estimate Review labor cost and projected profit" onSave={handleSaveLabor}>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Install Crew Size">
+              <NumberInput value={labor.installCrewSize} onChange={(v) => setLabor({ ...labor, installCrewSize: v })} suffix="laborers" />
+            </FieldRow>
+            <FieldRow label="Dismantle Crew Size">
+              <NumberInput value={labor.dismantleCrewSize} onChange={(v) => setLabor({ ...labor, dismantleCrewSize: v })} suffix="laborers" />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Install Production Rate">
+              <NumberInput value={labor.installProductionRate} onChange={(v) => setLabor({ ...labor, installProductionRate: v })} suffix="bays/day" />
+            </FieldRow>
+            <FieldRow label="Dismantle Production Rate">
+              <NumberInput value={labor.dismantleProductionRate} onChange={(v) => setLabor({ ...labor, dismantleProductionRate: v })} suffix="bays/day" />
+            </FieldRow>
+          </div>
+          <p className="mt-1 mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Labor Rates</p>
+          <div className="grid grid-cols-3 gap-3">
+            <FieldRow label="Apprentice">
+              <MoneyInput value={labor.apprenticeRate} onChange={(v) => setLabor({ ...labor, apprenticeRate: v })} suffix="/hr" />
+            </FieldRow>
+            <FieldRow label="Journeyman">
+              <MoneyInput value={labor.journeymanRate} onChange={(v) => setLabor({ ...labor, journeymanRate: v })} suffix="/hr" />
+            </FieldRow>
+            <FieldRow label="Foreman">
+              <MoneyInput value={labor.foremanRate} onChange={(v) => setLabor({ ...labor, foremanRate: v })} suffix="/hr" />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Travel Time">
+              <NumberInput value={labor.travelTimeHours} onChange={(v) => setLabor({ ...labor, travelTimeHours: v })} suffix="hrs" />
+            </FieldRow>
+            <FieldRow label="Truck / Delivery Rate">
+              <MoneyInput value={labor.truckDeliveryRate} onChange={(v) => setLabor({ ...labor, truckDeliveryRate: v })} suffix="/trip" />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Mobilization Cost">
+              <MoneyInput value={labor.mobilizationCost} onChange={(v) => setLabor({ ...labor, mobilizationCost: v })} />
+            </FieldRow>
+            <FieldRow label="Dismantle Cost" hint="Leave 0 to auto-calculate from crew + rate">
+              <MoneyInput value={labor.dismantleCost} onChange={(v) => setLabor({ ...labor, dismantleCost: v })} />
+            </FieldRow>
+          </div>
+        </BackendTile>
+
+        {/* 5. Pricing / Rental Defaults */}
+        <BackendTile title="Pricing / Rental Defaults" subtitle="Feeds Estimate Review revenue and final bid calculation" onSave={handleSavePricing}>
+          <FieldRow label="Rental Period Type">
+            <SegmentedControl
+              value={pricing.rentalPeriodType}
+              options={["30 Days", "60 Days", "90 Days", "120 Days", "Custom"]}
+              onChange={(v) => setPricing({ ...pricing, rentalPeriodType: v as PricingDefaults["rentalPeriodType"] })}
+            />
+          </FieldRow>
+          <p className="mt-1 mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Monthly Rental Rates</p>
+          <div className="grid grid-cols-3 gap-3">
+            <FieldRow label="Frame">
+              <MoneyInput value={pricing.frameMonthlyRate} onChange={(v) => setPricing({ ...pricing, frameMonthlyRate: v })} />
+            </FieldRow>
+            <FieldRow label="Plank">
+              <MoneyInput value={pricing.plankMonthlyRate} onChange={(v) => setPricing({ ...pricing, plankMonthlyRate: v })} />
+            </FieldRow>
+            <FieldRow label="Brace">
+              <MoneyInput value={pricing.braceMonthlyRate} onChange={(v) => setPricing({ ...pricing, braceMonthlyRate: v })} />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <FieldRow label="Guardrail">
+              <MoneyInput value={pricing.guardrailMonthlyRate} onChange={(v) => setPricing({ ...pricing, guardrailMonthlyRate: v })} />
+            </FieldRow>
+            <FieldRow label="Base Plate">
+              <MoneyInput value={pricing.basePlateMonthlyRate} onChange={(v) => setPricing({ ...pricing, basePlateMonthlyRate: v })} />
+            </FieldRow>
+            <FieldRow label="Screw Jack">
+              <MoneyInput value={pricing.screwJackMonthlyRate} onChange={(v) => setPricing({ ...pricing, screwJackMonthlyRate: v })} />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Misc Cost" hint={`Renamed from "Equipment Cost"`}>
+              <MoneyInput value={pricing.miscCost} onChange={(v) => setPricing({ ...pricing, miscCost: v })} />
+            </FieldRow>
+            <FieldRow label="Markup">
+              <PercentInput value={pricing.markupPercent} onChange={(v) => setPricing({ ...pricing, markupPercent: v })} />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Margin">
+              <PercentInput value={pricing.marginPercent} onChange={(v) => setPricing({ ...pricing, marginPercent: v })} />
+            </FieldRow>
+            <FieldRow label="Tax">
+              <PercentInput value={pricing.taxPercent} onChange={(v) => setPricing({ ...pricing, taxPercent: v })} />
+            </FieldRow>
+          </div>
+        </BackendTile>
+
+        {/* 6. Proposal Defaults */}
+        <BackendTile title="Proposal Defaults" subtitle="Feeds the client-facing proposal output" onSave={handleSaveProposal}>
+          <div className="space-y-3">
+            <FieldRow label="Proposal Number Format">
+              <TextInput value={proposal.proposalNumberFormat} onChange={(v) => setProposal({ ...proposal, proposalNumberFormat: v })} placeholder="KRB-{YYMMDD}-{seq}" />
+            </FieldRow>
+            <FieldRow label="Intro Language">
+              <TextArea value={proposal.introLanguage} onChange={(v) => setProposal({ ...proposal, introLanguage: v })} rows={3} />
+            </FieldRow>
+            <FieldRow label="Scope Language">
+              <TextArea value={proposal.scopeLanguage} onChange={(v) => setProposal({ ...proposal, scopeLanguage: v })} rows={2} placeholder="Standard scope language for proposals..." />
+            </FieldRow>
+            <FieldRow label="Exclusions">
+              <TextArea value={proposal.exclusionsLanguage} onChange={(v) => setProposal({ ...proposal, exclusionsLanguage: v })} rows={2} placeholder="Standard exclusions language..." />
+            </FieldRow>
+            <FieldRow label="Rental Duration Language">
+              <TextArea value={proposal.rentalDurationLanguage} onChange={(v) => setProposal({ ...proposal, rentalDurationLanguage: v })} rows={2} />
+            </FieldRow>
+            <FieldRow label="Terms">
+              <TextArea value={proposal.termsLanguage} onChange={(v) => setProposal({ ...proposal, termsLanguage: v })} rows={2} placeholder="Standard terms language..." />
+            </FieldRow>
+            <FieldRow label="Signature Block">
+              <TextArea value={proposal.signatureBlock} onChange={(v) => setProposal({ ...proposal, signatureBlock: v })} rows={2} placeholder="Authorized signature, title, date..." />
+            </FieldRow>
+
+            <p className="mt-1 mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">
+              Default Add Alternates <span className="text-zinc-700">(excluded by default)</span>
+            </p>
+            <div className="space-y-2">
+              {proposal.addAlternateDefaults.map((alt, index) => (
+                <AddAlternateRow
+                  key={alt.id}
+                  alternate={alt}
+                  index={index}
+                  onChange={(updated) =>
+                    setProposal({
+                      ...proposal,
+                      addAlternateDefaults: proposal.addAlternateDefaults.map((a) => (a.id === alt.id ? updated : a)),
+                    })
+                  }
+                />
+              ))}
             </div>
           </div>
-        </header>
-
-        <section className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-          {tiles.map((tile) => (
-            <SettingsTile
-              key={tile.number}
-              tile={tile}
-              settings={settings}
-              updateSetting={updateSetting}
-            />
-          ))}
-        </section>
-      </div>
+        </BackendTile>
+      </section>
     </main>
   );
 }
 
-function SettingsTile({
-  tile,
-  settings,
-  updateSetting,
+// Tile shell
+
+function BackendTile({
+  title,
+  subtitle,
+  children,
+  onSave,
+  className,
 }: {
-  tile: SettingsTile;
-  settings: Record<string, string | boolean>;
-  updateSetting: (key: string, value: string | boolean) => void;
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+  onSave: () => void;
+  className?: string;
 }) {
   return (
-    <section className="rounded-3xl border border-[#3a2b1c] bg-[#1a1611]/95 p-5 shadow-2xl">
-      <div className="mb-5 flex items-start gap-4">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-[#ff8a1f]/80 bg-[#120f0b] text-sm font-bold text-[#ff8a1f] shadow-[0_0_18px_rgba(255,138,31,0.28)]">
-          {tile.number}
-        </div>
-
+    <section className={`rounded-3xl border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl ${className ?? ""}`}>
+      <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-[#ff8a1f] drop-shadow-[0_0_10px_rgba(255,138,31,0.35)]">
-            {tile.title}
-          </h2>
-          <div className="mt-2 h-px w-24 bg-[#ff8a1f]/50 shadow-[0_0_10px_rgba(255,138,31,0.35)]" />
-          <p className="mt-3 text-sm leading-5 text-neutral-400">{tile.description}</p>
+          <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">{title}</h2>
+          <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>
         </div>
+        <button
+          onClick={onSave}
+          className="shrink-0 rounded-lg border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.1em] text-orange-300 hover:bg-orange-500/20"
+        >
+          Save
+        </button>
       </div>
-
-      <div className="overflow-hidden rounded-2xl border border-[#30261c]">
-        <div className="grid grid-cols-[1fr_1.6fr_1fr] border-b border-[#30261c] bg-[#120f0b]/90 text-xs font-bold uppercase tracking-[0.2em] text-[#c8752f]">
-          <div className="p-3">Field Name</div>
-          <div className="border-l border-[#30261c] p-3">Description / Formula</div>
-          <div className="border-l border-[#30261c] p-3">Input / Options</div>
-        </div>
-
-        {tile.fields.map((field) => (
-          <div
-            key={`${tile.number}-${field.key}`}
-            className="grid grid-cols-[1fr_1.6fr_1fr] border-b border-[#2a2118] last:border-b-0"
-          >
-            <div className="bg-[#18130f] p-3 text-sm font-semibold text-neutral-100">
-              {field.name}
-            </div>
-
-            <div className="border-l border-[#2a2118] bg-[#1a1611] p-3 text-sm leading-5 text-neutral-400">
-              {field.description}
-            </div>
-
-            <div className="border-l border-[#2a2118] bg-[#18130f] p-3 text-sm text-neutral-300">
-              <FieldInput
-                field={field}
-                value={settings[field.key]}
-                onChange={(value) => updateSetting(field.key, value)}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
+      <div className="space-y-3">{children}</div>
     </section>
   );
 }
 
-function FieldInput({
-  field,
+// Field primitives
+
+function FieldRow({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-500">{label}</p>
+      {children}
+      {hint && <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>}
+    </div>
+  );
+}
+
+function TextInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-orange-500/40 placeholder:text-zinc-700"
+    />
+  );
+}
+
+function TextArea({
+  value,
+  onChange,
+  rows = 3,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  rows?: number;
+  placeholder?: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      rows={rows}
+      placeholder={placeholder}
+      className="w-full resize-none rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-xs leading-5 text-zinc-300 outline-none focus:border-orange-500/40 placeholder:text-zinc-700"
+    />
+  );
+}
+
+function NumberInput({
+  value,
+  onChange,
+  suffix,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  suffix?: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+      <input
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value || 0))}
+        type="number"
+        className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none"
+      />
+      {suffix && <span className="shrink-0 text-[10px] text-zinc-600">{suffix}</span>}
+    </div>
+  );
+}
+
+function MoneyInput({
+  value,
+  onChange,
+  suffix,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  suffix?: string;
+}) {
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+      <span className="font-mono text-sm font-bold text-zinc-600">$</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value || 0))}
+        type="number"
+        step="0.01"
+        className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none"
+      />
+      {suffix && <span className="shrink-0 text-[10px] text-zinc-600">{suffix}</span>}
+    </div>
+  );
+}
+
+function PercentInput({
   value,
   onChange,
 }: {
-  field: FieldRow;
-  value: string | boolean;
-  onChange: (value: string | boolean) => void;
+  value: number;
+  onChange: (v: number) => void;
 }) {
-  const baseClass =
-    "w-full rounded-xl border border-[#3a2b1c] bg-[#18130f] px-3 py-2 text-sm text-neutral-100 outline-none transition focus:border-[#ff8a1f]";
-
-  if (field.type === "readonly") {
-    return (
-      <div className="rounded-xl border border-[#3a2b1c] bg-[#15110d] px-3 py-2 text-sm text-neutral-500">
-        {String(value)}
-      </div>
-    );
-  }
-
-  if (field.type === "file") {
-    return (
-      <label className="block w-full cursor-pointer rounded-xl border border-dashed border-[#4a3724] bg-[#15110d] px-3 py-2 text-sm text-neutral-400 transition hover:border-[#ff8a1f]/70 hover:text-neutral-200">
-        <input
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            onChange(file ? file.name : "");
-          }}
-        />
-        {value ? String(value) : "Upload Image"}
-      </label>
-    );
-  }
-
-  if (field.type === "textarea") {
-    return (
-      <textarea
-        className={`${baseClass} min-h-20 resize-y`}
-        value={String(value)}
-        onChange={(event) => onChange(event.target.value)}
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+      <input
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value || 0))}
+        type="number"
+        className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none"
       />
-    );
-  }
+      <span className="font-mono text-sm font-bold text-zinc-600">%</span>
+    </div>
+  );
+}
 
-  if (field.type === "select") {
-    return (
-      <select
-        className={baseClass}
-        value={String(value)}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {field.options?.map((option) => (
-          <option key={option}>{option}</option>
-        ))}
-      </select>
-    );
-  }
+/**
+ * Feet input — whole feet only, displayed plainly (no px language per spec).
+ */
+function FeetInput({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-black px-3 py-2.5">
+      <input
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value || 0))}
+        type="number"
+        className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none"
+      />
+      <span className="font-mono text-sm font-bold text-zinc-600">ft</span>
+    </div>
+  );
+}
 
-  if (field.type === "toggle") {
-    return (
-      <button
-        type="button"
-        onClick={() => onChange(!Boolean(value))}
-        className={`w-full rounded-lg border px-3 py-1.5 text-xs font-bold uppercase tracking-[0.2em] transition ${
-          value
-            ? "border-[#ff8a1f] bg-[#ff8a1f] text-black shadow-[0_0_16px_rgba(255,138,31,0.42)]"
-            : "border-[#3a2b1c] bg-[#18130f] text-neutral-500"
-        }`}
-      >
-        {value ? "On" : "Off"}
-      </button>
-    );
+/**
+ * Feet-inches input — stores decimal feet internally but always displays
+ * and accepts feet'-inches" format, per the "no pixel language" rule.
+ */
+function FeetInchesInput({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const [text, setText] = useState(formatFeetInches(value));
+
+  useEffect(() => {
+    setText(formatFeetInches(value));
+  }, [value]);
+
+  function commit() {
+    const parsed = parseFeetInches(text);
+    if (parsed !== null) {
+      onChange(parsed);
+      setText(formatFeetInches(parsed));
+    } else {
+      setText(formatFeetInches(value));
+    }
   }
 
   return (
     <input
-      className={baseClass}
-      value={String(value)}
-      onChange={(event) => onChange(event.target.value)}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+      placeholder={`ex: 6'-4"`}
+      className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
     />
+  );
+}
+
+function formatFeetInches(decimalFeet: number) {
+  const safe = Math.max(0, decimalFeet);
+  let feet = Math.floor(safe);
+  let inches = Math.round((safe - feet) * 12);
+  if (inches === 12) {
+    feet += 1;
+    inches = 0;
+  }
+  return `${feet}'-${inches}"`;
+}
+
+function parseFeetInches(input: string): number | null {
+  const value = input.trim();
+  if (!value) return null;
+  const normalized = value.toLowerCase().replace(/\s+/g, "").replace(/[–—]/g, "-");
+  const match = normalized.match(/^(-?\d+(?:\.\d+)?)'?-?(\d+(?:\.\d+)?)?"?$/);
+  if (!match) {
+    const plain = Number(normalized.replace(/['"]/g, ""));
+    return Number.isNaN(plain) ? null : plain;
+  }
+  const feet = Number(match[1]);
+  const inches = Number(match[2] || 0);
+  if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
+  return feet + inches / 12;
+}
+
+function SegmentedControl<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: readonly T[] | T[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((option) => (
+        <button
+          key={option}
+          onClick={() => onChange(option)}
+          className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition ${
+            value === option
+              ? "border-orange-500 bg-orange-500 text-black"
+              : "border-zinc-800 bg-black text-zinc-500 hover:border-orange-500/40"
+          }`}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ToggleRow({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className={`flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left transition ${
+        checked ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 bg-black text-zinc-500"
+      }`}
+    >
+      <span className="text-xs font-bold">{label}</span>
+      <span
+        className={`flex h-5 w-9 items-center rounded-full border px-0.5 transition ${
+          checked ? "border-orange-500 bg-orange-500/30 justify-end" : "border-zinc-700 bg-zinc-900 justify-start"
+        }`}
+      >
+        <span className={`h-3.5 w-3.5 rounded-full ${checked ? "bg-orange-400" : "bg-zinc-600"}`} />
+      </span>
+    </button>
+  );
+}
+
+function MaterialRow({
+  item,
+  onChange,
+}: {
+  item: MaterialItem;
+  onChange: (item: MaterialItem) => void;
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_120px] items-center gap-3 rounded-xl border border-zinc-800 bg-black p-2.5">
+      <p className="text-xs font-semibold text-zinc-300">{item.name}</p>
+      <MoneyInput value={item.unitRate} onChange={(v) => onChange({ ...item, unitRate: v })} suffix="/mo" />
+    </div>
+  );
+}
+
+function AddAlternateRow({
+  alternate,
+  index,
+  onChange,
+}: {
+  alternate: AddAlternateDefault;
+  index: number;
+  onChange: (alt: AddAlternateDefault) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-black p-3">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <p className="text-xs font-bold text-zinc-300">
+          AA #{index + 1} — {alternate.title}
+        </p>
+        <MoneyInput value={alternate.defaultValue} onChange={(v) => onChange({ ...alternate, defaultValue: v })} />
+      </div>
+      <p className="text-[10px] text-zinc-600">{alternate.description}</p>
+    </div>
   );
 }

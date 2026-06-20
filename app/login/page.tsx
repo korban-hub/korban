@@ -1,17 +1,114 @@
 "use client";
 
 import { useState } from "react";
+import { supabase } from "@/lib/supabase";
+
+/**
+ * login/page.tsx
+ *
+ * One screen, three modes: Sign In, Create Account, Reset Password.
+ * Combines the styled KORBAN login shell with AuthForm's real Supabase
+ * auth logic — this is now the single, complete login experience.
+ *
+ * Sign In  -> supabase.auth.signInWithPassword()
+ * Sign Up  -> supabase.auth.signUp()
+ * Reset    -> supabase.auth.resetPasswordForEmail()  (emails a reset link)
+ */
+
+type Mode = "signIn" | "signUp" | "reset";
 
 export default function LoginPage() {
-  const [username, setUsername] = useState("");
+  const [mode, setMode] = useState<Mode>("signIn");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    // TODO: wire to real auth
-    console.log("Sign in attempt", { username });
+  function resetMessage() {
+    setMessage(null);
   }
+
+  function switchMode(next: Mode) {
+    setMode(next);
+    resetMessage();
+  }
+
+  function validate(): string | null {
+    if (!email.trim()) return "Enter your email address.";
+    const emailLooksValid = /\S+@\S+\.\S+/.test(email);
+    if (!emailLooksValid) return "Enter a valid email address.";
+
+    if (mode !== "reset") {
+      if (!password) return "Enter your password.";
+      if (mode === "signUp" && password.length < 6) {
+        return "Password must be at least 6 characters.";
+      }
+    }
+
+    return null;
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    resetMessage();
+
+    const validationError = validate();
+    if (validationError) {
+      setMessage({ type: "error", text: validationError });
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      if (mode === "signIn") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        window.location.href = "/dashboard";
+        return;
+      }
+
+      if (mode === "signUp") {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        setMessage({
+          type: "success",
+          text: "Account created. Check your email to confirm before signing in.",
+        });
+        setMode("signIn");
+        return;
+      }
+
+      if (mode === "reset") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}/reset-password`,
+        });
+        if (error) throw error;
+        setMessage({
+          type: "success",
+          text: "Password reset link sent. Check your email.",
+        });
+        return;
+      }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "Something went wrong. Try again.";
+      setMessage({ type: "error", text });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const heading =
+    mode === "signIn" ? "Sign In" : mode === "signUp" ? "Create Account" : "Reset Password";
+
+  const buttonLabel = loading
+    ? "Working..."
+    : mode === "signIn"
+      ? "Enter"
+      : mode === "signUp"
+        ? "Create Account"
+        : "Send Reset Link";
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#070604] text-white">
@@ -26,10 +123,8 @@ export default function LoginPage() {
       {/* Center Content */}
       <div className="relative flex min-h-screen flex-col items-center justify-center px-6">
         <div className="flex w-full max-w-[400px] flex-col items-center">
-          {/* Logo */}
           <Logo />
 
-          {/* Tagline */}
           <p
             className="mt-4 text-center uppercase text-[#A1A1AA]"
             style={{
@@ -41,74 +136,126 @@ export default function LoginPage() {
             Scaffold Intelligence Platform
           </p>
 
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="mt-14 w-full">
+          <p
+            className="mt-10 text-center uppercase text-orange-400"
+            style={{ fontFamily: "ui-monospace, monospace", fontSize: "11px", letterSpacing: ".2em" }}
+          >
+            {heading}
+          </p>
+
+          <form onSubmit={handleSubmit} className="mt-4 w-full">
             <div>
               <label
-                htmlFor="username"
+                htmlFor="email"
                 className="mb-2 block text-white"
                 style={{ fontFamily: "Geist, sans-serif", fontSize: "14px", fontWeight: 500 }}
               >
-                Username
+                Email
               </label>
               <input
-                id="username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="estimator@korban.com"
-                autoComplete="username"
+                autoComplete="email"
                 className="h-[52px] w-full rounded-full border border-white/25 bg-white/[0.02] px-6 text-sm text-[#F97316] outline-none transition placeholder:text-zinc-600 focus:border-[#F97316]/60 focus:bg-white/[0.04]"
                 style={{ fontFamily: "'Fira Code', ui-monospace, monospace" }}
               />
             </div>
 
-            <div className="mt-5">
-              <label
-                htmlFor="password"
-                className="mb-2 block text-white"
-                style={{ fontFamily: "Geist, sans-serif", fontSize: "14px", fontWeight: 500 }}
-              >
-                Password
-              </label>
-              <div className="relative">
-                <input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  autoComplete="current-password"
-                  className="h-[52px] w-full rounded-full border border-white/25 bg-white/[0.02] px-6 pr-14 text-sm text-[#F97316] outline-none transition placeholder:text-zinc-600 focus:border-[#F97316]/60 focus:bg-white/[0.04]"
-                  style={{ fontFamily: "'Fira Code', ui-monospace, monospace" }}
-                />
+            {mode !== "reset" && (
+              <div className="mt-5">
+                <label
+                  htmlFor="password"
+                  className="mb-2 block text-white"
+                  style={{ fontFamily: "Geist, sans-serif", fontSize: "14px", fontWeight: 500 }}
+                >
+                  Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete={mode === "signUp" ? "new-password" : "current-password"}
+                    className="h-[52px] w-full rounded-full border border-white/25 bg-white/[0.02] px-6 pr-14 text-sm text-[#F97316] outline-none transition placeholder:text-zinc-600 focus:border-[#F97316]/60 focus:bg-white/[0.04]"
+                    style={{ fontFamily: "'Fira Code', ui-monospace, monospace" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    className="absolute right-5 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-wider text-zinc-500 hover:text-[#F97316]"
+                  >
+                    {showPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {mode === "signIn" && (
+              <div className="mt-3 flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  className="absolute right-5 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-wider text-zinc-500 hover:text-[#F97316]"
+                  onClick={() => switchMode("reset")}
+                  className="text-xs text-zinc-500 underline-offset-4 hover:text-[#F97316] hover:underline"
                 >
-                  {showPassword ? "Hide" : "Show"}
+                  Forgot password?
                 </button>
               </div>
-            </div>
+            )}
 
-            <div className="mt-3 flex justify-end">
-              <a
-                href="/forgot-password"
-                className="text-xs text-zinc-500 underline-offset-4 hover:text-[#F97316] hover:underline"
+            {message && (
+              <p
+                className={`mt-4 text-center text-xs ${
+                  message.type === "error" ? "text-red-400" : "text-emerald-400"
+                }`}
               >
-                Forgot password?
-              </a>
-            </div>
+                {message.text}
+              </p>
+            )}
 
             <div className="mt-8 flex justify-center">
               <button
                 type="submit"
-                className="h-[50px] w-[140px] rounded-full bg-[#F97316] text-black transition hover:bg-[#fb923c] active:scale-[0.98]"
-                style={{ fontFamily: "Geist, sans-serif", fontSize: "18px", fontWeight: 600 }}
+                disabled={loading}
+                className="h-[50px] min-w-[160px] rounded-full bg-[#F97316] px-6 text-black transition hover:bg-[#fb923c] active:scale-[0.98] disabled:opacity-60"
+                style={{ fontFamily: "Geist, sans-serif", fontSize: "16px", fontWeight: 600 }}
               >
-                Enter
+                {buttonLabel}
               </button>
+            </div>
+
+            <div className="mt-6 text-center">
+              {mode === "signIn" && (
+                <button
+                  type="button"
+                  onClick={() => switchMode("signUp")}
+                  className="text-xs text-zinc-500 hover:text-[#F97316]"
+                >
+                  Don&rsquo;t have an account? <span className="text-[#F97316]">Create one</span>
+                </button>
+              )}
+              {mode === "signUp" && (
+                <button
+                  type="button"
+                  onClick={() => switchMode("signIn")}
+                  className="text-xs text-zinc-500 hover:text-[#F97316]"
+                >
+                  Already have an account? <span className="text-[#F97316]">Sign in</span>
+                </button>
+              )}
+              {mode === "reset" && (
+                <button
+                  type="button"
+                  onClick={() => switchMode("signIn")}
+                  className="text-xs text-zinc-500 hover:text-[#F97316]"
+                >
+                  Back to sign in
+                </button>
+              )}
             </div>
           </form>
         </div>

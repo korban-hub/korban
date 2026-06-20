@@ -9,6 +9,17 @@ type KorbanPanelProps = {
   className?: string;
   hero?: boolean;
   compact?: boolean;
+  /**
+   * When true, the orange status dot in the panel header pulses to
+   * indicate the user is actively interacting within this tile (editing
+   * a field, picking points, etc). Defaults to false — a still, dim dot.
+   */
+  active?: boolean;
+  /**
+   * Optional element rendered in the top-right of the panel header,
+   * next to the status dot. Used for small inline actions like "+ Message".
+   */
+  headerAction?: ReactNode;
 };
 
 function mergeClass(...parts: (string | false | undefined)[]) {
@@ -22,6 +33,8 @@ export function KorbanPanel({
   className = "",
   hero = false,
   compact = false,
+  active = false,
+  headerAction,
 }: KorbanPanelProps) {
   return (
     <section
@@ -43,7 +56,15 @@ export function KorbanPanel({
           </h2>
           {subtitle && <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>}
         </div>
-        <span className="h-2 w-2 shrink-0 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+        <div className="flex shrink-0 items-center gap-2">
+          {headerAction}
+          <span className="relative flex h-2 w-2">
+            {active && (
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-500 opacity-75" />
+            )}
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+          </span>
+        </div>
       </div>
       <div className={compact ? "mt-3" : "mt-4"}>{children}</div>
     </section>
