@@ -60,18 +60,17 @@ export function KorbanHeader({
 }: KorbanHeaderProps) {
   const Tag = as;
 
-  // Page titles use Barlow Semi Condensed Bold (--font-title) — same type
-  // family as the KORBAN logo wordmark, for brand consistency. Sized down
-  // from the earlier Oswald pass (40px) to 30px per design feedback: the
-  // larger/bulkier treatment didn't read right once shown in real page
-  // context. titleWeight still controls font-weight on top of this.
-  const titleWeightClass =
-    titleWeight === "semibold" ? "font-semibold" : titleWeight === "bold" ? "font-bold" : "font-bold";
+  // Page titles use Fira Code with wide letter-spacing (0.12em) and
+  // medium weight — a deliberate, engineering-drawing-label feel that
+  // matches KORBAN's restrained aesthetic better than a bold display
+  // font. Locked in after reviewing five spacing/weight options
+  // side-by-side. Color stays white; only KORBAN branding stays orange.
+  const titleWeightClass = "font-medium";
 
   const subtitleClass =
     subtitleStyle === "sentence"
       ? "mt-1 text-sm text-zinc-500"
-      : "mt-1 text-xs uppercase tracking-[0.25em] text-zinc-600";
+      : "mt-1 text-[13px] normal-case tracking-[0.04em] text-zinc-500";
 
   const brandWeightClass = brandWeight === "bold" ? "font-bold" : "font-black";
 
@@ -94,12 +93,13 @@ export function KorbanHeader({
         </p>
         <h1
           className={mergeClass(
-            "font-title tracking-tight text-white",
+            "uppercase tracking-[0.12em] text-white",
             variant === "cad"
-              ? "mt-1 text-lg text-zinc-100"
-              : mergeClass("text-[28px] leading-[1.1] sm:text-[30px]", titleWeight === "bold" ? "mt-2" : "mt-1"),
+              ? "mt-1 text-base text-zinc-100"
+              : mergeClass("text-[24px] leading-[1.2]", titleWeight === "bold" ? "mt-2" : "mt-1"),
             titleWeightClass,
           )}
+          style={{ fontFamily: "var(--font-fira-code), ui-monospace, SFMono-Regular, Menlo, Monaco, monospace" }}
         >
           {title}
         </h1>

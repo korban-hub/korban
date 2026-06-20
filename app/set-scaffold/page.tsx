@@ -15,6 +15,7 @@ import {
   type ProjectElevation,
   type ScaffoldInput,
 } from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
 type ScaffoldWidth = "3'" | "3'-6\"" | "5'";
 type PlankType = "Wood" | "Aluminum" | "Steel";
@@ -180,6 +181,7 @@ export default function SetScaffoldPage() {
       linearFeet: current.linearFeet,
       wallHeight: current.wallHeight,
       ...scaffoldInput,
+      workerReachHeight: getBackendSettings().scaffold.workerReachHeight,
     });
     const nextElevation = {
       ...current,

@@ -198,6 +198,12 @@ export default function BackendPage() {
           <FieldRow label="Frame Height" hint={`Standard frame height in feet-inches, e.g. 6'-4"`}>
             <FeetInchesInput value={scaffold.frameHeight} onChange={(v) => setScaffold({ ...scaffold, frameHeight: v })} />
           </FieldRow>
+          <FieldRow
+            label="Worker Reach Height"
+            hint="Top deck doesn't need to reach the wall height — a worker on top can reach roughly this far above. Adjust for crew height (some companies use 5')."
+          >
+            <FeetInput value={scaffold.workerReachHeight} onChange={(v) => setScaffold({ ...scaffold, workerReachHeight: v })} />
+          </FieldRow>
           <FieldRow label="Brace Pattern">
             <SegmentedControl
               value={scaffold.bracePattern}
@@ -353,6 +359,15 @@ export default function BackendPage() {
               <PercentInput value={pricing.taxPercent} onChange={(v) => setPricing({ ...pricing, taxPercent: v })} />
             </FieldRow>
           </div>
+          <FieldRow
+            label="Partial Exterior Markup"
+            hint="Extra markup applied when pricing elevation-by-elevation instead of the complete exterior — reflects added truck trips and mobilization cost per separate visit"
+          >
+            <PercentInput
+              value={pricing.partialExteriorMarkupPercent}
+              onChange={(v) => setPricing({ ...pricing, partialExteriorMarkupPercent: v })}
+            />
+          </FieldRow>
         </BackendTile>
 
         {/* 6. Proposal Defaults */}

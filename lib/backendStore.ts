@@ -44,6 +44,15 @@ export type ScaffoldDefaults = {
   outsideCornerLogic: string;
   bracePattern: "Every Bay" | "Every Other Bay" | "Custom";
   frameHeight: number; // feet (decimal, e.g. 6.333 = 6'-4")
+  /**
+   * Standard worker reach height from the top scaffold deck. The top
+   * deck never needs to reach the full wall height — a worker standing
+   * on it can reach roughly this far above. Frame stack height is
+   * therefore calculated from (wallHeight - workerReachHeight), not the
+   * raw wall height. Editable per company since crew height/reach varies
+   * (some companies plan 5' for shorter crew members). Default 6'.
+   */
+  workerReachHeight: number;
   jumpLogic: string;
 };
 
@@ -85,6 +94,13 @@ export type PricingDefaults = {
   markupPercent: number;
   marginPercent: number;
   taxPercent: number;
+  /**
+   * Extra markup applied when a job is priced/mobilized elevation-by-
+   * elevation instead of as one complete exterior job. Reflects the real
+   * cost of multiple separate mobilizations (more truck trips, less
+   * efficient loading, more setup/teardown per visit). Default 6%.
+   */
+  partialExteriorMarkupPercent: number;
 };
 
 export type AddAlternateDefault = {
@@ -189,6 +205,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     outsideCornerLogic: "Double Leg",
     bracePattern: "Every Bay",
     frameHeight: 6 + 4 / 12,
+    workerReachHeight: 6,
     jumpLogic: "Standard",
   },
   material: {
@@ -220,6 +237,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     markupPercent: 15,
     marginPercent: 0,
     taxPercent: 0,
+    partialExteriorMarkupPercent: 6,
   },
   proposal: {
     clientLogoUrl: "",
@@ -298,6 +316,7 @@ function normalizeScaffold(value: unknown): ScaffoldDefaults {
     outsideCornerLogic: asString(r.outsideCornerLogic, d.outsideCornerLogic),
     bracePattern: asEnum(r.bracePattern, d.bracePattern, ["Every Bay", "Every Other Bay", "Custom"] as const),
     frameHeight: asNumber(r.frameHeight, d.frameHeight),
+    workerReachHeight: asNumber(r.workerReachHeight, d.workerReachHeight),
     jumpLogic: asString(r.jumpLogic, d.jumpLogic),
   };
 }
@@ -376,6 +395,7 @@ function normalizePricing(value: unknown): PricingDefaults {
     markupPercent: asNumber(r.markupPercent, d.markupPercent),
     marginPercent: asNumber(r.marginPercent, d.marginPercent),
     taxPercent: asNumber(r.taxPercent, d.taxPercent),
+    partialExteriorMarkupPercent: asNumber(r.partialExteriorMarkupPercent, d.partialExteriorMarkupPercent),
   };
 }
 

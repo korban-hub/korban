@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanMetricTile, KorbanManagementShell, KorbanSummaryStrip, type KorbanMenuLink } from "@/components/korban";
+import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanManagementShell, type KorbanMenuLink } from "@/components/korban";
 import {
   getActiveElevation,
   getActiveProject,
 } from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
 type RentalDuration = "30 Days" | "60 Days" | "90 Days" | "120 Days" | "Custom";
 type ProposalStatus = "Draft" | "Internal Review" | "Ready To Send" | "Submitted";
@@ -43,18 +44,6 @@ const bidRoundPhases: BidRoundPhase[] = [
   "GMP",
   "Final Round",
   "Awarded",
-];
-
-const optionalMaterialChoices = [
-  "Cross Braces",
-  "Guardrails",
-  "Base Plates",
-  "Screw Jacks",
-  "Toe Boards",
-  "Debris Netting",
-  "Canopy Material",
-  "Stair Tower Material",
-  "Custom",
 ];
 
 const revisionHistory: {
@@ -183,7 +172,7 @@ const productionTypes = [
   },
   {
     key: "Balanced",
-    title: "Balanced",
+    title: "Conventional",
     installDays: 5,
     productionRate: "Standard",
     note: "Default estimator production assumption for typical frame scaffold work.",
@@ -260,8 +249,6 @@ export default function EstimateReviewPage() {
   const [frameRate, setFrameRate] = useState(14.5);
   const [plankRate, setPlankRate] = useState(6.75);
   const [extraMaterialItems, setExtraMaterialItems] = useState<ExtraMaterialItem[]>([]);
-  const [newMaterialChoice, setNewMaterialChoice] = useState("Cross Braces");
-  const [customMaterialName, setCustomMaterialName] = useState("");
 
   const [productionType, setProductionType] = useState<ProductionType>("Balanced");
   const [installMix, setInstallMix] = useState<InstallMixItem[]>(defaultInstallMix);
@@ -274,12 +261,17 @@ export default function EstimateReviewPage() {
   const [miscCost, setMiscCost] = useState(4200);
   const [miscRevenue, setMiscRevenue] = useState(6800);
   const [markupPercent, setMarkupPercent] = useState(15);
+  const [materialDurationMonths, setMaterialDurationMonths] = useState(1);
   const [approvedAlternates, setApprovedAlternates] = useState<number[]>([]);
   const [proposalNotes, setProposalNotes] = useState(
     "Proposal includes furnishing, erecting, maintaining, and dismantling frame scaffold based on provided bid documents and current KORBAN takeoff assumptions."
   );
   const [isHydrated, setIsHydrated] = useState(false);
   const [storedEstimate, setStoredEstimate] = useState<EstimateData | null>(null);
+  const [elevationBreakdownRows, setElevationBreakdownRows] = useState<
+    { elevation: string; approxLinearFeet: number }[]
+  >([]);
+  const [partialExteriorMarkupPercent, setPartialExteriorMarkupPercent] = useState(6);
 
   useEffect(() => {
     function loadStoredEstimate() {
@@ -305,6 +297,24 @@ export default function EstimateReviewPage() {
         basePlates: quantityEngine.basePlateCount ?? baseEstimate.basePlates,
         screwJacks: quantityEngine.screwJackCount ?? baseEstimate.screwJacks,
       });
+
+      // Elevation Breakdown is optional, manual, supplementary data
+      // entered in Takeoff Workspace. It never overrides linearFeet or
+      // the quantity engine — it only feeds the Partial Exterior Cost
+      // comparison below.
+      const breakdownRows = (elevation.elevationBreakdown || []).filter(
+        (row) => row.approxLinearFeet > 0,
+      );
+      setElevationBreakdownRows(breakdownRows);
+
+      const backendSettings = getBackendSettings();
+      setPartialExteriorMarkupPercent(backendSettings.pricing.partialExteriorMarkupPercent ?? 6);
+      setFrameRate(backendSettings.pricing.frameMonthlyRate ?? 14.5);
+      setPlankRate(backendSettings.pricing.plankMonthlyRate ?? 6.75);
+      setAppRate(backendSettings.labor.apprenticeRate ?? 48);
+      setJourneyRate(backendSettings.labor.journeymanRate ?? 72);
+      setForemanRate(backendSettings.labor.foremanRate ?? 85);
+
       setIsHydrated(true);
     }
 
@@ -353,7 +363,7 @@ export default function EstimateReviewPage() {
       0
     );
 
-    const materialCost = standardMaterialCost + extraMaterialCost;
+    const materialCost = (standardMaterialCost + extraMaterialCost) * materialDurationMonths;
 
     const installLaborerDays = installMix.reduce(
       (sum, row) => sum + row.days * row.laborers,
@@ -425,7 +435,47 @@ export default function EstimateReviewPage() {
     plankRate,
     rentalMonths,
     markupPercent,
+    materialDurationMonths,
   ]);
+
+  // Complete Exterior Cost vs. Partial Exterior Cost.
+  //
+  // Complete Exterior Cost = totals.finalBid, unchanged — the cost of
+  // doing the whole job as one job.
+  //
+  // Partial Exterior Cost = each elevation's proportional share of that
+  // total cost (weighted by its manually-entered Approx LF from Takeoff
+  // Workspace's Elevation Breakdown section), with an added markup that
+  // reflects the real cost of mobilizing separately per elevation
+  // (more truck trips, less efficient loading, more setup/teardown).
+  const elevationPricing = useMemo(() => {
+    const totalEnteredLf = elevationBreakdownRows.reduce(
+      (sum, row) => sum + row.approxLinearFeet,
+      0,
+    );
+
+    if (totalEnteredLf <= 0) {
+      return { rows: [], totalPartialCost: 0, hasData: false };
+    }
+
+    const rows = elevationBreakdownRows.map((row) => {
+      const share = row.approxLinearFeet / totalEnteredLf;
+      const baseShare = share * totals.finalBid;
+      const partialPrice = baseShare * (1 + partialExteriorMarkupPercent / 100);
+
+      return {
+        elevation: row.elevation,
+        approxLinearFeet: row.approxLinearFeet,
+        sharePercent: share * 100,
+        baseShare,
+        partialPrice,
+      };
+    });
+
+    const totalPartialCost = rows.reduce((sum, row) => sum + row.partialPrice, 0);
+
+    return { rows, totalPartialCost, hasData: true };
+  }, [elevationBreakdownRows, totals.finalBid, partialExteriorMarkupPercent]);
 
   function toggleAlternate(id: number) {
     setApprovedAlternates((current) => {
@@ -434,8 +484,7 @@ export default function EstimateReviewPage() {
     });
   }
 
-  function addMaterialItem() {
-    const itemName = newMaterialChoice === "Custom" ? customMaterialName.trim() : newMaterialChoice;
+  function addMaterialItem(itemName: string) {
     if (!itemName) return;
 
     setExtraMaterialItems((current) => [
@@ -447,8 +496,6 @@ export default function EstimateReviewPage() {
         unitRate: 0,
       },
     ]);
-
-    setCustomMaterialName("");
   }
 
   function updateExtraMaterial(id: number, field: "quantity" | "unitRate", value: number) {
@@ -569,15 +616,6 @@ export default function EstimateReviewPage() {
           }
         />
       }
-      summary={
-        <KorbanSummaryStrip title="Live Project Metrics">
-          <KorbanMetricTile label="Linear Ft" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
-          <KorbanMetricTile label="Bay Count" value={formatNumber(estimate.bays)} />
-          <KorbanMetricTile label="Leg Count" value={formatNumber(estimate.legs)} />
-          <KorbanMetricTile label="Frame Count" value={formatNumber(estimate.frames)} />
-          <KorbanMetricTile label="Plank Count" value={formatNumber(estimate.planks)} />
-        </KorbanSummaryStrip>
-      }
       bodyClassName="p-4"
     >
       <section className="grid gap-4 xl:grid-cols-[minmax(0,6.5fr)_minmax(280px,2.5fr)_minmax(150px,1fr)]">
@@ -586,7 +624,7 @@ export default function EstimateReviewPage() {
             <div className="flex items-start justify-between gap-6 border-b border-zinc-800 pb-5">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.35em] text-orange-500">
-                  Estimate Proposal Review
+                  Estimate Review
                 </p>
                 <h2 className="mt-3 text-3xl font-bold text-white">{estimate.projectName}</h2>
                 <p className="mt-1 text-sm text-zinc-500">{estimate.projectAddress}</p>
@@ -602,95 +640,60 @@ export default function EstimateReviewPage() {
               </div>
             </div>
 
-            <div className="mt-5 grid gap-5 md:grid-cols-3">
-              <KorbanMetricTile size="hero" label="Total Linear Feet" value={formatNumber(estimate.totalLinearFeet)} suffix="LF" />
-              <KorbanMetricTile size="hero" label="Frame Count" value={formatNumber(estimate.frames)} />
-              <KorbanMetricTile size="hero" label="Plank Count" value={formatNumber(estimate.planks)} />
-            </div>
-
             <div className="mt-5 grid gap-5 md:grid-cols-2">
-              <ReviewBlock title="Scaffold Quantity Summary">
-                <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Legs" value={estimate.legs} />
-                </div>
+              <MaterialSummarySection
+                frameQuantity={estimate.frames}
+                frameRate={frameRate}
+                setFrameRate={setFrameRate}
+                plankQuantity={estimate.planks}
+                plankRate={plankRate}
+                setPlankRate={setPlankRate}
+                standardMaterialCost={totals.standardMaterialCost}
+                extraMaterialItems={extraMaterialItems}
+                addMaterialItem={addMaterialItem}
+                updateExtraMaterial={updateExtraMaterial}
+                removeExtraMaterial={removeExtraMaterial}
+                extraMaterialCost={totals.extraMaterialCost}
+                rentalDays={rentalDays}
+                rentalMonths={rentalMonths}
+                rentalDuration={rentalDuration}
+                setRentalDuration={setRentalDuration}
+                customRentalDays={customRentalDays}
+                setCustomRentalDays={setCustomRentalDays}
+                baseMonthlyRentalRevenue={baseMonthlyRentalRevenue}
+                setBaseMonthlyRentalRevenue={setBaseMonthlyRentalRevenue}
+                rentalRevenue={totals.rentalRevenue}
+              />
 
-                <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-                  <QuantityRow label="Jumps" value={estimate.jumps} />
-                </div>
-
-                <div className="h-px bg-orange-500/25" />
-
-                <QuantityRow label="Frames" value={estimate.frames} />
-                <QuantityRow label="Planks" value={estimate.planks} />
-                <QuantityRow label="Cross Braces" value={estimate.crossBraces} />
-                <QuantityRow label="Guardrails" value={estimate.guardrails} />
-                <QuantityRow label="Base Plates" value={estimate.basePlates} />
-                <QuantityRow label="Screw Jacks" value={estimate.screwJacks} />
-              </ReviewBlock>
-
-              <ReviewBlock title="Labor / Operations Summary">
-                <QuantityRow label="Install Days" value={allowedInstallDays} />
-                <QuantityRow label="Dismantle Days" value={dismantleDays} />
-                <QuantityRow label="Install Laborer-Days" value={totals.installLaborerDays} />
-                <QuantityRow label="Dismantle Laborer-Days" value={totals.dismantleLaborerDays} />
-                <QuantityRow label="Truck Loads" value={estimate.truckLoads} />
-                <QuantityRow label="Delivery Trips" value={estimate.deliveryTrips} />
-                <QuantityRow label="Pickup Trips" value={estimate.pickupTrips} />
-              </ReviewBlock>
+              <LaborSummarySection
+                allowedInstallDays={allowedInstallDays}
+                dismantleDays={dismantleDays}
+                dismantleBackendPercent={dismantleBackendPercent}
+                truckLoads={estimate.truckLoads}
+                deliveryTrips={estimate.deliveryTrips}
+                pickupTrips={estimate.pickupTrips}
+                productionType={productionType}
+                updateProductionType={updateProductionType}
+                installMix={installMix}
+                addInstallMix={addInstallMix}
+                updateInstallMix={updateInstallMix}
+                removeInstallMix={removeInstallMix}
+                appRate={appRate}
+                setAppRate={setAppRate}
+                journeyRate={journeyRate}
+                setJourneyRate={setJourneyRate}
+                foremanRate={foremanRate}
+                setForemanRate={setForemanRate}
+                blendedLaborRate={totals.blendedLaborRate}
+                laborCost={totals.laborCost}
+                totalLaborHours={totals.totalLaborHours}
+              />
             </div>
 
             <RevisionHistory
               activeRevision={activeRevision}
               bidRoundPhase={bidRoundPhase}
               setBidRoundPhase={setBidRoundPhase}
-            />
-
-            <RentalDurationSection
-              rentalDays={rentalDays}
-              rentalMonths={rentalMonths}
-              rentalDuration={rentalDuration}
-              setRentalDuration={setRentalDuration}
-              customRentalDays={customRentalDays}
-              setCustomRentalDays={setCustomRentalDays}
-              baseMonthlyRentalRevenue={baseMonthlyRentalRevenue}
-              setBaseMonthlyRentalRevenue={setBaseMonthlyRentalRevenue}
-              rentalRevenue={totals.rentalRevenue}
-            />
-
-            <CostInputsSection
-              frameRate={frameRate}
-              setFrameRate={setFrameRate}
-              frameQuantity={estimate.frames}
-              plankRate={plankRate}
-              setPlankRate={setPlankRate}
-              plankQuantity={estimate.planks}
-              standardMaterialCost={totals.standardMaterialCost}
-              extraMaterialItems={extraMaterialItems}
-              newMaterialChoice={newMaterialChoice}
-              setNewMaterialChoice={setNewMaterialChoice}
-              customMaterialName={customMaterialName}
-              setCustomMaterialName={setCustomMaterialName}
-              addMaterialItem={addMaterialItem}
-              updateExtraMaterial={updateExtraMaterial}
-              removeExtraMaterial={removeExtraMaterial}
-              extraMaterialCost={totals.extraMaterialCost}
-              productionType={productionType}
-              updateProductionType={updateProductionType}
-              allowedInstallDays={allowedInstallDays}
-              installMix={installMix}
-              addInstallMix={addInstallMix}
-              updateInstallMix={updateInstallMix}
-              removeInstallMix={removeInstallMix}
-              dismantleDays={dismantleDays}
-              dismantleBackendPercent={dismantleBackendPercent}
-              appRate={appRate}
-              setAppRate={setAppRate}
-              journeyRate={journeyRate}
-              setJourneyRate={setJourneyRate}
-              foremanRate={foremanRate}
-              setForemanRate={setForemanRate}
-              blendedLaborRate={totals.blendedLaborRate}
-              laborCost={totals.laborCost}
             />
 
             <CostSummary
@@ -703,6 +706,14 @@ export default function EstimateReviewPage() {
               setMarkupPercent={setMarkupPercent}
               markupValue={totals.markupValue}
               finalBid={totals.finalBid}
+              materialDurationMonths={materialDurationMonths}
+              setMaterialDurationMonths={setMaterialDurationMonths}
+            />
+
+            <ExteriorCostComparison
+              completeExteriorCost={totals.finalBid}
+              elevationPricing={elevationPricing}
+              partialExteriorMarkupPercent={partialExteriorMarkupPercent}
             />
 
             <AddAlternatesSection
@@ -795,6 +806,83 @@ export default function EstimateReviewPage() {
   );
 }
 
+function ExteriorCostComparison({
+  completeExteriorCost,
+  elevationPricing,
+  partialExteriorMarkupPercent,
+}: {
+  completeExteriorCost: number;
+  elevationPricing: {
+    rows: {
+      elevation: string;
+      approxLinearFeet: number;
+      sharePercent: number;
+      baseShare: number;
+      partialPrice: number;
+    }[];
+    totalPartialCost: number;
+    hasData: boolean;
+  };
+  partialExteriorMarkupPercent: number;
+}) {
+  return (
+    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
+            Complete vs. Partial Exterior Cost
+          </h3>
+          <p className="mt-1 text-xs text-zinc-500">
+            Partial pricing reflects the added cost of mobilizing elevation-by-elevation instead of as one
+            complete exterior job — more truck trips, less efficient loading, more setup/teardown per visit.
+          </p>
+        </div>
+        <div className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-right">
+          <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-500">Markup</p>
+          <p className="font-mono text-sm font-bold text-orange-300">+{partialExteriorMarkupPercent}%</p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Complete Exterior Cost</p>
+          <p className="mt-2 font-mono text-2xl font-bold text-orange-400">{formatMoney(completeExteriorCost)}</p>
+          <p className="mt-1 text-[10px] text-zinc-600">Pricing the full building as one job.</p>
+        </div>
+
+        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Partial Exterior Cost</p>
+          <p className="mt-2 font-mono text-2xl font-bold text-orange-400">
+            {elevationPricing.hasData ? formatMoney(elevationPricing.totalPartialCost) : "—"}
+          </p>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            {elevationPricing.hasData
+              ? "Sum of all elevations priced separately, with markup."
+              : "Enter Approx LF per elevation in Takeoff Workspace > Elevation Breakdown to see this."}
+          </p>
+        </div>
+      </div>
+
+      {elevationPricing.hasData && (
+        <div className="mt-4 space-y-2">
+          {elevationPricing.rows.map((row) => (
+            <div
+              key={row.elevation}
+              className="grid grid-cols-[80px_1fr_90px_120px] items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-3 text-xs"
+            >
+              <span className="font-bold text-zinc-200">{row.elevation}</span>
+              <span className="text-zinc-600">
+                {row.approxLinearFeet.toLocaleString()} LF · {row.sharePercent.toFixed(0)}% of total
+              </span>
+              <span className="text-right font-mono text-zinc-500">{formatMoney(row.baseShare)}</span>
+              <span className="text-right font-mono font-bold text-orange-400">{formatMoney(row.partialPrice)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function PreProposalPanel({
   projectName,
@@ -984,15 +1072,6 @@ function ProposalSheet({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ReviewBlock({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-3xl border border-zinc-800 bg-black p-5">
-      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">{title}</h3>
-      <div className="mt-4 space-y-2">{children}</div>
-    </div>
-  );
-}
-
 function RevisionHistory({
   activeRevision,
   bidRoundPhase,
@@ -1008,24 +1087,17 @@ function RevisionHistory({
   setBidRoundPhase: (phase: BidRoundPhase) => void;
 }) {
   return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
-            Revision History
-          </h3>
-          <p className="mt-1 text-xs text-zinc-500">
-            Tracks pricing movement by bid round. Active round feeds project snapshots and proposal review.
-          </p>
-        </div>
-
-        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 px-4 py-3 text-right">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Active Round</p>
-          <p className="mt-1 font-mono text-sm font-bold text-orange-400">{activeRevision.phase}</p>
-        </div>
+    <div className="mt-5 rounded-2xl border border-zinc-800 bg-black p-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-[11px] font-bold uppercase tracking-[0.22em] text-orange-400">
+          Revision History
+        </h3>
+        <span className="font-mono text-[10px] text-zinc-600">
+          Active: {activeRevision.phase} · {formatMoney(activeRevision.amount)}
+        </span>
       </div>
 
-      <div className="mt-4 grid gap-3">
+      <div className="mt-2 flex flex-wrap gap-1.5">
         {revisionHistory.map((revision) => {
           const active = revision.phase === bidRoundPhase;
 
@@ -1033,24 +1105,15 @@ function RevisionHistory({
             <button
               key={revision.phase}
               onClick={() => setBidRoundPhase(revision.phase)}
-              className={`rounded-2xl border p-4 text-left transition ${
+              title={revision.note}
+              className={`rounded-lg border px-2.5 py-1.5 text-left text-[10px] transition ${
                 active
-                  ? "border-orange-500/50 bg-orange-500/10"
-                  : "border-zinc-800 bg-zinc-950 hover:border-orange-500/30"
+                  ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
+                  : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/30"
               }`}
             >
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs font-bold text-zinc-200">{revision.phase}</p>
-                  <p className="mt-1 text-[11px] text-zinc-600">{revision.date}</p>
-                </div>
-
-                <p className="font-mono text-sm font-bold text-orange-400">
-                  {formatMoney(revision.amount)}
-                </p>
-              </div>
-
-              <p className="mt-2 text-[11px] leading-5 text-zinc-500">{revision.note}</p>
+              <span className="font-bold">{revision.phase}</span>
+              <span className="ml-2 font-mono">{formatMoney(revision.amount)}</span>
             </button>
           );
         })}
@@ -1059,7 +1122,19 @@ function RevisionHistory({
   );
 }
 
-function RentalDurationSection({
+function MaterialSummarySection({
+  frameQuantity,
+  frameRate,
+  setFrameRate,
+  plankQuantity,
+  plankRate,
+  setPlankRate,
+  standardMaterialCost,
+  extraMaterialItems,
+  addMaterialItem,
+  updateExtraMaterial,
+  removeExtraMaterial,
+  extraMaterialCost,
   rentalDays,
   rentalMonths,
   rentalDuration,
@@ -1070,6 +1145,18 @@ function RentalDurationSection({
   setBaseMonthlyRentalRevenue,
   rentalRevenue,
 }: {
+  frameQuantity: number;
+  frameRate: number;
+  setFrameRate: (value: number) => void;
+  plankQuantity: number;
+  plankRate: number;
+  setPlankRate: (value: number) => void;
+  standardMaterialCost: number;
+  extraMaterialItems: ExtraMaterialItem[];
+  addMaterialItem: (itemName: string) => void;
+  updateExtraMaterial: (id: number, field: "quantity" | "unitRate", value: number) => void;
+  removeExtraMaterial: (id: number) => void;
+  extraMaterialCost: number;
   rentalDays: number;
   rentalMonths: number;
   rentalDuration: RentalDuration;
@@ -1081,29 +1168,60 @@ function RentalDurationSection({
   rentalRevenue: number;
 }) {
   return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
+    <div className="rounded-3xl border border-zinc-800 bg-black p-5">
+      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
+        Material Summary
+      </h3>
+      <p className="mt-1 text-xs text-zinc-500">Source: Backend &gt; Material Pricing</p>
+
+      <div className="mt-4 space-y-2">
+        <RateInputRow
+          label="Frames"
+          quantity={frameQuantity}
+          rate={frameRate}
+          onChange={setFrameRate}
+          total={frameQuantity * frameRate}
+        />
+        <RateInputRow
+          label="Planks"
+          quantity={plankQuantity}
+          rate={plankRate}
+          onChange={setPlankRate}
+          total={plankQuantity * plankRate}
+        />
+        <TotalBox label="Standard Material Total" value={formatMoney(standardMaterialCost)} />
+      </div>
+
+      <div className="my-4 h-px bg-zinc-800" />
+
+      <MiscMaterialSummaryList
+        extraMaterialItems={extraMaterialItems}
+        addMaterialItem={addMaterialItem}
+        updateExtraMaterial={updateExtraMaterial}
+        removeExtraMaterial={removeExtraMaterial}
+        extraMaterialCost={extraMaterialCost}
+      />
+
+      <div className="my-4 h-px bg-zinc-800" />
+
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
-            Rental Duration
-          </h3>
-          <p className="mt-1 text-xs text-zinc-500">
-            Base rental is monthly. 90 days applies three months of rental revenue into the bid amount.
+          <p className="text-xs font-bold text-zinc-300">Rental Duration</p>
+          <p className="mt-0.5 text-[10px] text-zinc-600">
+            {rentalMonths} billing month(s) applied to rental revenue.
           </p>
         </div>
-
         <div className="text-right">
-          <p className="font-mono text-2xl font-bold text-orange-400">{rentalDays} Days</p>
-          <p className="mt-1 text-xs text-zinc-500">{rentalMonths} billing month(s)</p>
+          <p className="font-mono text-lg font-bold text-orange-400">{rentalDays} Days</p>
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-2 flex flex-wrap gap-1.5">
         {rentalDurationOptions.map((option) => (
           <button
             key={option}
             onClick={() => setRentalDuration(option)}
-            className={`rounded-xl border px-4 py-2 text-xs font-bold transition ${
+            className={`rounded-lg border px-3 py-1.5 text-[10px] font-bold transition ${
               rentalDuration === option
                 ? "border-orange-500 bg-orange-500 text-black"
                 : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/50"
@@ -1112,59 +1230,137 @@ function RentalDurationSection({
             {option}
           </button>
         ))}
-
         {rentalDuration === "Custom" && (
           <input
             value={customRentalDays}
             onChange={(event) => setCustomRentalDays(event.target.value)}
-            className="w-28 rounded-xl border border-orange-500/30 bg-black px-3 py-2 text-xs font-bold text-orange-300 outline-none"
+            className="w-20 rounded-lg border border-orange-500/30 bg-black px-2 py-1.5 text-[10px] font-bold text-orange-300 outline-none"
             placeholder="Days"
           />
         )}
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <NumberInput
-          label="Monthly Rental Revenue"
-          value={baseMonthlyRentalRevenue}
-          onChange={setBaseMonthlyRentalRevenue}
-        />
-
-        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Applied Rental Revenue</p>
-          <p className="mt-2 font-mono text-lg font-bold text-orange-400">{formatMoney(rentalRevenue)}</p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">
+          <p className="text-[9px] uppercase tracking-[0.16em] text-zinc-600">Monthly Rate</p>
+          <input
+            value={baseMonthlyRentalRevenue}
+            onChange={(event) => setBaseMonthlyRentalRevenue(Number(event.target.value || 0))}
+            type="number"
+            className="mt-1 w-full bg-transparent text-right font-mono text-xs font-bold text-orange-300 outline-none"
+          />
         </div>
+        <TotalBox label="Applied Rental Revenue" value={formatMoney(rentalRevenue)} />
       </div>
+
+      <a
+        href="/inventory"
+        className="mt-4 block w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2.5 text-center text-xs font-bold text-orange-300 hover:bg-orange-500/20"
+      >
+        Load List
+      </a>
     </div>
   );
 }
 
-function CostInputsSection({
-  frameRate,
-  setFrameRate,
-  frameQuantity,
-  plankRate,
-  setPlankRate,
-  plankQuantity,
-  standardMaterialCost,
+/**
+ * Misc. Material — the fixed special-item list, kept separate from the
+ * editable extra material items in Cost Inputs. Order matters per spec:
+ * Brackets, H.D. Wall Brackets, Post Shores, Beams, Joists.
+ */
+const MISC_MATERIAL_ITEMS = ["Brackets", "H.D. Wall Brackets", "Post Shores", "Beams", "Joists"];
+
+function MiscMaterialSummaryList({
   extraMaterialItems,
-  newMaterialChoice,
-  setNewMaterialChoice,
-  customMaterialName,
-  setCustomMaterialName,
   addMaterialItem,
   updateExtraMaterial,
   removeExtraMaterial,
   extraMaterialCost,
+}: {
+  extraMaterialItems: ExtraMaterialItem[];
+  addMaterialItem: (itemName: string) => void;
+  updateExtraMaterial: (id: number, field: "quantity" | "unitRate", value: number) => void;
+  removeExtraMaterial: (id: number) => void;
+  extraMaterialCost: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded((current) => !current)}
+        className="w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-left text-xs font-bold text-orange-300 hover:bg-orange-500/20"
+      >
+        {expanded ? "− Misc. Material" : "+ Misc. Material"}
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          {MISC_MATERIAL_ITEMS.map((itemName) => {
+            const existing = extraMaterialItems.find((item) => item.item === itemName);
+
+            if (!existing) {
+              return (
+                <button
+                  key={itemName}
+                  onClick={() => addMaterialItem(itemName)}
+                  className="flex w-full items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 p-2.5 text-left text-xs font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
+                >
+                  <span>{itemName}</span>
+                  <span className="text-[10px] uppercase tracking-[0.12em]">+ Add</span>
+                </button>
+              );
+            }
+
+            return (
+              <div key={itemName} className="rounded-xl border border-zinc-800 bg-black p-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-bold text-zinc-300">{itemName}</p>
+                  <button
+                    onClick={() => removeExtraMaterial(existing.id)}
+                    className="text-[10px] font-bold text-zinc-600 hover:text-red-300"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <MiniNumberInput
+                    label="Qty"
+                    value={existing.quantity}
+                    onChange={(value) => updateExtraMaterial(existing.id, "quantity", value)}
+                  />
+                  <MiniNumberInput
+                    label="Rate"
+                    value={existing.unitRate}
+                    onChange={(value) => updateExtraMaterial(existing.id, "unitRate", value)}
+                  />
+                </div>
+                <p className="mt-2 text-right font-mono text-xs font-bold text-orange-400">
+                  {formatMoney(existing.quantity * existing.unitRate)}
+                </p>
+              </div>
+            );
+          })}
+          <TotalBox label="Misc. Material Total" value={formatMoney(extraMaterialCost)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LaborSummarySection({
+  allowedInstallDays,
+  dismantleDays,
+  dismantleBackendPercent,
+  truckLoads,
+  deliveryTrips,
+  pickupTrips,
   productionType,
   updateProductionType,
-  allowedInstallDays,
   installMix,
   addInstallMix,
   updateInstallMix,
   removeInstallMix,
-  dismantleDays,
-  dismantleBackendPercent,
   appRate,
   setAppRate,
   journeyRate,
@@ -1173,32 +1369,20 @@ function CostInputsSection({
   setForemanRate,
   blendedLaborRate,
   laborCost,
+  totalLaborHours,
 }: {
-  frameRate: number;
-  setFrameRate: (value: number) => void;
-  frameQuantity: number;
-  plankRate: number;
-  setPlankRate: (value: number) => void;
-  plankQuantity: number;
-  standardMaterialCost: number;
-  extraMaterialItems: ExtraMaterialItem[];
-  newMaterialChoice: string;
-  setNewMaterialChoice: (value: string) => void;
-  customMaterialName: string;
-  setCustomMaterialName: (value: string) => void;
-  addMaterialItem: () => void;
-  updateExtraMaterial: (id: number, field: "quantity" | "unitRate", value: number) => void;
-  removeExtraMaterial: (id: number) => void;
-  extraMaterialCost: number;
+  allowedInstallDays: number;
+  dismantleDays: number;
+  dismantleBackendPercent: number;
+  truckLoads: number;
+  deliveryTrips: number;
+  pickupTrips: number;
   productionType: ProductionType;
   updateProductionType: (type: ProductionType) => void;
-  allowedInstallDays: number;
   installMix: InstallMixItem[];
   addInstallMix: () => void;
   updateInstallMix: (id: number, field: "days" | "laborers", value: number) => void;
   removeInstallMix: (id: number) => void;
-  dismantleDays: number;
-  dismantleBackendPercent: number;
   appRate: number;
   setAppRate: (value: number) => void;
   journeyRate: number;
@@ -1207,187 +1391,96 @@ function CostInputsSection({
   setForemanRate: (value: number) => void;
   blendedLaborRate: number;
   laborCost: number;
+  totalLaborHours: number;
 }) {
   return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
+    <div className="rounded-3xl border border-zinc-800 bg-black p-5">
       <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
-        Cost Inputs
+        Labor Summary
       </h3>
-      <p className="mt-1 text-xs text-zinc-500">
-        Rates and assumptions pulled from Backend defaults. Standard rental material is frames and planks only.
-      </p>
+      <p className="mt-1 text-xs text-zinc-500">Source: Backend &gt; Labor Planning &amp; Labor Rates</p>
 
-      <div className="mt-4 grid gap-5 md:grid-cols-2">
-        <InputGroup title="Standard Material Inputs" source="Backend > Material Pricing">
-          <RateInputRow
-            label="Frames"
-            quantity={frameQuantity}
-            rate={frameRate}
-            onChange={setFrameRate}
-            total={frameQuantity * frameRate}
-          />
-
-          <RateInputRow
-            label="Planks"
-            quantity={plankQuantity}
-            rate={plankRate}
-            onChange={setPlankRate}
-            total={plankQuantity * plankRate}
-          />
-
-          <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Standard Material Total</p>
-            <p className="mt-2 font-mono text-lg font-bold text-orange-400">{formatMoney(standardMaterialCost)}</p>
-          </div>
-        </InputGroup>
-
-        <InputGroup title="Misc. Material (Optional)" source="Backend > Misc. Material Options">
-          <div className="grid gap-2">
-            <select
-              value={newMaterialChoice}
-              onChange={(event) => setNewMaterialChoice(event.target.value)}
-              className="rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs font-bold text-zinc-300 outline-none"
-            >
-              {optionalMaterialChoices.map((choice) => (
-                <option key={choice} value={choice}>
-                  {choice}
-                </option>
-              ))}
-            </select>
-
-            {newMaterialChoice === "Custom" && (
-              <input
-                value={customMaterialName}
-                onChange={(event) => setCustomMaterialName(event.target.value)}
-                className="rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-300 outline-none"
-                placeholder="Custom material name"
-              />
-            )}
-
-            <button
-              onClick={addMaterialItem}
-              className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20"
-            >
-              + Add Misc. Material
-            </button>
-          </div>
-
-          <div className="mt-3 space-y-2">
-            {extraMaterialItems.length === 0 && (
-              <p className="rounded-2xl border border-zinc-800 bg-black p-3 text-[11px] text-zinc-600">
-                No misc. material included.
-              </p>
-            )}
-
-            {extraMaterialItems.map((item) => (
-              <div key={item.id} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-bold text-zinc-300">{item.item}</p>
-                  <button
-                    onClick={() => removeExtraMaterial(item.id)}
-                    className="text-[10px] font-bold text-zinc-600 hover:text-red-300"
-                  >
-                    Remove
-                  </button>
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <MiniNumberInput
-                    label="Qty"
-                    value={item.quantity}
-                    onChange={(value) => updateExtraMaterial(item.id, "quantity", value)}
-                  />
-                  <MiniNumberInput
-                    label="Rate"
-                    value={item.unitRate}
-                    onChange={(value) => updateExtraMaterial(item.id, "unitRate", value)}
-                  />
-                </div>
-
-                <p className="mt-2 text-right font-mono text-xs font-bold text-orange-400">
-                  {formatMoney(item.quantity * item.unitRate)}
-                </p>
-              </div>
-            ))}
-
-            <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Misc. Material Total</p>
-              <p className="mt-2 font-mono text-lg font-bold text-orange-400">{formatMoney(extraMaterialCost)}</p>
-            </div>
-          </div>
-        </InputGroup>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <QuantityRow label="Install Days" value={allowedInstallDays} />
+        <QuantityRow label="Dismantle Days" value={dismantleDays} />
+        <QuantityRow label="Truck Loads" value={truckLoads} />
+        <QuantityRow label="Delivery Trips" value={deliveryTrips} />
+        <QuantityRow label="Pickup Trips" value={pickupTrips} />
       </div>
 
-      <div className="mt-5 grid gap-5 md:grid-cols-2">
-        <InputGroup title="Crew Mix By Days" source="Backend > Labor Planning">
-          <ProductionSelector productionType={productionType} updateProductionType={updateProductionType} />
+      <div className="my-4 h-px bg-zinc-800" />
 
-          <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Allowed Install Output</p>
-            <p className="mt-2 font-mono text-lg font-bold text-orange-400">{allowedInstallDays} Days</p>
-            <p className="mt-1 text-[10px] text-zinc-600">
-              Install breakdown days can only total the selected production output.
-            </p>
-          </div>
+      <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Crew Mix</p>
+      <ProductionSelector productionType={productionType} updateProductionType={updateProductionType} />
 
-          <div className="space-y-2">
-            {installMix.map((row) => (
-              <InstallMixEditor
-                key={row.id}
-                row={row}
-                canRemove={installMix.length > 1}
-                updateInstallMix={updateInstallMix}
-                removeInstallMix={removeInstallMix}
-              />
-            ))}
-          </div>
+      <div className="mt-3 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
+        <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Allowed Install Output</p>
+        <p className="mt-2 font-mono text-lg font-bold text-orange-400">{allowedInstallDays} Days</p>
+      </div>
 
-          <button
-            onClick={addInstallMix}
-            className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20"
-          >
-            + Add Install Breakdown
-          </button>
+      <div className="mt-3 space-y-2">
+        {installMix.map((row) => (
+          <InstallMixEditor
+            key={row.id}
+            row={row}
+            canRemove={installMix.length > 1}
+            updateInstallMix={updateInstallMix}
+            removeInstallMix={removeInstallMix}
+          />
+        ))}
+      </div>
 
-          <div className="h-px bg-orange-500/20" />
+      <button
+        onClick={addInstallMix}
+        className="mt-2 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20"
+      >
+        + Add Install Breakdown
+      </button>
 
-          <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-            <div className="flex items-center justify-between gap-4">
-              <p className="text-xs font-bold text-zinc-300">Dismantle</p>
-              <p className="font-mono text-xs font-bold text-orange-400">
-                {dismantleBackendPercent}% down · {dismantleDays} days
-              </p>
-            </div>
-            <p className="mt-1 text-[10px] text-zinc-600">
-              Dismantle duration is calculated from backend setting based on selected install production.
-            </p>
-          </div>
-        </InputGroup>
+      <div className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-xs font-bold text-zinc-300">Dismantle</p>
+          <p className="font-mono text-xs font-bold text-orange-400">
+            {dismantleBackendPercent}% down · {dismantleDays} days
+          </p>
+        </div>
+      </div>
 
-        <InputGroup title="Labor Rate Inputs" source="Backend > Labor Rates">
-          <RateOnlyInput label="Apprentice" value={appRate} onChange={setAppRate} />
-          <RateOnlyInput label="Journeyman" value={journeyRate} onChange={setJourneyRate} />
-          <RateOnlyInput label="Foreman" value={foremanRate} onChange={setForemanRate} />
+      <div className="mt-3">
+        <TotalBox label="Total Hours" value={`${totalLaborHours.toLocaleString()} hrs`} hint="Days × Laborers × 8 hrs" />
+      </div>
 
-          <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Blended Average Labor Rate</p>
-            <p className="mt-2 font-mono text-lg font-bold text-orange-400">
-              {formatMoney(blendedLaborRate)} / hr
-            </p>
-            <p className="mt-1 text-[10px] text-zinc-600">
-              Seasoned estimator working rate used for final labor review.
-            </p>
-          </div>
+      <div className="my-4 h-px bg-zinc-800" />
 
-          <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Calculated Labor Cost</p>
-            <p className="mt-2 font-mono text-lg font-bold text-orange-400">{formatMoney(laborCost)}</p>
-          </div>
-        </InputGroup>
+      <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Labor Rates</p>
+      <div className="grid grid-cols-3 gap-2">
+        <RateOnlyInput label="Apprentice" value={appRate} onChange={setAppRate} />
+        <RateOnlyInput label="Journeyman" value={journeyRate} onChange={setJourneyRate} />
+        <RateOnlyInput label="Foreman" value={foremanRate} onChange={setForemanRate} />
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <TotalBox label="Blended Avg. Rate" value={`${formatMoney(blendedLaborRate)} / hr`} />
+        <TotalBox label="Total Labor Cost" value={formatMoney(laborCost)} />
       </div>
     </div>
   );
 }
+
+/**
+ * Consistent "total" box used across summary sections — light orange
+ * faint box, matching the orange title outline color.
+ */
+function TotalBox({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
+      <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">{label}</p>
+      <p className="mt-2 font-mono text-lg font-bold text-orange-400">{value}</p>
+      {hint && <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>}
+    </div>
+  );
+}
+
 
 function CostSummary({
   materialCost,
@@ -1399,6 +1492,8 @@ function CostSummary({
   setMarkupPercent,
   markupValue,
   finalBid,
+  materialDurationMonths,
+  setMaterialDurationMonths,
 }: {
   materialCost: number;
   laborCost: number;
@@ -1409,22 +1504,42 @@ function CostSummary({
   setMarkupPercent: (value: number) => void;
   markupValue: number;
   finalBid: number;
+  materialDurationMonths: number;
+  setMaterialDurationMonths: (value: number) => void;
 }) {
   return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
+    <div className="mt-5 rounded-3xl border border-zinc-400/30 bg-zinc-400/[0.08] p-5">
       <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
-        Cost Summary
+        Total Cost Summary
       </h3>
 
       <div className="mt-4 space-y-2">
         <StaticMoneyRow label="Material Cost" value={materialCost} />
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-3">
+          <div>
+            <span className="text-xs text-zinc-500">Duration (months)</span>
+            <p className="mt-0.5 text-[10px] text-zinc-600">Multiplies material cost — e.g. 2 months = 2× total.</p>
+          </div>
+          <input
+            value={materialDurationMonths}
+            onChange={(event) => setMaterialDurationMonths(Math.max(1, Number(event.target.value || 1)))}
+            type="number"
+            min={1}
+            className="w-20 rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
+          />
+        </div>
+
         <StaticMoneyRow label="Labor Cost" value={laborCost} />
         <ProposalCostRow label="Misc. Cost" value={miscCost} onChange={setMiscCost} />
 
         <div className="my-3 h-px bg-zinc-800" />
 
-        <StaticMoneyRow label="Subtotal" value={costSubtotal} />
-        <PercentRow label="Markup" value={markupPercent} onChange={setMarkupPercent} />
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-300/20 bg-zinc-300/10 p-3">
+          <span className="text-xs font-bold text-zinc-200">Subtotal</span>
+          <span className="font-mono text-sm font-black text-orange-300">{formatMoney(costSubtotal)}</span>
+        </div>
+        <PercentRow label="Markup %" value={markupPercent} onChange={setMarkupPercent} />
         <StaticMoneyRow label="Markup Amount" value={markupValue} />
 
         <div className="my-3 h-px bg-orange-500/30" />
@@ -1450,7 +1565,7 @@ function AddAlternatesSection({
   toggleAlternate: (id: number) => void;
 }) {
   return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
+    <div className="mt-5 rounded-3xl border border-zinc-700/40 bg-zinc-400/[0.06] p-5">
       <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">
         Add Alternates
       </h3>
@@ -1563,16 +1678,16 @@ function RateOnlyInput({
   onChange: (value: number) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-black p-3">
-      <span className="text-xs text-zinc-400">{label}</span>
-      <div className="flex items-center gap-2">
+    <div className="rounded-2xl border border-zinc-800 bg-black p-3">
+      <span className="block text-[10px] text-zinc-500">{label}</span>
+      <div className="mt-2 flex items-center justify-between gap-2">
         <input
           value={value}
           onChange={(event) => onChange(Number(event.target.value || 0))}
           type="number"
-          className="w-24 rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right font-mono text-[11px] font-bold text-orange-300 outline-none"
+          className="w-full min-w-0 rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-right font-mono text-[11px] font-bold text-orange-300 outline-none focus:border-orange-500/40"
         />
-        <span className="text-[10px] text-zinc-600">/ hr</span>
+        <span className="shrink-0 text-[10px] text-zinc-600">/hr</span>
       </div>
     </div>
   );
@@ -1711,14 +1826,22 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function QuantityRow({ label, value }: { label: string; value: number }) {
+function QuantityRow({ label, value, highlight = false }: { label: string; value: number; highlight?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-2 last:border-b-0">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="font-mono text-xs font-bold text-zinc-300">{formatNumber(value)}</span>
+      <span className={highlight ? "text-xs font-bold text-zinc-200" : "text-xs text-zinc-500"}>{label}</span>
+      <span className={highlight ? "font-mono text-sm font-black text-orange-300" : "font-mono text-xs font-bold text-zinc-300"}>
+        {formatNumber(value)}
+      </span>
     </div>
   );
 }
+
+/**
+ * Misc. Material constant moved into the new MaterialSummarySection
+ * block above. (Old standalone MiscMaterialSummaryList removed —
+ * superseded by the parameterized version used in Material Summary.)
+ */
 
 function ProposalCostRow({
   label,
@@ -1808,8 +1931,8 @@ function RevenuePanel({
   rentalMonths: number;
 }) {
   return (
-    <section className="rounded-[2rem] border border-orange-500/25 bg-orange-500/10 p-3 shadow-2xl">
-      <h2 className="text-[11px] font-bold uppercase tracking-[0.2em] text-orange-300">
+    <section className="rounded-[2rem] border border-orange-500/25 bg-orange-500/10 p-5 shadow-2xl">
+      <h2 className="px-1 text-[11px] font-bold uppercase tracking-[0.2em] text-orange-300">
         Revenue Review
       </h2>
 
@@ -2045,14 +2168,10 @@ function StatusBadge({ status }: { status: ProposalStatus }) {
   );
 }
 
-function formatMoney(value: number) {
-  return value.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
+function formatNumber(value: number) {
+  return value.toLocaleString();
 }
 
-function formatNumber(value: number) {
-  return value.toLocaleString("en-US");
+function formatMoney(value: number) {
+  return value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }

@@ -9,9 +9,12 @@ import {
   getActiveProjectId,
   saveActiveElevation,
   saveActiveProject,
+  saveElevationBreakdown,
   setActiveProjectId,
   type ProjectElevation,
+  type StoredElevationBreakdownRow,
 } from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
 type Point = { x: number; y: number };
 type PickTarget =
@@ -310,6 +313,9 @@ export default function TakeoffWorkspace() {
     East: false,
   });
   const [showCombinedOverlay, setShowCombinedOverlay] = useState(true);
+  const [elevationBreakdownRows, setElevationBreakdownRows] = useState<StoredElevationBreakdownRow[]>(
+    elevationOptions.map((elevation) => ({ elevation, approxLinearFeet: 0 })),
+  );
 
   const scalePageDistance = useMemo(() => {
     if (scalePoints.length < 2) return 0;
@@ -354,6 +360,11 @@ export default function TakeoffWorkspace() {
   useEffect(() => {
     setActiveProjectId(getActiveProjectId());
     setActiveProjectName(getActiveProject().projectName || "Takeoff Workspace Draft");
+
+    const storedElevation = getActiveElevation();
+    if (storedElevation.elevationBreakdown && storedElevation.elevationBreakdown.length > 0) {
+      setElevationBreakdownRows(storedElevation.elevationBreakdown);
+    }
   }, []);
 
   function buildWorkspaceElevation(
@@ -375,6 +386,7 @@ export default function TakeoffWorkspace() {
         : ref?.linealFeet || currentKeyFloorLf || currentTotalElevationLf || 0;
     const linearFeet = Math.round(linearFeetSource);
     const wallHeight = enteredWallHeight || getAverageExteriorHeight(heights);
+    const backendScaffoldDefaults = getBackendSettings().scaffold;
     const scaffoldInput = {
       scaffoldWidth: 3,
       standardBayLength: 10,
@@ -387,6 +399,7 @@ export default function TakeoffWorkspace() {
       linearFeet,
       wallHeight,
       ...scaffoldInput,
+      workerReachHeight: backendScaffoldDefaults.workerReachHeight,
     });
     const scale = {
       keyFloorLf: currentKeyFloorLf,
@@ -771,6 +784,23 @@ source: "Manual" as const,
     setScalePoints([]);
     setKnownScaleFeet("");
     setPageUnitsPerFoot(null);
+  }
+
+  // ── Elevation Breakdown (Optional) ──
+  // Deliberately isolated from the main takeoff machine: these handlers
+  // never touch linearFeet, ticks, or the quantity engine. They only
+  // read/write the elevationBreakdown array via saveElevationBreakdown,
+  // a dedicated save path in projectStore that's separate from
+  // saveActiveElevation's main flow.
+  function updateElevationBreakdownRow(elevation: ElevationName, approxLinearFeet: number) {
+    setElevationBreakdownRows((current) =>
+      current.map((row) => (row.elevation === elevation ? { ...row, approxLinearFeet } : row)),
+    );
+  }
+
+  function storeElevationBreakdownRow(elevation: ElevationName) {
+    const updatedRows = elevationBreakdownRows;
+    saveElevationBreakdown(updatedRows);
   }
 
   function addFullOverlayRow(type: FullOverlayType = "Level") {
@@ -1429,6 +1459,9 @@ source: "Manual" as const,
               setShowCombinedOverlay={setShowCombinedOverlay}
               showCombinedOverlay={showCombinedOverlay}
               saveToEstimateReview={saveToEstimateReview}
+              elevationBreakdownRows={elevationBreakdownRows}
+              updateElevationBreakdownRow={updateElevationBreakdownRow}
+              storeElevationBreakdownRow={storeElevationBreakdownRow}
           />
         }
       />
@@ -1471,6 +1504,9 @@ function TakeoffHub({
   setShowCombinedOverlay,
   showCombinedOverlay,
   saveToEstimateReview,
+  elevationBreakdownRows,
+  updateElevationBreakdownRow,
+  storeElevationBreakdownRow,
 }: {
   fullOverlayRows: FullOverlayRow[];
   updateFullOverlayRow: (id: number, updates: Partial<FullOverlayRow>) => void;
@@ -1516,6 +1552,9 @@ function TakeoffHub({
   setShowCombinedOverlay: (value: boolean) => void;
   showCombinedOverlay: boolean;
   saveToEstimateReview: () => void;
+  elevationBreakdownRows: StoredElevationBreakdownRow[];
+  updateElevationBreakdownRow: (elevation: ElevationName, approxLinearFeet: number) => void;
+  storeElevationBreakdownRow: (elevation: ElevationName) => void;
 }) {
   const difference = Math.abs(totalElevationLf - keyFloorLf);
   const toleranceLf = keyFloorLf * tolerancePercent;
@@ -1761,6 +1800,44 @@ function TakeoffHub({
               />
             ))}
           </div>
+        </KorbanPanel>
+
+        <KorbanPanel
+          title="Elevation Breakdown"
+          subtitle="Optional — manual cross-check, does not affect ticks or counts"
+          compact
+        >
+          <div className="space-y-2">
+            {elevationBreakdownRows.map((row) => (
+              <div
+                key={row.elevation}
+                className="grid grid-cols-[60px_1fr_64px] items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-2.5"
+              >
+                <span className="text-xs font-semibold text-zinc-300">{row.elevation}</span>
+                <input
+                  value={row.approxLinearFeet || ""}
+                  onChange={(event) =>
+                    updateElevationBreakdownRow(
+                      row.elevation as ElevationName,
+                      Number(event.target.value || 0),
+                    )
+                  }
+                  type="number"
+                  placeholder="Approx LF"
+                  className="rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
+                />
+                <button
+                  onClick={() => storeElevationBreakdownRow(row.elevation as ElevationName)}
+                  className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1.5 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
+                >
+                  Store
+                </button>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-zinc-600">
+            Used in Estimate Review for Partial Exterior Cost comparison only.
+          </p>
         </KorbanPanel>
 
         <KorbanPanel title="Takeoff Viewer" compact>

@@ -16,6 +16,14 @@ export type QuantityEngineInput = {
   plankCountPerBay: number;
   bracePattern: string;
   wallOffset: number;
+  /**
+   * Standard worker reach height from the top deck (default 6'). The top
+   * scaffold deck doesn't need to reach the full wall height — frame
+   * stack height is calculated from (wallHeight - workerReachHeight).
+   * Optional for backward compatibility with older saved data; defaults
+   * to 6' when not provided.
+   */
+  workerReachHeight?: number;
 };
 
 export type QuantityEngineOutput = {
@@ -63,6 +71,19 @@ export type StoredElevationHeight = {
   areas: unknown[];
 };
 
+/**
+ * Elevation Breakdown — optional, manual, purely supplementary data.
+ * Entered directly by the estimator in Takeoff Workspace's "Elevation
+ * Breakdown (Optional)" section. This NEVER feeds linearFeet, ticks, or
+ * the quantity engine — it exists only to support the "Complete Exterior
+ * Cost" vs. "Partial Exterior Cost" breakdown shown in Estimate Review.
+ * Deliberately isolated from the main takeoff machine.
+ */
+export type StoredElevationBreakdownRow = {
+  elevation: string;
+  approxLinearFeet: number;
+};
+
 export type TakeoffOverlayGeometry = {
   elevationName: string;
   levelName: string;
@@ -95,6 +116,11 @@ export type ProjectElevation = {
     wallOffset: number;
     sectionType: string;
   };
+  /**
+   * Optional manual elevation breakdown (see StoredElevationBreakdownRow).
+   * Defaults to an empty array — purely additive, never required.
+   */
+  elevationBreakdown: StoredElevationBreakdownRow[];
 };
 
 export type ProjectLevel = {
@@ -228,6 +254,20 @@ function normalizeElevationHeight(value: unknown): StoredElevationHeight | null 
   };
 }
 
+function normalizeElevationBreakdownRow(value: unknown): StoredElevationBreakdownRow | null {
+  if (!isRecord(value)) return null;
+  return {
+    elevation: asString(value.elevation, "North"),
+    approxLinearFeet: asNumber(value.approxLinearFeet, 0),
+  };
+}
+
+function normalizeElevationBreakdown(value: unknown): StoredElevationBreakdownRow[] {
+  return asArray<unknown>(value)
+    .map(normalizeElevationBreakdownRow)
+    .filter((row): row is StoredElevationBreakdownRow => Boolean(row));
+}
+
 function normalizeOverlayGeometry(
   value: unknown,
   fallbackElevationName: string,
@@ -274,10 +314,16 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
   const standardBayLength = Math.max(1, asNumber(input.standardBayLength, defaultScaffoldInput.standardBayLength));
   const frameHeight = Math.max(1, asNumber(input.frameHeight, defaultScaffoldInput.frameHeight));
   const plankCountPerBay = Math.max(0, Math.ceil(asNumber(input.plankCountPerBay, defaultScaffoldInput.plankCountPerBay)));
+  const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, 6));
 
   const bayCount = Math.ceil(linearFeet / standardBayLength);
   const legCount = bayCount > 0 ? bayCount + 1 : 0;
-  const frameTall = Math.max(1, Math.ceil(wallHeight / frameHeight));
+  // The top scaffold deck doesn't need to reach the full wall height —
+  // a worker standing on it can reach roughly workerReachHeight above
+  // where they stand. Frame stack height is calculated from the
+  // remaining height after that reach margin is subtracted.
+  const effectiveStackHeight = Math.max(0, wallHeight - workerReachHeight);
+  const frameTall = Math.max(1, Math.ceil(effectiveStackHeight / frameHeight));
   const jumps = frameTall;
   const frameCount = legCount * frameTall;
   const plankCount = bayCount * plankCountPerBay;
@@ -327,6 +373,7 @@ function createDemoElevation(): ProjectElevation {
       wallOffset: defaultScaffoldInput.wallOffset,
       sectionType: "A-A",
     },
+    elevationBreakdown: [],
   };
 }
 
@@ -404,6 +451,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
       wallOffset: asNumber(sectionRecord.wallOffset, scaffoldInput.wallOffset),
       sectionType: asString(sectionRecord.sectionType, fallback.sectionView.sectionType),
     },
+    elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
   };
 }
 
@@ -571,6 +619,21 @@ export function saveActiveElevation(elevation: ProjectElevation) {
     takeoff: {
       levels: nextLevels,
     },
+  });
+}
+
+/**
+ * Saves just the optional Elevation Breakdown rows for the active
+ * elevation, without touching linearFeet, quantityEngine, or any
+ * overlay geometry. This is the dedicated save path for Takeoff
+ * Workspace's "Elevation Breakdown (Optional)" section — deliberately
+ * separate from saveActiveElevation's main takeoff flow.
+ */
+export function saveElevationBreakdown(rows: StoredElevationBreakdownRow[]) {
+  const current = getActiveElevation();
+  saveActiveElevation({
+    ...current,
+    elevationBreakdown: rows,
   });
 }
 
