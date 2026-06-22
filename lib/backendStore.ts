@@ -227,8 +227,8 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
   pricing: {
     rentalDurationDays: 30,
     rentalPeriodType: "30 Days",
-    frameMonthlyRate: 14.5,
-    plankMonthlyRate: 6.75,
+    frameMonthlyRate: 4,
+    plankMonthlyRate: 2,
     braceMonthlyRate: 3.25,
     guardrailMonthlyRate: 4.1,
     basePlateMonthlyRate: 1.85,
