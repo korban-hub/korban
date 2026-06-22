@@ -19,9 +19,7 @@ import { getBackendSettings } from "@/lib/backendStore";
 type Point = { x: number; y: number };
 type PickTarget =
   | { type: "full"; id: number }
-  | { type: "elevation"; elevation: ElevationName }
   | { type: "heightOverall"; elevation: ElevationName }
-  | { type: "heightArea"; elevation: ElevationName; areaId: string }
   | null;
 type ElevationName = "North" | "South" | "East" | "West";
 
@@ -39,29 +37,11 @@ type FullOverlayRow = {
   pageNumber: number;
 };
 
-type ElevationReference = {
-  elevation: ElevationName;
-  points: Point[];
-  closed: boolean;
-  linealFeet: number;
-  manualLinealFeetInput: string;
-  source: "Pick Points" | "Manual" | "Not Set";
-};
-
-type HeightArea = {
-  id: string;
-  label: "Left" | "Center" | "Right";
-  heightInput: string;
-  coveragePercent: number;
-};
-
 type ElevationHeight = {
   elevation: ElevationName;
   overallHeightInput: string;
   belowGradeEnabled: boolean;
   belowGradeInput: string;
-  multipleHeights: boolean;
-  areas: HeightArea[];
 };
 
 const elevationOptions: ElevationName[] = ["North", "East", "South", "West"];
@@ -77,29 +57,14 @@ const overlayColors = [
 ];
 const tolerancePercent = 0.08;
 
-const initialElevationRefs: ElevationReference[] = elevationOptions.map(
-  (elevation) => ({
-    elevation,
-    points: [],
-    closed: false,
-    linealFeet: 0,
-    manualLinealFeetInput: "--",
-    source: "Not Set",
-  }),
-);
-
 const initialElevationHeights: ElevationHeight[] = elevationOptions.map(
   (elevation) => ({
     elevation,
     overallHeightInput: "0'",
     belowGradeEnabled: false,
     belowGradeInput: "0'",
-    multipleHeights: false,
-    areas: buildDefaultHeightAreas(),
   }),
 );
-
-const levelSuggestions = ["Basement", "Ground", "Level", "Roof", "Penthouse"];
 
 const takeoffMenuLinks: KorbanMenuLink[] = [
   { href: "/", label: "Bid Room" },
@@ -108,29 +73,6 @@ const takeoffMenuLinks: KorbanMenuLink[] = [
   { href: "/backend", label: "Backend" },
   { href: "/settings", label: "Settings" },
 ];
-
-function buildDefaultHeightAreas(): HeightArea[] {
-  return [
-    {
-      id: "left",
-      label: "Left",
-      heightInput: "0'",
-      coveragePercent: 33,
-    },
-    {
-      id: "center",
-      label: "Center",
-      heightInput: "0'",
-      coveragePercent: 34,
-    },
-    {
-      id: "right",
-      label: "Right",
-      heightInput: "0'",
-      coveragePercent: 33,
-    },
-  ];
-}
 
 function distanceBetween(a: Point, b: Point) {
   return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
@@ -215,17 +157,7 @@ function getHeightWithBelowGrade(item: ElevationHeight) {
 
 function getAverageExteriorHeight(elevationHeights: ElevationHeight[]) {
   const values = elevationHeights
-    .map((item) => {
-      if (item.multipleHeights) {
-        const weighted = item.areas.reduce((sum, area) => {
-          const height = parseFeetInches(area.heightInput) ?? 0;
-          return sum + height * (area.coveragePercent / 100);
-        }, 0);
-        const below = item.belowGradeEnabled ? parseFeetInches(item.belowGradeInput) ?? 0 : 0;
-        return weighted + below;
-      }
-      return getHeightWithBelowGrade(item);
-    })
+    .map((item) => getHeightWithBelowGrade(item))
     .filter((value) => value > 0);
 
   if (!values.length) return 0;
@@ -258,6 +190,7 @@ function overlayColorFor(row: FullOverlayRow) {
 
 export default function TakeoffWorkspace() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -296,18 +229,12 @@ export default function TakeoffWorkspace() {
       pageNumber: 1,
     },
   ]);
-  const [elevationRefs, setElevationRefs] =
-    useState<ElevationReference[]>(initialElevationRefs);
+
   const [elevationHeights, setElevationHeights] = useState<ElevationHeight[]>(
     initialElevationHeights,
   );
-  const [activeElevation, setActiveElevation] =
-    useState<ElevationName>("North");
+  const [activeElevation, setActiveElevation] = useState<ElevationName>("North");
   const [activeProjectName, setActiveProjectName] = useState("Takeoff Workspace Draft");
-  const [duplicateElevationRefs, setDuplicateElevationRefs] = useState<Record<"North" | "East", boolean>>({
-    North: false,
-    East: false,
-  });
   const [duplicateElevationHeights, setDuplicateElevationHeights] = useState<Record<"North" | "East", boolean>>({
     North: false,
     East: false,
@@ -338,25 +265,6 @@ export default function TakeoffWorkspace() {
   );
   const keyFloorLf = keyFloor?.linealFeet ?? 0;
 
-  const totalElevationLf = useMemo(
-    () => elevationRefs.reduce((sum, item) => sum + item.linealFeet, 0),
-    [elevationRefs],
-  );
-
-  const activeElevationRef = useMemo(
-    () =>
-      elevationRefs.find((item) => item.elevation === activeElevation) ??
-      elevationRefs[0],
-    [activeElevation, elevationRefs],
-  );
-
-  const activeElevationHeight = useMemo(
-    () =>
-      elevationHeights.find((item) => item.elevation === activeElevation) ??
-      elevationHeights[0],
-    [activeElevation, elevationHeights],
-  );
-
   useEffect(() => {
     setActiveProjectId(getActiveProjectId());
     setActiveProjectName(getActiveProject().projectName || "Takeoff Workspace Draft");
@@ -369,22 +277,14 @@ export default function TakeoffWorkspace() {
 
   function buildWorkspaceElevation(
     elevation: ElevationName,
-    refs: ElevationReference[] = elevationRefs,
     heights: ElevationHeight[] = elevationHeights,
     overlayRows: FullOverlayRow[] = fullOverlayRows,
   ): ProjectElevation {
-    const ref = refs.find((item) => item.elevation === elevation) ?? refs[0];
     const height = heights.find((item) => item.elevation === elevation) ?? heights[0];
     const levelRow = overlayRows.find((row) => row.isKeyFloor) ?? overlayRows[0];
     const currentKeyFloorLf = levelRow?.linealFeet ?? 0;
-    const currentTotalElevationLf = refs.reduce((sum, item) => sum + item.linealFeet, 0);
-    const manualLinearFeet = ref ? parseFeetInches(ref.manualLinealFeetInput) : null;
     const enteredWallHeight = height ? getHeightWithBelowGrade(height) : 0;
-    const linearFeetSource =
-      manualLinearFeet && manualLinearFeet > 0
-        ? manualLinearFeet
-        : ref?.linealFeet || currentKeyFloorLf || currentTotalElevationLf || 0;
-    const linearFeet = Math.round(linearFeetSource);
+    const linearFeet = Math.round(currentKeyFloorLf);
     const wallHeight = enteredWallHeight || getAverageExteriorHeight(heights);
     const backendScaffoldDefaults = getBackendSettings().scaffold;
     const scaffoldInput = {
@@ -403,7 +303,7 @@ export default function TakeoffWorkspace() {
     });
     const scale = {
       keyFloorLf: currentKeyFloorLf,
-      source: ref?.source ?? "Not Set",
+      source: "Not Set",
       pageUnitsPerFoot,
       scalePoints,
       knownScaleFeet,
@@ -414,11 +314,11 @@ export default function TakeoffWorkspace() {
       levelName: levelRow?.level || "Main Level",
       tracedPerimeter: activeFullOverlayPoints,
       overlayPoints: activeFullOverlayPoints,
-      wallSegments: refs.filter((item) => item.points.length >= 2).map((item) => item.points),
+      wallSegments: [],
       referencePoints: scalePoints,
-      elevationPoints: ref?.points ?? [],
+      elevationPoints: [],
       fullOverlayRows: overlayRows,
-      elevationRefs: refs,
+      elevationRefs: [],
       elevationHeights: heights,
       scale,
     };
@@ -446,12 +346,11 @@ export default function TakeoffWorkspace() {
 
   function saveWorkspaceElevation(
     elevation: ElevationName = activeElevation,
-    refs: ElevationReference[] = elevationRefs,
     heights: ElevationHeight[] = elevationHeights,
     overlayRows: FullOverlayRow[] = fullOverlayRows,
   ) {
     const project = getActiveProject();
-    const nextElevation = buildWorkspaceElevation(elevation, refs, heights, overlayRows);
+    const nextElevation = buildWorkspaceElevation(elevation, heights, overlayRows);
     if (!nextElevation.linearFeet || nextElevation.linearFeet <= 0) {
       console.warn("TAKEOFF SAVING LF: skipped invalid LF", nextElevation.linearFeet);
       return;
@@ -488,20 +387,41 @@ export default function TakeoffWorkspace() {
     setShowCombinedOverlay(true);
 
     try {
+      // Polyfill Promise.withResolvers for pdfjs-dist v5 compatibility
+      if (typeof Promise.withResolvers === "undefined") {
+        (Promise as any).withResolvers = function () {
+          let resolve: (value: any) => void;
+          let reject: (reason?: any) => void;
+          const promise = new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+          });
+          return { promise, resolve: resolve!, reject: reject! };
+        };
+      }
+
       const pdfjsLib = await import("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.legacy.min.mjs";
 
       const arrayBuffer = await file.arrayBuffer();
-      const loadedPdf = await pdfjsLib.getDocument({ data: arrayBuffer })
-        .promise;
+      const loadedPdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
       setPdfDoc(loadedPdf);
       setNumPages(loadedPdf.numPages);
       setActiveTool("Scale");
       setScaleMode(true);
       setOverlayMode(false);
-    } catch {
-      setPdfError("Could not load PDF. Try another plan sheet.");
+    } catch (error) {
+      console.error("PDF load failed:", error);
+      let message = "Unknown error";
+      if (error instanceof Error) {
+        message = `${error.name}: ${error.message}`;
+      } else if (typeof error === "string") {
+        message = error;
+      } else {
+        try { message = JSON.stringify(error); } catch { message = String(error); }
+      }
+      setPdfError(`Could not load PDF: ${message}`);
       setPdfDoc(null);
     } finally {
       setPdfLoading(false);
@@ -547,6 +467,8 @@ export default function TakeoffWorkspace() {
     setOverlayMode(tool === "Overlay" && Boolean(pickTarget));
   }
 
+  // FIX: Correct click coordinate calculation accounting for canvas
+  // container padding (p-4 = 16px) and scroll position
   function getPagePointFromClick(event: React.MouseEvent<HTMLDivElement>) {
     const canvas = canvasRef.current;
     if (!canvas) return null;
@@ -563,6 +485,7 @@ export default function TakeoffWorkspace() {
     )
       return null;
 
+    // Divide by zoom to convert from screen pixels back to PDF page units
     return { x: renderedX / zoom, y: renderedY / zoom };
   }
 
@@ -646,11 +569,7 @@ export default function TakeoffWorkspace() {
       setOverlayLockedOpen(false);
     }
 
-    if (
-      pickTarget.type === "elevation" ||
-      pickTarget.type === "heightOverall" ||
-      pickTarget.type === "heightArea"
-    ) {
+    if (pickTarget.type === "heightOverall") {
       if (tracePoints.length < 2) {
         alert("Select start and close points first.");
         return;
@@ -684,93 +603,23 @@ export default function TakeoffWorkspace() {
 
     if (pickTarget.type === "full") {
       const nextFullOverlayRows = fullOverlayRows.map((row) =>
-          row.id === pickTarget.id
-            ? {
-                ...row,
-                points: [...tracePoints],
-                closed: traceClosed,
-                linealFeet: tracedLinealFeet,
-                pageNumber,
-              }
-            : row,
-      );
-      setFullOverlayRows(nextFullOverlayRows);
-      saveWorkspaceElevation(activeElevation, elevationRefs, elevationHeights, nextFullOverlayRows);
-    }
-
-    if (pickTarget.type === "elevation") {
-      const nextElevationRefs = elevationRefs.map((item) =>
-        item.elevation === pickTarget.elevation
+        row.id === pickTarget.id
           ? {
-              ...item,
+              ...row,
               points: [...tracePoints],
               closed: traceClosed,
               linealFeet: tracedLinealFeet,
-              manualLinealFeetInput: formatFeetInches(tracedLinealFeet),
-              source: "Pick Points",
+              pageNumber,
             }
-          : item,
+          : row,
       );
-
-      const duplicatedElevation = getOppositeElevation(pickTarget.elevation);
-const duplicatedElevationRefs =
-        canDuplicateOpposite(pickTarget.elevation) &&
-        duplicateElevationRefs[pickTarget.elevation] &&
-        duplicatedElevation
-          ? nextElevationRefs.map((item) =>
-              item.elevation === duplicatedElevation
-                ? {
-                    ...item,
-                    points: [],
-                    closed: false,
-                    linealFeet: tracedLinealFeet,
-                    manualLinealFeetInput: formatFeetInches(tracedLinealFeet),
-source: "Manual" as const,
-                  }
-                : item,
-            )
-          : nextElevationRefs;
-
-      const typedDuplicatedElevationRefs = duplicatedElevationRefs as ElevationReference[];
-      const nextTotal = typedDuplicatedElevationRefs.reduce(
-        (sum, item) => sum + item.linealFeet,
-        0,
-      );
-      const allElevationsCaptured = nextElevationRefs.every(
-        (item) => item.linealFeet > 0,
-      );
-      const toleranceLf = keyFloorLf * tolerancePercent;
-
-      if (
-        allElevationsCaptured &&
-        keyFloorLf > 0 &&
-        Math.abs(nextTotal - keyFloorLf) > toleranceLf
-      ) {
-        const redo = window.confirm(
-          "Per backend settings, your overlay variance exceeds the allowed tolerance of error. Would you like to redo?",
-        );
-
-        if (redo) {
-          return;
-        }
-      }
-
-      setElevationRefs(typedDuplicatedElevationRefs);
-      saveWorkspaceElevation(pickTarget.elevation, typedDuplicatedElevationRefs, elevationHeights);
+      setFullOverlayRows(nextFullOverlayRows);
+      saveWorkspaceElevation(activeElevation, elevationHeights, nextFullOverlayRows);
     }
 
     if (pickTarget.type === "heightOverall") {
       const heightInput = formatFeetInches(tracedLinealFeet);
-      updateElevationHeight(pickTarget.elevation, {
-        overallHeightInput: heightInput,
-      });
-    }
-
-    if (pickTarget.type === "heightArea") {
-      const heightInput = formatFeetInches(tracedLinealFeet);
-      updateHeightArea(pickTarget.elevation, pickTarget.areaId, {
-        heightInput,
-      });
+      updateElevationHeight(pickTarget.elevation, { overallHeightInput: heightInput });
     }
 
     setTracePoints([]);
@@ -786,12 +635,6 @@ source: "Manual" as const,
     setPageUnitsPerFoot(null);
   }
 
-  // ── Elevation Breakdown (Optional) ──
-  // Deliberately isolated from the main takeoff machine: these handlers
-  // never touch linearFeet, ticks, or the quantity engine. They only
-  // read/write the elevationBreakdown array via saveElevationBreakdown,
-  // a dedicated save path in projectStore that's separate from
-  // saveActiveElevation's main flow.
   function updateElevationBreakdownRow(elevation: ElevationName, approxLinearFeet: number) {
     setElevationBreakdownRows((current) =>
       current.map((row) => (row.elevation === elevation ? { ...row, approxLinearFeet } : row)),
@@ -799,8 +642,7 @@ source: "Manual" as const,
   }
 
   function storeElevationBreakdownRow(elevation: ElevationName) {
-    const updatedRows = elevationBreakdownRows;
-    saveElevationBreakdown(updatedRows);
+    saveElevationBreakdown(elevationBreakdownRows);
   }
 
   function addFullOverlayRow(type: FullOverlayType = "Level") {
@@ -844,85 +686,6 @@ source: "Manual" as const,
     });
   }
 
-  function updateElevationReference(
-    elevation: ElevationName,
-    updates: Partial<ElevationReference>,
-  ) {
-    setElevationRefs((current) =>
-      current.map((item) =>
-        item.elevation === elevation ? { ...item, ...updates } : item,
-      ),
-    );
-  }
-
-  function storeManualElevationReference(elevation: ElevationName) {
-    const current = elevationRefs.find((item) => item.elevation === elevation);
-    if (!current) return;
-
-    const parsed = parseFeetInches(current.manualLinealFeetInput);
-    if (parsed === null || parsed < 0) {
-      alert(
-        `Enter ${elevation} LF as feet and inches, like 120'-6" or 120'6".`,
-      );
-      return;
-    }
-
-    const nextElevationRefs = elevationRefs.map((item) =>
-      item.elevation === elevation
-        ? {
-            ...item,
-            points: [],
-            closed: false,
-            linealFeet: parsed,
-            manualLinealFeetInput: formatFeetInches(parsed),
-            source: "Manual" as const,
-          }
-        : item,
-    );
-
-    const duplicatedElevation = getOppositeElevation(elevation);
-    const duplicatedElevationRefs =
-      canDuplicateOpposite(elevation) && duplicateElevationRefs[elevation] && duplicatedElevation
-        ? nextElevationRefs.map((item) =>
-            item.elevation === duplicatedElevation
-              ? {
-                  ...item,
-                  points: [],
-                  closed: false,
-                  linealFeet: parsed,
-                  manualLinealFeetInput: formatFeetInches(parsed),
-                  source: "Manual",
-                }
-              : item,
-          )
-        : nextElevationRefs;
-
-    const typedDuplicatedElevationRefs = duplicatedElevationRefs as ElevationReference[];
-    const nextTotal = typedDuplicatedElevationRefs.reduce(
-      (sum, item) => sum + item.linealFeet,
-      0,
-    );
-    const allElevationsCaptured = nextElevationRefs.every(
-      (item) => item.linealFeet > 0,
-    );
-    const toleranceLf = keyFloorLf * tolerancePercent;
-
-    if (
-      allElevationsCaptured &&
-      keyFloorLf > 0 &&
-      Math.abs(nextTotal - keyFloorLf) > toleranceLf
-    ) {
-      const redo = window.confirm(
-        "Per backend settings, your overlay variance exceeds the allowed tolerance of error. Would you like to redo?",
-      );
-
-      if (redo) return;
-    }
-
-    setElevationRefs(typedDuplicatedElevationRefs);
-    saveWorkspaceElevation(elevation, typedDuplicatedElevationRefs, elevationHeights);
-  }
-
   function updateElevationHeight(
     elevation: ElevationName,
     updates: Partial<ElevationHeight>,
@@ -932,54 +695,6 @@ source: "Manual" as const,
         item.elevation === elevation ? { ...item, ...updates } : item,
       ),
     );
-  }
-
-  function updateHeightArea(
-    elevation: ElevationName,
-    areaId: string,
-    updates: Partial<HeightArea>,
-  ) {
-    setElevationHeights((current) =>
-      current.map((item) =>
-        item.elevation === elevation
-          ? {
-              ...item,
-              areas: item.areas.map((area) =>
-                area.id === areaId ? { ...area, ...updates } : area,
-              ),
-            }
-          : item,
-      ),
-    );
-  }
-
-  function getActivePickColor() {
-    if (pickTarget?.type === "full") {
-      const row = fullOverlayRows.find((item) => item.id === pickTarget.id);
-      return row ? overlayColorFor(row) : "#f97316";
-    }
-
-    if (pickTarget?.type === "elevation") return "#ffffff";
-    if (
-      pickTarget?.type === "heightOverall" ||
-      pickTarget?.type === "heightArea"
-    )
-      return "#facc15";
-
-    return "#f97316";
-  }
-
-  function duplicateHeightToOpposite(elevation: ElevationName, source: ElevationHeight) {
-    const opposite = getOppositeElevation(elevation);
-    if (!opposite || !canDuplicateOpposite(elevation) || !duplicateElevationHeights[elevation]) return;
-
-    updateElevationHeight(opposite, {
-      overallHeightInput: source.overallHeightInput,
-      belowGradeEnabled: source.belowGradeEnabled,
-      belowGradeInput: source.belowGradeInput,
-      multipleHeights: source.multipleHeights,
-      areas: source.areas.map((area) => ({ ...area })),
-    });
   }
 
   function storeManualOverallHeight(elevation: ElevationName) {
@@ -994,57 +709,42 @@ source: "Manual" as const,
     }
 
     const nextItem = { ...current, overallHeightInput: formatFeetInches(parsed) };
+    updateElevationHeight(elevation, { overallHeightInput: nextItem.overallHeightInput });
 
-    updateElevationHeight(elevation, {
-      overallHeightInput: nextItem.overallHeightInput,
-    });
-    duplicateHeightToOpposite(elevation, nextItem);
+    // Duplicate to opposite if checked
+    const opposite = getOppositeElevation(elevation);
+    if (
+      canDuplicateOpposite(elevation) &&
+      duplicateElevationHeights[elevation] &&
+      opposite
+    ) {
+      updateElevationHeight(opposite, {
+        overallHeightInput: nextItem.overallHeightInput,
+        belowGradeEnabled: nextItem.belowGradeEnabled,
+        belowGradeInput: nextItem.belowGradeInput,
+      });
+    }
+
     saveWorkspaceElevation(
       elevation,
-      elevationRefs,
       elevationHeights.map((item) => (item.elevation === elevation ? nextItem : item)),
     );
   }
 
-  function storeManualAreaHeight(elevation: ElevationName, areaId: string) {
-    const currentElevation = elevationHeights.find((item) => item.elevation === elevation);
-    const currentArea = currentElevation?.areas.find((area) => area.id === areaId);
-
-    if (!currentElevation || !currentArea) return;
-
-    const parsed = parseFeetInches(currentArea.heightInput);
-
-    if (parsed === null || parsed < 0) {
-      alert(`Enter ${elevation} area height as feet and inches, like 28'-0" or 28'.`);
-      return;
+  function getActivePickColor() {
+    if (pickTarget?.type === "full") {
+      const row = fullOverlayRows.find((item) => item.id === pickTarget.id);
+      return row ? overlayColorFor(row) : "#f97316";
     }
-
-    const nextAreas = currentElevation.areas.map((area) =>
-      area.id === areaId ? { ...area, heightInput: formatFeetInches(parsed) } : area,
-    );
-    const nextItem = { ...currentElevation, areas: nextAreas };
-
-    updateHeightArea(elevation, areaId, {
-      heightInput: formatFeetInches(parsed),
-    });
-    duplicateHeightToOpposite(elevation, nextItem);
-    saveWorkspaceElevation(
-      elevation,
-      elevationRefs,
-      elevationHeights.map((item) => (item.elevation === elevation ? nextItem : item)),
-    );
+    if (pickTarget?.type === "heightOverall") return "#facc15";
+    return "#f97316";
   }
 
   function saveToEstimateReview() {
-    const payload = {
-      keyFloorLf,
-      elevationRefs,
-      elevationHeights,
-    };
+    const payload = { keyFloorLf, elevationHeights };
     const activeProjectId = getActiveProjectId();
     const sharedElevation = buildWorkspaceElevation(activeElevation);
     const totalLinearFeet = sharedElevation.linearFeet;
-    const averageExteriorHeight = getAverageExteriorHeight(elevationHeights);
     const bays = sharedElevation.quantityEngine.bayCount;
     const legs = sharedElevation.quantityEngine.legCount;
     const jumps = sharedElevation.quantityEngine.jumps;
@@ -1083,13 +783,10 @@ source: "Manual" as const,
       source: "takeoff-workspace",
       updatedAt: new Date().toISOString(),
       schemaVersion: 1,
-      takeoff: {
-        ...payload,
-        fullOverlayRows,
-      },
+      takeoff: { ...payload, fullOverlayRows },
     };
-    let storedProjectEstimates: Record<string, typeof estimateDraft> = {};
 
+    let storedProjectEstimates: Record<string, typeof estimateDraft> = {};
     try {
       const existing = localStorage.getItem("korbanProjectEstimates_v1");
       const parsed = existing ? JSON.parse(existing) : {};
@@ -1104,10 +801,7 @@ source: "Manual" as const,
     localStorage.setItem("korbanTakeoffHub", JSON.stringify(payload));
     localStorage.setItem(
       "korbanProjectEstimates_v1",
-      JSON.stringify({
-        ...storedProjectEstimates,
-        [activeProjectId]: estimateDraft,
-      }),
+      JSON.stringify({ ...storedProjectEstimates, [activeProjectId]: estimateDraft }),
     );
     window.location.href = "/estimate-review";
   }
@@ -1125,9 +819,7 @@ source: "Manual" as const,
       <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full">
         {points.map((point, index) => {
           if (index === 0) return null;
-
           const previous = points[index - 1];
-
           return (
             <line
               key={`${keyPrefix}-line-${index}`}
@@ -1141,7 +833,6 @@ source: "Manual" as const,
             />
           );
         })}
-
         {closed && points.length > 2 && (
           <line
             x1={points[points.length - 1].x * zoom + 16}
@@ -1200,11 +891,12 @@ source: "Manual" as const,
                 />
               </KorbanButton>
 
+              {/* Set Scaffold is now BEFORE Frame Configuration */}
               {[
                 "Scale",
                 "Overlay",
-                "Frame Configuration",
                 "Set Scaffold",
+                "Frame Configuration",
                 "Create Section View",
                 "Edit Takeoff",
               ].map((tool) => (
@@ -1253,18 +945,17 @@ source: "Manual" as const,
                 <KorbanStatusPill
                   label="Pick"
                   value={
-                    pickTarget.type === "heightOverall" || pickTarget.type === "heightArea"
+                    pickTarget.type === "heightOverall"
                       ? `${pickTarget.elevation} Height`
-                      : pickTarget.type === "full"
-                        ? "Full Overlay"
-                        : `${pickTarget.elevation} Elevation`
+                      : "Full Overlay"
                   }
                   active
                 />
               )}
             </KorbanWorkspaceHud>
 
-            <KorbanWorkspaceHud position="bottom-right" className="max-w-none rounded-2xl border border-orange-500/20 bg-black/80 px-3 py-2 backdrop-blur">
+            {/* PDF controls - centered at bottom */}
+            <KorbanWorkspaceHud position="bottom-right" className="max-w-none rounded-2xl border border-orange-500/20 bg-black/80 px-3 py-2 backdrop-blur" style={{ left: "50%", transform: "translateX(-50%)", right: "auto" }}>
               <span className="max-w-[180px] truncate rounded-full border border-orange-500/20 bg-black px-3 py-1.5 text-[10px] text-zinc-400">
                 {pdfFileName || "No PDF Loaded"}
               </span>
@@ -1320,7 +1011,7 @@ source: "Manual" as const,
                 disabled={!pdfDoc}
                 onClick={() => setZoom((current) => Math.max(0.1, current - 0.1))}
               >
-                -
+                −
               </KorbanButton>
               <KorbanStatusPill label="Zoom" value={`${Math.round(zoom * 100)}%`} />
               <KorbanButton
@@ -1371,6 +1062,7 @@ source: "Manual" as const,
               {pdfDoc && (
                 <div className="relative z-10 flex min-h-full min-w-max justify-center p-10">
                   <div
+                    ref={canvasContainerRef}
                     onClick={handleWorkspaceClick}
                     className={`relative h-fit rounded-[2rem] border border-zinc-800 bg-[#050505] p-4 shadow-2xl ${scaleMode || overlayMode ? "cursor-crosshair" : ""}`}
                   >
@@ -1425,43 +1117,35 @@ source: "Manual" as const,
         }
         rail={
           <TakeoffHub
-              fullOverlayRows={fullOverlayRows}
-              updateFullOverlayRow={updateFullOverlayRow}
-              addFullOverlayRow={addFullOverlayRow}
-              removeFullOverlayRow={removeFullOverlayRow}
-              startPick={startPick}
-              closePick={closePick}
-              storePick={storePick}
-              clearPick={clearPick}
-              elevationRefs={elevationRefs}
-              updateElevationReference={updateElevationReference}
-              storeManualElevationReference={storeManualElevationReference}
-              activeElevation={activeElevation}
-              setActiveElevation={setActiveElevation}
-              duplicateElevationRefs={duplicateElevationRefs}
-              setDuplicateElevationRefs={setDuplicateElevationRefs}
-              elevationHeights={elevationHeights}
-              duplicateElevationHeights={duplicateElevationHeights}
-              setDuplicateElevationHeights={setDuplicateElevationHeights}
-              updateElevationHeight={updateElevationHeight}
-              updateHeightArea={updateHeightArea}
-              storeManualOverallHeight={storeManualOverallHeight}
-              storeManualAreaHeight={storeManualAreaHeight}
-              keyFloorLf={keyFloorLf}
-              totalElevationLf={totalElevationLf}
-              tolerancePercent={tolerancePercent}
-              pickTarget={pickTarget}
-              tracePoints={tracePoints}
-              tracedLinealFeet={tracedLinealFeet}
-              traceClosed={traceClosed}
-              overlayLockedOpen={overlayLockedOpen}
-              scaleReady={Boolean(pageUnitsPerFoot)}
-              setShowCombinedOverlay={setShowCombinedOverlay}
-              showCombinedOverlay={showCombinedOverlay}
-              saveToEstimateReview={saveToEstimateReview}
-              elevationBreakdownRows={elevationBreakdownRows}
-              updateElevationBreakdownRow={updateElevationBreakdownRow}
-              storeElevationBreakdownRow={storeElevationBreakdownRow}
+            fullOverlayRows={fullOverlayRows}
+            updateFullOverlayRow={updateFullOverlayRow}
+            addFullOverlayRow={addFullOverlayRow}
+            removeFullOverlayRow={removeFullOverlayRow}
+            startPick={startPick}
+            closePick={closePick}
+            storePick={storePick}
+            clearPick={clearPick}
+            activeElevation={activeElevation}
+            setActiveElevation={setActiveElevation}
+            elevationHeights={elevationHeights}
+            duplicateElevationHeights={duplicateElevationHeights}
+            setDuplicateElevationHeights={setDuplicateElevationHeights}
+            updateElevationHeight={updateElevationHeight}
+            storeManualOverallHeight={storeManualOverallHeight}
+            keyFloorLf={keyFloorLf}
+            tolerancePercent={tolerancePercent}
+            pickTarget={pickTarget}
+            tracePoints={tracePoints}
+            tracedLinealFeet={tracedLinealFeet}
+            traceClosed={traceClosed}
+            overlayLockedOpen={overlayLockedOpen}
+            scaleReady={Boolean(pageUnitsPerFoot)}
+            setShowCombinedOverlay={setShowCombinedOverlay}
+            showCombinedOverlay={showCombinedOverlay}
+            saveToEstimateReview={saveToEstimateReview}
+            elevationBreakdownRows={elevationBreakdownRows}
+            updateElevationBreakdownRow={updateElevationBreakdownRow}
+            storeElevationBreakdownRow={storeElevationBreakdownRow}
           />
         }
       />
@@ -1478,22 +1162,14 @@ function TakeoffHub({
   closePick,
   storePick,
   clearPick,
-  elevationRefs,
-  updateElevationReference,
-  storeManualElevationReference,
   activeElevation,
   setActiveElevation,
-  duplicateElevationRefs,
-  setDuplicateElevationRefs,
   elevationHeights,
   duplicateElevationHeights,
   setDuplicateElevationHeights,
   updateElevationHeight,
-  updateHeightArea,
   storeManualOverallHeight,
-  storeManualAreaHeight,
   keyFloorLf,
-  totalElevationLf,
   tolerancePercent,
   pickTarget,
   tracePoints,
@@ -1516,32 +1192,14 @@ function TakeoffHub({
   closePick: () => void;
   storePick: () => void;
   clearPick: () => void;
-  elevationRefs: ElevationReference[];
-  updateElevationReference: (
-    elevation: ElevationName,
-    updates: Partial<ElevationReference>,
-  ) => void;
-  storeManualElevationReference: (elevation: ElevationName) => void;
   activeElevation: ElevationName;
   setActiveElevation: (elevation: ElevationName) => void;
-  duplicateElevationRefs: Record<"North" | "East", boolean>;
-  setDuplicateElevationRefs: React.Dispatch<React.SetStateAction<Record<"North" | "East", boolean>>>;
   elevationHeights: ElevationHeight[];
   duplicateElevationHeights: Record<"North" | "East", boolean>;
   setDuplicateElevationHeights: React.Dispatch<React.SetStateAction<Record<"North" | "East", boolean>>>;
-  updateElevationHeight: (
-    elevation: ElevationName,
-    updates: Partial<ElevationHeight>,
-  ) => void;
-  updateHeightArea: (
-    elevation: ElevationName,
-    areaId: string,
-    updates: Partial<HeightArea>,
-  ) => void;
+  updateElevationHeight: (elevation: ElevationName, updates: Partial<ElevationHeight>) => void;
   storeManualOverallHeight: (elevation: ElevationName) => void;
-  storeManualAreaHeight: (elevation: ElevationName, areaId: string) => void;
   keyFloorLf: number;
-  totalElevationLf: number;
   tolerancePercent: number;
   pickTarget: PickTarget;
   tracePoints: Point[];
@@ -1556,9 +1214,6 @@ function TakeoffHub({
   updateElevationBreakdownRow: (elevation: ElevationName, approxLinearFeet: number) => void;
   storeElevationBreakdownRow: (elevation: ElevationName) => void;
 }) {
-  const difference = Math.abs(totalElevationLf - keyFloorLf);
-  const toleranceLf = keyFloorLf * tolerancePercent;
-
   return (
     <div className="space-y-4">
       <KorbanPanel title="Take Off Hub" compact className="border-orange-500/20">
@@ -1568,664 +1223,262 @@ function TakeoffHub({
           </KorbanButton>
         </div>
 
-      <div
-        className={`transition ${scaleReady ? "opacity-100" : "pointer-events-none opacity-35"}`}
-        title={scaleReady ? "" : "Set scale to unlock Take Off Hub"}
-      >
-        <KorbanPanel title="Full Overlay" compact>
-          <div className="space-y-2">
-            {fullOverlayRows.map((row) => {
-              const isActiveFullPick = pickTarget?.type === "full" && pickTarget.id === row.id;
-              const hasPendingFullMeasure = isActiveFullPick && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
-              const displayLf = hasPendingFullMeasure ? tracedLinealFeet : row.linealFeet;
-              const isStored = row.linealFeet > 0 && !hasPendingFullMeasure;
-
-              return (
-                <div
-                  key={row.id}
-                  className={`rounded-xl border bg-zinc-950/80 p-3 ${hasPendingFullMeasure ? "border-yellow-300/40 shadow-[0_0_18px_rgba(234,179,8,0.20)]" : "border-zinc-800"}`}
-                >
-                  <div className="grid grid-cols-[auto_12px_minmax(0,1fr)_104px] items-center gap-2 text-xs">
-                    <label className="flex items-center gap-1 text-zinc-500">
-                      <input
-                        type="checkbox"
-                        checked={row.isKeyFloor}
-                        disabled={row.overlayType !== "Level"}
-                        onChange={() =>
-                          updateFullOverlayRow(row.id, { isKeyFloor: true })
-                        }
-                        className="accent-orange-500 disabled:opacity-30"
-                      />
-                      Main
-                    </label>
-                    <span
-                      className="h-2.5 w-2.5 rounded-full"
-                      style={{ background: overlayColorFor(row) }}
-                    />
-                    <input
-                      value={row.level}
-                      onChange={(event) =>
-                        updateFullOverlayRow(row.id, {
-                          level: event.target.value,
-                        })
-                      }
-                      className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-zinc-200 outline-none focus:border-orange-500"
-                      placeholder="Level"
-                    />
-                    <span className={`whitespace-nowrap rounded-lg px-2 py-1 text-right font-mono ${hasPendingFullMeasure ? "bg-yellow-300/10 text-yellow-300 shadow-[0_0_14px_rgba(234,179,8,0.22)]" : "text-orange-400"}`}>
-                      {displayLf > 0 ? formatFeetInches(displayLf) : "--"}
-                    </span>
-                  </div>
-                  <div className="mt-2 grid grid-cols-4 gap-1.5">
-                    <button
-                      onClick={() => startPick({ type: "full", id: row.id })}
-                      className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isActiveFullPick && !hasPendingFullMeasure ? "border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)] animate-pulse" : "border-zinc-800"}`}
-                    >
-                      Start
-                    </button>
-                    <button
-                      onClick={closePick}
-                      className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-                    >
-                      Close
-                    </button>
-                    <button
-                      onClick={storePick}
-                      className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${isStored ? "border border-white/25 bg-white/5 text-white" : "bg-orange-500 text-black hover:bg-orange-400"}`}
-                    >
-                      Store
-                    </button>
-                    <button
-                      onClick={() => removeFullOverlayRow(row.id)}
-                      className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-500 hover:border-red-500/40 hover:text-red-300"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button
-              onClick={() => addFullOverlayRow("Level")}
-              className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20"
-            >
-              + Level
-            </button>
-            <button
-              onClick={() => addFullOverlayRow("Roof")}
-              className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20"
-            >
-              + Roof
-            </button>
-            <button
-              onClick={() => addFullOverlayRow("Penthouse")}
-              className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs font-semibold text-yellow-300 hover:bg-yellow-500/20"
-            >
-              + Penthouse
-            </button>
-            <button
-              onClick={() => addFullOverlayRow("Basement")}
-              className="rounded-xl border border-orange-300/30 bg-orange-300/10 px-3 py-2 text-xs font-semibold text-orange-200 hover:bg-orange-300/20"
-            >
-              + Basement
-            </button>
-          </div>
-        </KorbanPanel>
-
-        <KorbanPanel title="Elevation Reference" compact>
-          <div className="space-y-2">
-            {elevationRefs.map((item) => (
-              <div
-                key={item.elevation}
-                className={`rounded-xl border p-3 ${activeElevation === item.elevation ? "border-white/30 bg-white/5 shadow-[0_0_18px_rgba(255,255,255,0.12)]" : "border-zinc-800 bg-zinc-950/70"}`}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <button
-                    onClick={() => setActiveElevation(item.elevation)}
-                    className="text-xs font-semibold text-zinc-200"
-                  >
-                    {item.elevation}
-                  </button>
-                  <span className="font-mono text-xs text-orange-400">
-                    {formatFeetInches(item.linealFeet)}
-                  </span>
-                </div>
-                <div className="mt-2 grid grid-cols-1 gap-1.5">
-                  <input
-                    value={item.manualLinealFeetInput}
-                    onChange={(event) =>
-                      updateElevationReference(item.elevation, {
-                        manualLinealFeetInput: event.target.value,
-                      })
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") storeManualElevationReference(item.elevation);
-                    }}
-                    placeholder="Manual LF"
-                    className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-[10px] text-orange-300 outline-none focus:border-orange-500"
-                  />
-                </div>
-                {canDuplicateOpposite(item.elevation) && (
-                  <label className="mt-2 flex items-center gap-2 text-[10px] text-zinc-400">
-                    <input
-                      type="checkbox"
-                      checked={duplicateElevationRefs[item.elevation]}
-                      onChange={(event) =>
-                        setDuplicateElevationRefs((current) => ({
-                          ...current,
-                          [item.elevation]: event.target.checked,
-                        }))
-                      }
-                      className="accent-orange-500"
-                    />
-                    Duplicate {getOppositeElevation(item.elevation)}
-                  </label>
-                )}
-                <div className="mt-2 grid grid-cols-3 gap-1.5">
-                  <button
-                    onClick={() => {
-                      setActiveElevation(item.elevation);
-                      startPick({
-                        type: "elevation",
-                        elevation: item.elevation,
-                      });
-                    }}
-                    className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${pickTarget?.type === "elevation" && pickTarget.elevation === item.elevation ? "border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)] animate-pulse" : "border-zinc-800"}`}
-                  >
-                    Start
-                  </button>
-                  <button
-                    onClick={closePick}
-                    className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-                  >
-                    Close
-                  </button>
-                  <button
-                    onClick={storePick}
-                    className="rounded-lg bg-orange-500 px-2 py-1 text-[10px] font-semibold text-black hover:bg-orange-400"
-                  >
-                    Store
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="mt-3 rounded-xl border border-orange-500/20 bg-orange-500/10 p-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-400">Elevation Total</span>
-              <span className="font-mono text-orange-400">
-                {formatFeetInches(totalElevationLf)}
-              </span>
-            </div>
-            <div className="mt-1 flex items-center justify-between text-[10px]">
-              <span className="text-zinc-600">Key Floor</span>
-              <span
-                className={
-                  difference > toleranceLf && keyFloorLf > 0
-                    ? "text-yellow-300"
-                    : "text-zinc-500"
-                }
-              >
-                Δ {Math.round(difference).toLocaleString()} LF / Tol.{" "}
-                {Math.round(toleranceLf).toLocaleString()} LF
-              </span>
-            </div>
-          </div>
-        </KorbanPanel>
-
-        <KorbanPanel title="Elevation Heights" compact>
-          <div className="space-y-3">
-            {elevationHeights.map((item) => (
-              <ElevationHeightTile
-                key={item.elevation}
-                item={item}
-                active={activeElevation === item.elevation}
-                duplicateElevationHeights={duplicateElevationHeights}
-                setDuplicateElevationHeights={setDuplicateElevationHeights}
-                setActiveElevation={setActiveElevation}
-                updateElevationHeight={updateElevationHeight}
-                updateHeightArea={updateHeightArea}
-                storeManualOverallHeight={storeManualOverallHeight}
-                storeManualAreaHeight={storeManualAreaHeight}
-                startPick={startPick}
-                closePick={closePick}
-                storePick={storePick}
-                pickTarget={pickTarget}
-                tracePoints={tracePoints}
-                tracedLinealFeet={tracedLinealFeet}
-                traceClosed={traceClosed}
-                overlayLockedOpen={overlayLockedOpen}
-              />
-            ))}
-          </div>
-        </KorbanPanel>
-
-        <KorbanPanel
-          title="Elevation Breakdown"
-          subtitle="Optional — manual cross-check, does not affect ticks or counts"
-          compact
+        <div
+          className={`transition ${scaleReady ? "opacity-100" : "pointer-events-none opacity-35"}`}
+          title={scaleReady ? "" : "Set scale to unlock Take Off Hub"}
         >
-          <div className="space-y-2">
-            {elevationBreakdownRows.map((row) => (
-              <div
-                key={row.elevation}
-                className="grid grid-cols-[60px_1fr_64px] items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-2.5"
-              >
-                <span className="text-xs font-semibold text-zinc-300">{row.elevation}</span>
-                <input
-                  value={row.approxLinearFeet || ""}
-                  onChange={(event) =>
-                    updateElevationBreakdownRow(
-                      row.elevation as ElevationName,
-                      Number(event.target.value || 0),
-                    )
-                  }
-                  type="number"
-                  placeholder="Approx LF"
-                  className="rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
-                />
-                <button
-                  onClick={() => storeElevationBreakdownRow(row.elevation as ElevationName)}
-                  className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1.5 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
-                >
-                  Store
-                </button>
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-[10px] leading-4 text-zinc-600">
-            Used in Estimate Review for Partial Exterior Cost comparison only.
-          </p>
-        </KorbanPanel>
+          {/* Full Overlay */}
+          <KorbanPanel title="Full Overlay" compact>
+            <div className="space-y-2">
+              {fullOverlayRows.map((row) => {
+                const isActiveFullPick = pickTarget?.type === "full" && pickTarget.id === row.id;
+                const hasPendingFullMeasure = isActiveFullPick && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
+                const displayLf = hasPendingFullMeasure ? tracedLinealFeet : row.linealFeet;
+                const isStored = row.linealFeet > 0 && !hasPendingFullMeasure;
 
-        <KorbanPanel title="Takeoff Viewer" compact>
-          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-            <TakeoffViewer
-              fullOverlayRows={fullOverlayRows}
-              elevationRefs={elevationRefs}
-              elevationHeights={elevationHeights}
-            />
-            <div className="mt-3 space-y-1 text-xs">
-              <MetaRow label="Key Floor LF" value={formatFeetInches(keyFloorLf)} />
-              <MetaRow label="Combined Elevation LF" value={formatFeetInches(totalElevationLf)} />
-              <MetaRow label="Avg. Exterior Height" value={formatFeetInches(getAverageExteriorHeight(elevationHeights))} />
-              {elevationOptions.map((elevation) => {
-                const height = elevationHeights.find((item) => item.elevation === elevation);
-                if (!height) return null;
-                const overall = height.multipleHeights ? "Multiple" : formatFeetInches(getHeightWithBelowGrade(height));
                 return (
-                  <div key={elevation} className="border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
-                    <MetaRow label={`${elevation} Height`} value={overall} />
-                    {height.multipleHeights && (
-                      <div className="mt-1 space-y-1 pl-3">
-                        {height.areas.map((area) => (
-                          <MetaRow
-                            key={area.id}
-                            label={`${area.label}`}
-                            value={`${area.heightInput} · ${area.coveragePercent}%`}
-                          />
-                        ))}
-                      </div>
-                    )}
+                  <div
+                    key={row.id}
+                    className={`rounded-xl border bg-zinc-950/80 p-3 ${hasPendingFullMeasure ? "border-yellow-300/40 shadow-[0_0_18px_rgba(234,179,8,0.20)]" : "border-zinc-800"}`}
+                  >
+                    <div className="grid grid-cols-[auto_12px_minmax(0,1fr)_104px] items-center gap-2 text-xs">
+                      <label className="flex items-center gap-1 text-zinc-500">
+                        <input
+                          type="checkbox"
+                          checked={row.isKeyFloor}
+                          disabled={row.overlayType !== "Level"}
+                          onChange={() => updateFullOverlayRow(row.id, { isKeyFloor: true })}
+                          className="accent-orange-500 disabled:opacity-30"
+                        />
+                        Main
+                      </label>
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ background: overlayColorFor(row) }} />
+                      <input
+                        value={row.level}
+                        onChange={(event) => updateFullOverlayRow(row.id, { level: event.target.value })}
+                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-zinc-200 outline-none focus:border-orange-500"
+                        placeholder="Level"
+                      />
+                      <span className={`whitespace-nowrap rounded-lg px-2 py-1 text-right font-mono ${hasPendingFullMeasure ? "bg-yellow-300/10 text-yellow-300 shadow-[0_0_14px_rgba(234,179,8,0.22)]" : "text-orange-400"}`}>
+                        {displayLf > 0 ? formatFeetInches(displayLf) : "--"}
+                      </span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-1.5">
+                      <button
+                        onClick={() => startPick({ type: "full", id: row.id })}
+                        className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isActiveFullPick && !hasPendingFullMeasure ? "animate-pulse border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)]" : "border-zinc-800"}`}
+                      >
+                        Start
+                      </button>
+                      <button onClick={closePick} className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50">
+                        Close
+                      </button>
+                      <button
+                        onClick={storePick}
+                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${isStored ? "border border-white/25 bg-white/5 text-white" : "bg-orange-500 text-black hover:bg-orange-400"}`}
+                      >
+                        Store
+                      </button>
+                      <button onClick={() => removeFullOverlayRow(row.id)} className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-500 hover:border-red-500/40 hover:text-red-300">
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 );
               })}
             </div>
-          </div>
-          <KorbanButton variant="primary" block className="mt-3" onClick={saveToEstimateReview}>
-            Save & Continue
-          </KorbanButton>
-        </KorbanPanel>
-      </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button onClick={() => addFullOverlayRow("Level")} className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">+ Level</button>
+              <button onClick={() => addFullOverlayRow("Roof")} className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20">+ Roof</button>
+              <button onClick={() => addFullOverlayRow("Penthouse")} className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs font-semibold text-yellow-300 hover:bg-yellow-500/20">+ Penthouse</button>
+              <button onClick={() => addFullOverlayRow("Basement")} className="rounded-xl border border-orange-300/30 bg-orange-300/10 px-3 py-2 text-xs font-semibold text-orange-200 hover:bg-orange-300/20">+ Basement</button>
+            </div>
+          </KorbanPanel>
+
+          {/* Elevation Heights — simplified: one height per elevation, no multiple heights/coverage */}
+          <KorbanPanel title="Elevation Heights" compact>
+            <div className="space-y-2">
+              {elevationHeights.map((item) => {
+                const isOverallPickActive = pickTarget?.type === "heightOverall" && pickTarget.elevation === item.elevation;
+                const hasPendingOverall = isOverallPickActive && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
+                const overallDisplay = hasPendingOverall ? formatFeetInches(tracedLinealFeet) : item.overallHeightInput;
+
+                return (
+                  <div
+                    key={item.elevation}
+                    className={`rounded-xl border p-3 ${activeElevation === item.elevation ? "border-white/30 bg-white/5 shadow-[0_0_18px_rgba(255,255,255,0.12)]" : "border-zinc-800 bg-zinc-950/70"}`}
+                  >
+                    <div className="mb-2 flex items-center justify-between">
+                      <button onClick={() => setActiveElevation(item.elevation)} className="text-xs font-semibold text-zinc-200">
+                        {item.elevation}
+                      </button>
+                      {canDuplicateOpposite(item.elevation) && (
+                        <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                          <input
+                            type="checkbox"
+                            checked={duplicateElevationHeights[item.elevation]}
+                            onChange={(event) =>
+                              setDuplicateElevationHeights((current) => ({
+                                ...current,
+                                [item.elevation]: event.target.checked,
+                              }))
+                            }
+                            className="accent-orange-500"
+                          />
+                          Copy to {getOppositeElevation(item.elevation)}
+                        </label>
+                      )}
+                    </div>
+
+                    {/* Overall height row */}
+                    <div className={`grid grid-cols-[1fr_96px_48px] items-center gap-2 ${hasPendingOverall ? "rounded-lg bg-yellow-300/5 p-1" : ""}`}>
+                      <span className="text-[10px] uppercase tracking-widest text-zinc-600">Height</span>
+                      <input
+                        value={overallDisplay}
+                        onChange={(event) => updateElevationHeight(item.elevation, { overallHeightInput: event.target.value })}
+                        onKeyDown={(event) => { if (event.key === "Enter") storeManualOverallHeight(item.elevation); }}
+                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
+                        placeholder="0'"
+                      />
+                      <button
+                        onClick={() => storeManualOverallHeight(item.elevation)}
+                        className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
+                      >
+                        Store
+                      </button>
+                    </div>
+
+                    {/* Below grade row */}
+                    <div className="mt-2 grid grid-cols-[auto_1fr_48px] items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                        <input
+                          type="checkbox"
+                          checked={item.belowGradeEnabled}
+                          onChange={(event) => updateElevationHeight(item.elevation, { belowGradeEnabled: event.target.checked })}
+                          className="accent-orange-500"
+                        />
+                        Below Grade
+                      </label>
+                      <input
+                        value={item.belowGradeInput}
+                        onChange={(event) => updateElevationHeight(item.elevation, { belowGradeInput: event.target.value })}
+                        onKeyDown={(event) => { if (event.key === "Enter") storeManualOverallHeight(item.elevation); }}
+                        disabled={!item.belowGradeEnabled}
+                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-[10px] text-orange-300 outline-none focus:border-orange-500 disabled:opacity-35"
+                        placeholder="0'"
+                      />
+                      <button
+                        onClick={() => storeManualOverallHeight(item.elevation)}
+                        className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
+                      >
+                        Store
+                      </button>
+                    </div>
+
+                    {/* Pick from PDF buttons */}
+                    <div className="mt-2 grid grid-cols-3 gap-1.5">
+                      <button
+                        onClick={() => startPick({ type: "heightOverall", elevation: item.elevation })}
+                        className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isOverallPickActive && !hasPendingOverall ? "animate-pulse border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)]" : "border-zinc-800"}`}
+                      >
+                        Pick PDF
+                      </button>
+                      <button onClick={closePick} className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50">Close</button>
+                      <button
+                        onClick={storePick}
+                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingOverall ? "bg-orange-500 text-black hover:bg-orange-400" : "border border-white/20 bg-white/5 text-white"}`}
+                      >
+                        Store
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </KorbanPanel>
+
+          {/* Elevation Breakdown — spinners removed, plain text input */}
+          <KorbanPanel
+            title="Elevation Breakdown"
+            subtitle="Optional — cross-check only, does not affect ticks or counts"
+            compact
+          >
+            <div className="space-y-2">
+              {elevationBreakdownRows.map((row) => (
+                <div
+                  key={row.elevation}
+                  className="grid grid-cols-[52px_1fr_52px] items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-2.5"
+                >
+                  <span className="text-xs font-semibold text-zinc-300">{row.elevation}</span>
+                  <input
+                    value={row.approxLinearFeet || ""}
+                    onChange={(event) =>
+                      updateElevationBreakdownRow(
+                        row.elevation as ElevationName,
+                        Number(event.target.value.replace(/[^0-9.]/g, "") || 0),
+                      )
+                    }
+                    inputMode="numeric"
+                    placeholder="Approx LF"
+                    className="rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
+                  />
+                  <button
+                    onClick={() => storeElevationBreakdownRow(row.elevation as ElevationName)}
+                    className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1.5 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
+                  >
+                    Store
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[10px] leading-4 text-zinc-600">
+              Used in Estimate Review for Partial Exterior Cost comparison only.
+            </p>
+          </KorbanPanel>
+
+          {/* Takeoff Viewer */}
+          <KorbanPanel title="Takeoff Viewer" compact>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <TakeoffViewer
+                fullOverlayRows={fullOverlayRows}
+                elevationHeights={elevationHeights}
+              />
+              <div className="mt-3 space-y-1 text-xs">
+                <MetaRow label="Key Floor LF" value={formatFeetInches(keyFloorLf)} />
+                <MetaRow label="Avg. Exterior Height" value={formatFeetInches(getAverageExteriorHeight(elevationHeights))} />
+                {elevationOptions.map((elevation) => {
+                  const height = elevationHeights.find((item) => item.elevation === elevation);
+                  if (!height) return null;
+                  return (
+                    <MetaRow
+                      key={elevation}
+                      label={`${elevation} Height`}
+                      value={formatFeetInches(getHeightWithBelowGrade(height))}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+            <KorbanButton variant="primary" block className="mt-3" onClick={saveToEstimateReview}>
+              Save & Continue
+            </KorbanButton>
+          </KorbanPanel>
+        </div>
       </KorbanPanel>
     </div>
   );
 }
 
-function ElevationHeightTile({
-  item,
-  active,
-  duplicateElevationHeights,
-  setDuplicateElevationHeights,
-  setActiveElevation,
-  updateElevationHeight,
-  updateHeightArea,
-  storeManualOverallHeight,
-  storeManualAreaHeight,
-  startPick,
-  closePick,
-  storePick,
-  pickTarget,
-  tracePoints,
-  tracedLinealFeet,
-  traceClosed,
-  overlayLockedOpen,
-}: {
-  item: ElevationHeight;
-  active: boolean;
-  duplicateElevationHeights: Record<"North" | "East", boolean>;
-  setDuplicateElevationHeights: React.Dispatch<React.SetStateAction<Record<"North" | "East", boolean>>>;
-  setActiveElevation: (elevation: ElevationName) => void;
-  updateElevationHeight: (
-    elevation: ElevationName,
-    updates: Partial<ElevationHeight>,
-  ) => void;
-  updateHeightArea: (
-    elevation: ElevationName,
-    areaId: string,
-    updates: Partial<HeightArea>,
-  ) => void;
-  storeManualOverallHeight: (elevation: ElevationName) => void;
-  storeManualAreaHeight: (elevation: ElevationName, areaId: string) => void;
-  startPick: (target: PickTarget) => void;
-  closePick: () => void;
-  storePick: () => void;
-  pickTarget: PickTarget;
-  tracePoints: Point[];
-  tracedLinealFeet: number;
-  traceClosed: boolean;
-  overlayLockedOpen: boolean;
-}) {
-  const [coverageAdjusting, setCoverageAdjusting] = useState(false);
-  const isOverallPickActive = pickTarget?.type === "heightOverall" && pickTarget.elevation === item.elevation;
-  const hasPendingOverall = isOverallPickActive && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
-  const overallDisplay = hasPendingOverall ? formatFeetInches(tracedLinealFeet) : item.overallHeightInput;
-  const left = item.areas[0]?.coveragePercent ?? 33;
-  const center = item.areas[1]?.coveragePercent ?? 34;
-  const leftTick = left;
-  const rightTick = Math.min(99, left + center);
-
-  function updateCoverageTicks(nextLeft: number, nextRight: number) {
-    const safeLeft = Math.max(1, Math.min(nextLeft, nextRight - 1));
-    const safeRight = Math.max(safeLeft + 1, Math.min(nextRight, 99));
-    updateHeightArea(item.elevation, "left", { coveragePercent: safeLeft });
-    updateHeightArea(item.elevation, "center", { coveragePercent: safeRight - safeLeft });
-    updateHeightArea(item.elevation, "right", { coveragePercent: 100 - safeRight });
-  }
-
-  return (
-    <div
-      className={`rounded-xl border p-3 ${active ? "border-white/30 bg-white/5 shadow-[0_0_18px_rgba(255,255,255,0.12)]" : "border-zinc-800 bg-zinc-950/70"}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <button
-          onClick={() => setActiveElevation(item.elevation)}
-          className="text-xs font-semibold text-zinc-200"
-        >
-          {item.elevation}
-        </button>
-        {canDuplicateOpposite(item.elevation) && (
-          <label className="flex items-center gap-2 text-[10px] text-zinc-400">
-            <input
-              type="checkbox"
-              checked={duplicateElevationHeights[item.elevation]}
-              onChange={(event) =>
-                setDuplicateElevationHeights((current) => ({
-                  ...current,
-                  [item.elevation]: event.target.checked,
-                }))
-              }
-              className="accent-orange-500"
-            />
-            Duplicate {getOppositeElevation(item.elevation)}
-          </label>
-        )}
-      </div>
-
-      {!item.multipleHeights && (
-        <>
-          <div className={`mt-2 grid grid-cols-[1fr_110px_54px] items-center gap-2 ${hasPendingOverall ? "rounded-lg bg-yellow-300/5 p-1 shadow-[0_0_14px_rgba(234,179,8,0.18)]" : ""}`}>
-            <span className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-              Main Overall Height
-            </span>
-            <input
-              value={overallDisplay}
-              onChange={(event) =>
-                updateElevationHeight(item.elevation, {
-                  overallHeightInput: event.target.value,
-                })
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter") storeManualOverallHeight(item.elevation);
-              }}
-              className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
-              placeholder="0' or --"
-            />
-            <button
-              onClick={() => storeManualOverallHeight(item.elevation)}
-              className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
-            >
-              Store
-            </button>
-          </div>
-          <div className="mt-2 grid grid-cols-[auto_1fr_84px] items-center gap-2">
-            <label className="flex items-center gap-2 text-[10px] text-zinc-500">
-              <input
-                type="checkbox"
-                checked={item.belowGradeEnabled}
-                onChange={(event) =>
-                  updateElevationHeight(item.elevation, {
-                    belowGradeEnabled: event.target.checked,
-                  })
-                }
-                className="accent-orange-500"
-              />
-              Below Grade
-            </label>
-            <input
-              value={item.belowGradeInput}
-              onChange={(event) =>
-                updateElevationHeight(item.elevation, {
-                  belowGradeInput: event.target.value,
-                })
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter") storeManualOverallHeight(item.elevation);
-              }}
-              disabled={!item.belowGradeEnabled}
-              className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-[10px] text-orange-300 outline-none focus:border-orange-500 disabled:opacity-35"
-              placeholder="0'"
-            />
-            <button
-              onClick={() => storeManualOverallHeight(item.elevation)}
-              className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-            >
-              Store
-            </button>
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-1.5">
-            <button
-              onClick={() =>
-                startPick({ type: "heightOverall", elevation: item.elevation })
-              }
-              className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isOverallPickActive && !hasPendingOverall ? "border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)] animate-pulse" : "border-zinc-800"}`}
-            >
-              Start
-            </button>
-            <button
-              onClick={closePick}
-              className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-            >
-              Close
-            </button>
-            <button
-              onClick={storePick}
-              className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingOverall ? "bg-orange-500 text-black hover:bg-orange-400" : "border border-white/20 bg-white/5 text-white"}`}
-            >
-              Store
-            </button>
-          </div>
-        </>
-      )}
-
-      <button
-        onClick={() =>
-          updateElevationHeight(item.elevation, {
-            multipleHeights: !item.multipleHeights,
-          })
-        }
-        className="mt-2 w-full rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1.5 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
-      >
-        {item.multipleHeights ? "Use Overall Height" : "+ Multiple Heights"}
-      </button>
-
-      {item.multipleHeights && (
-        <div className="mt-3 space-y-2">
-          {item.areas.map((area) => {
-            const isAreaPickActive = pickTarget?.type === "heightArea" && pickTarget.elevation === item.elevation && pickTarget.areaId === area.id;
-            const hasPendingArea = isAreaPickActive && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
-            return (
-              <div
-                key={area.id}
-                className={`rounded-lg border bg-black p-2 ${hasPendingArea ? "border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.18)]" : "border-zinc-800"}`}
-              >
-                <div className="grid grid-cols-[56px_1fr_54px_54px] items-center gap-2">
-                  <span className="text-[10px] font-semibold text-zinc-300">
-                    {area.label}
-                  </span>
-                  <input
-                    value={hasPendingArea ? formatFeetInches(tracedLinealFeet) : area.heightInput}
-                    onChange={(event) =>
-                      updateHeightArea(item.elevation, area.id, {
-                        heightInput: event.target.value,
-                      })
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") storeManualAreaHeight(item.elevation, area.id);
-                    }}
-                    placeholder="Height"
-                    className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-right text-[10px] text-orange-300 outline-none focus:border-orange-500"
-                  />
-                  <button
-                    onClick={() => storeManualAreaHeight(item.elevation, area.id)}
-                    className="rounded border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
-                  >
-                    Store
-                  </button>
-                  <span className="text-right font-mono text-[10px] text-zinc-400">
-                    {area.coveragePercent}%
-                  </span>
-                </div>
-                <div className="mt-2 grid grid-cols-3 gap-1.5">
-                  <button
-                    onClick={() =>
-                      startPick({
-                        type: "heightArea",
-                        elevation: item.elevation,
-                        areaId: area.id,
-                      })
-                    }
-                    className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isAreaPickActive && !hasPendingArea ? "border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)] animate-pulse" : "border-zinc-800"}`}
-                  >
-                    Start
-                  </button>
-                  <button
-                    onClick={closePick}
-                    className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-                  >
-                    Close
-                  </button>
-                  <button
-                    onClick={storePick}
-                    className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingArea ? "bg-orange-500 text-black hover:bg-orange-400" : "border border-white/20 bg-white/5 text-white"}`}
-                  >
-                    Store
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-            Elevation Coverage
-          </p>
-          <div className="relative h-5 rounded-full bg-zinc-900">
-            <div
-              className="absolute inset-y-0 left-0 rounded-l-full bg-orange-500"
-              style={{ width: `${left}%` }}
-            />
-            <div
-              className="absolute inset-y-0 bg-orange-400"
-              style={{ left: `${left}%`, width: `${center}%` }}
-            />
-            <div
-              className="absolute inset-y-0 right-0 rounded-r-full bg-amber-500"
-              style={{ width: `${100 - rightTick}%` }}
-            />
-            <span className="absolute top-[-4px] h-7 w-1 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.4)]" style={{ left: `${leftTick}%` }} />
-            <span className="absolute top-[-4px] h-7 w-1 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.4)]" style={{ left: `${rightTick}%` }} />
-          </div>
-          {!coverageAdjusting && (
-            <button
-              onClick={() => setCoverageAdjusting(true)}
-              className="w-full rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1.5 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
-            >
-              Adjust Elevation Coverage
-            </button>
-          )}
-
-          {coverageAdjusting && (
-            <div className="space-y-2 rounded-lg border border-orange-500/20 bg-orange-500/5 p-2">
-              <div className="relative h-8">
-                <input
-                  type="range"
-                  min={1}
-                  max={98}
-                  value={leftTick}
-                  onChange={(event) => updateCoverageTicks(Number(event.target.value), rightTick)}
-                  className="absolute top-2 w-full accent-orange-500"
-                />
-                <input
-                  type="range"
-                  min={2}
-                  max={99}
-                  value={rightTick}
-                  onChange={(event) => updateCoverageTicks(leftTick, Number(event.target.value))}
-                  className="absolute top-2 w-full accent-orange-300"
-                />
-              </div>
-              <div className="grid grid-cols-3 gap-1 text-center text-[10px] text-zinc-400">
-                <span>Left {item.areas[0]?.coveragePercent ?? 0}%</span>
-                <span>Center {item.areas[1]?.coveragePercent ?? 0}%</span>
-                <span>Right {item.areas[2]?.coveragePercent ?? 0}%</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setCoverageAdjusting(false)}
-                  className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => setCoverageAdjusting(false)}
-                  className="rounded-lg bg-orange-500 px-2 py-1 text-[10px] font-semibold text-black hover:bg-orange-400"
-                >
-                  Store
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
 function TakeoffViewer({
   fullOverlayRows,
-  elevationRefs,
   elevationHeights,
 }: {
   fullOverlayRows: FullOverlayRow[];
-  elevationRefs: ElevationReference[];
   elevationHeights: ElevationHeight[];
 }) {
   const drawableFullRows = fullOverlayRows.filter((row) => row.points.length >= 2);
-  const drawableElevationRows = elevationRefs.filter((row) => row.linealFeet > 0);
 
-  if (drawableFullRows.length === 0 && drawableElevationRows.length === 0) {
+  if (drawableFullRows.length === 0) {
     return (
       <div className="flex h-32 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 text-[10px] text-zinc-600">
         Stored takeoff will appear here.
@@ -2254,7 +1507,6 @@ function TakeoffViewer({
   function mapStoredPoint(point: Point) {
     const x = offsetX + (point.x - minX) * scale;
     const y = offsetY + (point.y - minY) * scale;
-
     return `${x},${y}`;
   }
 
@@ -2265,10 +1517,7 @@ function TakeoffViewer({
 
   return (
     <div className="rounded-lg border border-orange-500/10 bg-[linear-gradient(to_right,rgba(249,115,22,0.14)_1px,transparent_1px),linear-gradient(to_bottom,rgba(249,115,22,0.14)_1px,transparent_1px)] bg-[size:20px_20px] p-2">
-      <svg
-        viewBox="0 0 280 160"
-        className="h-40 w-full rounded border border-zinc-800 bg-black/70"
-      >
+      <svg viewBox="0 0 280 160" className="h-40 w-full rounded border border-zinc-800 bg-black/70">
         {drawableFullRows.map((row, index) => {
           const hasGeometry = row.points.length >= 2;
           const lastPoint = row.points[row.points.length - 1];
@@ -2290,10 +1539,8 @@ function TakeoffViewer({
                   />
                   {row.closed && row.points.length > 2 && lastMapped && firstMapped && (
                     <line
-                      x1={lastMapped.x}
-                      y1={lastMapped.y}
-                      x2={firstMapped.x}
-                      y2={firstMapped.y}
+                      x1={lastMapped.x} y1={lastMapped.y}
+                      x2={firstMapped.x} y2={firstMapped.y}
                       stroke={overlayColorFor(row)}
                       strokeWidth={row.isKeyFloor ? 4 : 3}
                       strokeLinecap="round"
@@ -2301,47 +1548,8 @@ function TakeoffViewer({
                   )}
                 </>
               )}
-              <text
-                x="12"
-                y={14 + index * 11}
-                fill={overlayColorFor(row)}
-                fontSize="8"
-                fontWeight="700"
-              >
-                {row.isKeyFloor ? "MAIN · " : ""}
-                {row.level} · {formatFeetInches(row.linealFeet)}
-              </text>
-            </g>
-          );
-        })}
-
-        {drawableElevationRows.map((row, index) => {
-          const y = 120 + index * 8;
-          const maxLf = Math.max(...drawableElevationRows.map((item) => item.linealFeet), 1);
-          const barWidth = Math.max(8, (row.linealFeet / maxLf) * 88);
-
-          return (
-            <g key={row.elevation}>
-              <text
-                x="168"
-                y={y + 4}
-                fill="#ffffff"
-                fontSize="7"
-                fontWeight="700"
-              >
-                {row.elevation}
-              </text>
-              <rect
-                x="210"
-                y={y - 3}
-                width={barWidth}
-                height="5"
-                rx="2.5"
-                fill="#ffffff"
-                opacity="0.75"
-              />
-              <text x="210" y={y + 10} fill="#a1a1aa" fontSize="6">
-                {formatFeetInches(row.linealFeet)}
+              <text x="12" y={14 + index * 11} fill={overlayColorFor(row)} fontSize="8" fontWeight="700">
+                {row.isKeyFloor ? "MAIN · " : ""}{row.level} · {formatFeetInches(row.linealFeet)}
               </text>
             </g>
           );
@@ -2350,7 +1558,6 @@ function TakeoffViewer({
     </div>
   );
 }
-
 
 function ActiveElevationMini({
   activeElevation,
@@ -2361,9 +1568,7 @@ function ActiveElevationMini({
 }) {
   return (
     <div className="ml-1 flex items-center gap-1 rounded-xl border border-zinc-800 bg-black px-2 py-1.5">
-      <span className="px-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-        Elevation
-      </span>
+      <span className="px-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">Elevation</span>
       {elevationOptions.map((elevation) => (
         <button
           key={elevation}
@@ -2377,16 +1582,7 @@ function ActiveElevationMini({
   );
 }
 
-
-function Marker({
-  point,
-  label,
-  zoom,
-}: {
-  point: Point;
-  label: string;
-  zoom: number;
-}) {
+function Marker({ point, label, zoom }: { point: Point; label: string; zoom: number }) {
   return (
     <div
       className="absolute z-30 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-orange-300 bg-orange-500 text-[10px] font-bold text-black"

@@ -89,11 +89,73 @@ function formatScaffoldWidth(value: number): ScaffoldWidth {
   return "3'";
 }
 
+function parseFeetInches(input: string): number | null {
+  const value = input.trim();
+  if (!value || value === "--" || value === "0'") return null;
+  const normalized = value
+    .toLowerCase()
+    .replace(/feet|foot|ft/g, "'")
+    .replace(/inches|inch|in/g, '"')
+    .replace(/\s+/g, "")
+    .replace(/[–—]/g, "-");
+  const footMarkMatch = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/);
+  if (footMarkMatch) {
+    const feet = Number(footMarkMatch[1]);
+    const inches = Number(footMarkMatch[2] || 0);
+    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
+    return feet + inches / 12;
+  }
+  const plain = Number(normalized.replace(/"/g, ""));
+  return Number.isNaN(plain) || plain === 0 ? null : plain;
+}
+
+// Compute per-leg frame count from elevation heights stored in overlay geometry
+// Each elevation direction maps to a compass side; legs on that side use that elevation's height
+function getFrameTallForPoint(
+  point: PlanPoint,
+  allPoints: PlanPoint[],
+  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>,
+  frameHeight: number,
+  workerReachHeight: number,
+  defaultFrameTall: number,
+): number {
+  if (!allPoints.length || !elevationHeights.length) return defaultFrameTall;
+
+  // Determine which side of the bounding box this point is closest to
+  const minX = Math.min(...allPoints.map((p) => p.x));
+  const maxX = Math.max(...allPoints.map((p) => p.x));
+  const minY = Math.min(...allPoints.map((p) => p.y));
+  const maxY = Math.max(...allPoints.map((p) => p.y));
+
+  const distToNorth = Math.abs(point.y - minY); // top edge = North
+  const distToSouth = Math.abs(point.y - maxY); // bottom edge = South
+  const distToWest = Math.abs(point.x - minX);  // left edge = West
+  const distToEast = Math.abs(point.x - maxX);  // right edge = East
+
+  const minDist = Math.min(distToNorth, distToSouth, distToWest, distToEast);
+
+  let elevationName = "North";
+  if (minDist === distToSouth) elevationName = "South";
+  else if (minDist === distToEast) elevationName = "East";
+  else if (minDist === distToWest) elevationName = "West";
+
+  const elev = elevationHeights.find((e) => e.elevation === elevationName);
+  if (!elev) return defaultFrameTall;
+
+  const base = parseFeetInches(elev.overallHeightInput) ?? 0;
+  const below = elev.belowGradeEnabled ? parseFeetInches(elev.belowGradeInput) ?? 0 : 0;
+  const wallHeight = base + below;
+  if (wallHeight <= 0) return defaultFrameTall;
+
+  return Math.ceil((wallHeight - workerReachHeight) / frameHeight);
+}
+
 export default function SetScaffoldPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scaffoldWidth, setScaffoldWidth] = useState<ScaffoldWidth>("3'");
   const [plankType, setPlankType] = useState<PlankType>("Wood");
   const [standardBayLength, setStandardBayLength] = useState("10'");
+  // Turnaround: ON = double legs at all corners; OFF = inner corner leg removed
   const [turnaroundBays, setTurnaroundBays] = useState(true);
   const [activePiece, setActivePiece] = useState<PieceType>("Straight Bay");
   const [showOverlay, setShowOverlay] = useState(true);
@@ -101,8 +163,11 @@ export default function SetScaffoldPage() {
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
   const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
 
+  const frameHeight = 6 + 4 / 12; // 6'-4"
+  const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
   const frameHeightCount = activeElevationData?.quantityEngine.frameTall ?? 7;
   const scaffoldOffset = 12;
+
   const storedOverlayRows = useMemo(
     () => getScaledOverlayRows(activeElevationData, 1200, 720, 110),
     [activeElevationData],
@@ -116,14 +181,12 @@ export default function SetScaffoldPage() {
     [activeElevationData],
   );
   const scaffoldOutline = storedScaffoldOutline ?? currentLevelOutline;
-
-  // PHASE 0 FIX: when no real traced geometry exists yet, the tick
-  // marks fall back to a generic placeholder shape. Bay/leg/frame
-  // counts are still accurate (calculated from linear feet directly),
-  // but the on-screen SHAPE doesn't represent the real building until
-  // the user traces Full Overlay in Takeoff Workspace. This flag
-  // drives a visible warning so that distinction is never silent.
   const isUsingFallbackGeometry = !storedScaffoldOutline;
+
+  // Extract elevation heights from stored overlay geometry for per-leg frame counts
+  const storedElevationHeights = useMemo(() => {
+    return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
+  }, [activeElevationData]);
 
   useEffect(() => {
     function loadActiveElevation() {
@@ -151,32 +214,37 @@ export default function SetScaffoldPage() {
     return 2;
   }, [scaffoldWidth]);
 
+  // Corner count adjusts based on turnaround toggle
+  const cornerCount = scaffoldOutline.length;
   const totals = useMemo(() => {
     if (activeElevationData) {
+      const baseLegCount = activeElevationData.quantityEngine.legCount;
+      // When turnaround is OFF: inner corner legs are removed — subtract one leg per corner
+      const adjustedLegCount = turnaroundBays ? baseLegCount : Math.max(0, baseLegCount - cornerCount);
+      const frames = adjustedLegCount * frameHeightCount;
+      const planks = activeElevationData.quantityEngine.plankCount;
       return {
         bays: activeElevationData.quantityEngine.bayCount,
-        legs: activeElevationData.quantityEngine.legCount,
-        frames: activeElevationData.quantityEngine.frameCount,
-        planks: activeElevationData.quantityEngine.plankCount,
+        legs: adjustedLegCount,
+        frames,
+        planks,
         braces: activeElevationData.quantityEngine.crossBraceCount,
       };
     }
 
     const bays = runSummary.reduce((sum, item) => sum + item.bays, 0);
     const legs = runSummary.reduce((sum, item) => sum + item.legs, 0);
-    const frames = legs * frameHeightCount;
+    const adjustedLegs = turnaroundBays ? legs : Math.max(0, legs - cornerCount);
+    const frames = adjustedLegs * frameHeightCount;
     const planks = bays * plankCountPerBay * frameHeightCount;
     const braces = bays - 5;
 
-    return { bays, legs, frames, planks, braces };
-  }, [activeElevationData, frameHeightCount, plankCountPerBay]);
+    return { bays, legs: adjustedLegs, frames, planks, braces };
+  }, [activeElevationData, frameHeightCount, plankCountPerBay, turnaroundBays, cornerCount]);
 
   function saveScaffoldInput(updates: Partial<ScaffoldInput>) {
     const current = activeElevationData ?? getActiveElevation();
-    const scaffoldInput = {
-      ...current.scaffoldInput,
-      ...updates,
-    };
+    const scaffoldInput = { ...current.scaffoldInput, ...updates };
     const quantityEngine = calculateQuantityEngine({
       linearFeet: current.linearFeet,
       wallHeight: current.wallHeight,
@@ -187,12 +255,8 @@ export default function SetScaffoldPage() {
       ...current,
       scaffoldInput,
       quantityEngine,
-      sectionView: {
-        ...current.sectionView,
-        wallOffset: scaffoldInput.wallOffset,
-      },
+      sectionView: { ...current.sectionView, wallOffset: scaffoldInput.wallOffset },
     };
-
     setActiveElevationData(nextElevation);
     saveActiveElevation(nextElevation);
   }
@@ -221,23 +285,26 @@ export default function SetScaffoldPage() {
             <KorbanHeaderMeta label="Project" value={activeProjectName} />
             <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
             <KorbanHeaderMeta label="Reference" value={projectInfo.reference} />
-            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">
-              Project Plan Desk
-            </KorbanButton>
-            <KorbanButton as="a" href="/estimate-review" variant="primary">
-              Save & Continue
-            </KorbanButton>
+            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
+            <KorbanButton as="a" href="/estimate-review" variant="primary">Save & Continue</KorbanButton>
           </>
         }
       />
 
       <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
+        {/* Canvas */}
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
           <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
             <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay((current) => !current)} />
             <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold((current) => !current)} />
             <StatusPill label="Grid" value="5' increments" />
             <StatusPill label="Frame Tall" value={String(frameHeightCount)} />
+            <StatusPill
+              label="Turnaround"
+              active={turnaroundBays}
+              onClick={() => setTurnaroundBays((current) => !current)}
+              value={turnaroundBays ? "ON" : "OFF"}
+            />
             {isUsingFallbackGeometry && (
               <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs font-bold text-yellow-300">
                 ⚠ Placeholder shape — trace Full Overlay in Takeoff Workspace for accurate tick marks
@@ -257,10 +324,11 @@ export default function SetScaffoldPage() {
               <svg viewBox="0 0 1200 720" className="h-full w-full">
                 <GridAxisLabels />
 
+                {/* N/S/E/W compass labels */}
+                <CompassLabels />
+
                 <g>
-                  <text x="72" y="98" fill="#a1a1aa" fontSize="11" fontWeight="700">
-                    PROJECT OVERLAY
-                  </text>
+                  <text x="72" y="98" fill="#a1a1aa" fontSize="11" fontWeight="700">PROJECT OVERLAY</text>
                   <line x1="72" y1="120" x2="112" y2="120" stroke="#2563eb" strokeWidth="2" />
                   <text x="124" y="124" fill="#a1a1aa" fontSize="10">CURRENT LEVEL</text>
                   <line x1="72" y1="142" x2="112" y2="142" stroke="#22c55e" strokeWidth="2" />
@@ -274,19 +342,11 @@ export default function SetScaffoldPage() {
                     <g>
                       <path
                         d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z"
-                        fill="transparent"
-                        stroke="#2563eb"
-                        strokeWidth="0.7"
-                        strokeLinejoin="miter"
+                        fill="transparent" stroke="#2563eb" strokeWidth="0.7" strokeLinejoin="miter"
                       />
-
                       <path
                         d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z"
-                        fill="transparent"
-                        stroke="#22c55e"
-                        strokeWidth="0.6"
-                        strokeLinejoin="miter"
-                        opacity="0.9"
+                        fill="transparent" stroke="#22c55e" strokeWidth="0.6" strokeLinejoin="miter" opacity="0.9"
                       />
                     </g>
                   )
@@ -294,7 +354,15 @@ export default function SetScaffoldPage() {
 
                 {showScaffold && (
                   <g className="scaffold-plan">
-                    <OffsetScaffoldTicks points={scaffoldOutline} offset={scaffoldOffset} frameTall={frameHeightCount} />
+                    <OffsetScaffoldTicks
+                      points={scaffoldOutline}
+                      offset={scaffoldOffset}
+                      frameTall={frameHeightCount}
+                      turnaroundBays={turnaroundBays}
+                      elevationHeights={storedElevationHeights}
+                      frameHeight={frameHeight}
+                      workerReachHeight={workerReachHeight}
+                    />
                   </g>
                 )}
               </svg>
@@ -323,6 +391,7 @@ export default function SetScaffoldPage() {
           </div>
         </section>
 
+        {/* Sidebar */}
         <aside className="overflow-y-auto bg-[#080604] p-4">
           <Panel title="Backend Takeoff Info" subtitle="Current scaffold defaults">
             <ControlLabel label="Frame Width">
@@ -349,13 +418,23 @@ export default function SetScaffoldPage() {
               <input value={standardBayLength} onChange={(event) => updateStandardBayLength(event.target.value)} className="control-input" />
             </ControlLabel>
 
+            {/* Turnaround toggle — moved here for clarity */}
             <button
               onClick={() => setTurnaroundBays((current) => !current)}
               className={`mt-3 flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left ${
-                turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 bg-black text-zinc-500"
+                turnaroundBays
+                  ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                  : "border-zinc-800 bg-black text-zinc-500"
               }`}
             >
-              <span className="text-xs font-bold">Turnaround Bays</span>
+              <div>
+                <span className="text-xs font-bold">Turnaround Bays</span>
+                <p className="mt-0.5 text-[10px] text-zinc-600">
+                  {turnaroundBays
+                    ? "ON — double legs kept at all corners"
+                    : "OFF — inner corner leg removed, count adjusted"}
+                </p>
+              </div>
               <span className="font-mono text-xs font-bold">{turnaroundBays ? "ON" : "OFF"}</span>
             </button>
 
@@ -371,7 +450,9 @@ export default function SetScaffoldPage() {
                   key={piece.type}
                   onClick={() => setActivePiece(piece.type)}
                   className={`rounded-2xl border p-3 text-left transition ${
-                    activePiece === piece.type ? "border-orange-500/50 bg-orange-500/10" : "border-zinc-800 bg-black hover:border-orange-500/30"
+                    activePiece === piece.type
+                      ? "border-orange-500/50 bg-orange-500/10"
+                      : "border-zinc-800 bg-black hover:border-orange-500/30"
                   }`}
                 >
                   <p className="text-[11px] font-bold text-zinc-200">{piece.type}</p>
@@ -394,6 +475,7 @@ export default function SetScaffoldPage() {
               <QuantityRow label="Cross Braces" value={totals.braces.toLocaleString()} />
               <QuantityRow label="Plank Type" value={plankType} />
               <QuantityRow label="Total Planks" value={totals.planks.toLocaleString()} />
+              <QuantityRow label="Corner Condition" value={turnaroundBays ? "Double Leg" : "Single Leg"} />
             </div>
 
             <div className="mt-4 space-y-2">
@@ -445,13 +527,8 @@ export default function SetScaffoldPage() {
           color: rgb(253 186 116);
           outline: none;
         }
-
-        .control-input:focus {
-          border-color: rgba(249, 115, 22, 0.55);
-        }
-
-        .next-link,
-        .next-link-primary {
+        .control-input:focus { border-color: rgba(249, 115, 22, 0.55); }
+        .next-link, .next-link-primary {
           display: block;
           border-radius: 0.9rem;
           padding: 0.9rem 1rem;
@@ -459,24 +536,29 @@ export default function SetScaffoldPage() {
           font-size: 0.8rem;
           font-weight: 800;
         }
-
-        .next-link {
-          border: 1px solid rgb(39 39 42);
-          background: #000;
-          color: rgb(212 212 216);
-        }
-
-        .next-link-primary {
-          background: rgb(249 115 22);
-          color: #000;
-        }
+        .next-link { border: 1px solid rgb(39 39 42); background: #000; color: rgb(212 212 216); }
+        .next-link-primary { background: rgb(249 115 22); color: #000; }
       `}</style>
     </main>
   );
 }
 
-type RunOrientation = "horizontal" | "vertical";
-type RunNormal = "up" | "down" | "left" | "right";
+// ── Compass N/S/E/W labels placed at edges of the SVG viewport ──
+function CompassLabels() {
+  const style = { fontSize: "13", fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
+  return (
+    <g>
+      {/* North — top center */}
+      <text x="600" y="72" textAnchor="middle" {...style}>N</text>
+      {/* South — bottom center */}
+      <text x="600" y="700" textAnchor="middle" {...style}>S</text>
+      {/* West — left center */}
+      <text x="30" y="365" textAnchor="middle" {...style}>W</text>
+      {/* East — right center */}
+      <text x="1170" y="365" textAnchor="middle" {...style}>E</text>
+    </g>
+  );
+}
 
 function isFiniteNumber(value: number) {
   return Number.isFinite(value);
@@ -489,24 +571,19 @@ function isFinitePoint(point: PlanPoint) {
 function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
   const geometry = elevation?.overlayGeometry;
   if (!geometry) return [];
-
   const keyFullOverlay = geometry.fullOverlayRows.find((row) => row.isKeyFloor && row.points.length >= 3);
   const firstFullOverlay = geometry.fullOverlayRows.find((row) => row.points.length >= 3);
-  const firstWallSegment = geometry.wallSegments.find((segment) => segment.length >= 3);
-
   if (geometry.tracedPerimeter.length >= 3) return geometry.tracedPerimeter;
   if (geometry.overlayPoints.length >= 3) return geometry.overlayPoints;
   if (keyFullOverlay) return keyFullOverlay.points;
   if (firstFullOverlay) return firstFullOverlay.points;
   if (geometry.elevationPoints.length >= 3) return geometry.elevationPoints;
-  if (firstWallSegment) return firstWallSegment;
   return [];
 }
 
 function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number) {
   const validPoints = points.filter(isFinitePoint);
   if (validPoints.length < 2) return [];
-
   const minX = Math.min(...validPoints.map((point) => point.x));
   const maxX = Math.max(...validPoints.map((point) => point.x));
   const minY = Math.min(...validPoints.map((point) => point.y));
@@ -518,7 +595,6 @@ function mapGeometryPoints(points: PlanPoint[], width: number, height: number, p
   const drawnHeight = geometryHeight * scale;
   const offsetX = padding + (width - padding * 2 - drawnWidth) / 2;
   const offsetY = padding + (height - padding * 2 - drawnHeight) / 2;
-
   return validPoints.map((point) => ({
     x: offsetX + (point.x - minX) * scale,
     y: offsetY + (point.y - minY) * scale,
@@ -535,21 +611,10 @@ function getScaledOverlayRows(elevation: ProjectElevation | null, width: number,
   const geometry = elevation?.overlayGeometry;
   const basePoints = getPrimaryGeometryPoints(elevation);
   if (!geometry || basePoints.length < 2) return [];
-
   const allRows = geometry.fullOverlayRows.filter((row) => row.points.length >= 2);
   const fallbackRows = allRows.length
     ? allRows
-    : [
-        {
-          id: 0,
-          isKeyFloor: true,
-          level: geometry.levelName,
-          points: basePoints,
-          closed: basePoints.length >= 3,
-          color: "#2563eb",
-        },
-      ];
-
+    : [{ id: 0, isKeyFloor: true, level: geometry.levelName, points: basePoints, closed: basePoints.length >= 3, color: "#2563eb" }];
   const allPoints = fallbackRows.flatMap((row) => row.points);
   return fallbackRows.map((row, index) => ({
     id: row.id ?? index,
@@ -564,7 +629,6 @@ function getScaledOverlayRows(elevation: ProjectElevation | null, width: number,
 function getScaledReferencePoints(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
   const geometry = elevation?.overlayGeometry;
   if (!geometry || geometry.referencePoints.length < 1) return [];
-
   const basePoints = getPrimaryGeometryPoints(elevation);
   const allPoints = [...basePoints, ...geometry.referencePoints];
   const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding);
@@ -577,10 +641,7 @@ function pointsToSvgPath(points: PlanPoint[], closed: boolean) {
   return `M${first.x} ${first.y} ${rest.map((point) => `L${point.x} ${point.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
 }
 
-function StoredTakeoffOverlay({
-  rows,
-  referencePoints,
-}: {
+function StoredTakeoffOverlay({ rows, referencePoints }: {
   rows: Array<{ id: number; level: string; isKeyFloor: boolean; closed: boolean; color: string; points: PlanPoint[] }>;
   referencePoints: PlanPoint[];
 }) {
@@ -615,10 +676,18 @@ function OffsetScaffoldTicks({
   points,
   offset,
   frameTall,
+  turnaroundBays,
+  elevationHeights,
+  frameHeight,
+  workerReachHeight,
 }: {
   points: PlanPoint[];
   offset: number;
   frameTall: number;
+  turnaroundBays: boolean;
+  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>;
+  frameHeight: number;
+  workerReachHeight: number;
 }) {
   const tickLength = 10;
   const labelOffset = 21;
@@ -626,7 +695,6 @@ function OffsetScaffoldTicks({
   const duplicateCornerTolerance = 2;
 
   const validPoints = points.filter(isFinitePoint);
-
   if (validPoints.length < 2 || !isFiniteNumber(offset) || !isFiniteNumber(frameTall)) return null;
 
   const closedSegments = validPoints.map((point, index) => ({
@@ -634,55 +702,42 @@ function OffsetScaffoldTicks({
     end: validPoints[(index + 1) % validPoints.length],
   }));
 
+  function getLocalFrameTall(point: PlanPoint): number {
+    if (elevationHeights.length === 0) return frameTall;
+    return getFrameTallForPoint(point, validPoints, elevationHeights, frameHeight, workerReachHeight, frameTall);
+  }
+
   function renderScaffoldTick({
     key,
     tickCenter,
     labelPoint,
     outward,
+    localFrameTall,
   }: {
     key: string;
     tickCenter: PlanPoint;
     labelPoint: PlanPoint;
     outward: PlanPoint;
+    localFrameTall: number;
   }) {
     if (!isFinitePoint(tickCenter) || !isFinitePoint(labelPoint) || !isFinitePoint(outward)) return null;
-
     const tick = {
       x1: tickCenter.x - outward.x * (tickLength / 2),
       y1: tickCenter.y - outward.y * (tickLength / 2),
       x2: tickCenter.x + outward.x * (tickLength / 2),
       y2: tickCenter.y + outward.y * (tickLength / 2),
     };
-
-    if (
-      !isFiniteNumber(tick.x1) ||
-      !isFiniteNumber(tick.y1) ||
-      !isFiniteNumber(tick.x2) ||
-      !isFiniteNumber(tick.y2)
-    ) {
-      return null;
-    }
+    if (!isFiniteNumber(tick.x1) || !isFiniteNumber(tick.y1) || !isFiniteNumber(tick.x2) || !isFiniteNumber(tick.y2)) return null;
 
     return (
       <g key={key}>
-        <line
-          x1={tick.x1}
-          y1={tick.y1}
-          x2={tick.x2}
-          y2={tick.y2}
-          strokeWidth="1"
-        />
+        <line x1={tick.x1} y1={tick.y1} x2={tick.x2} y2={tick.y2} strokeWidth="1" />
         <text
-          x={labelPoint.x}
-          y={labelPoint.y}
-          fontSize="5"
-          fontFamily="monospace"
-          fontWeight="300"
-          opacity="0.62"
-          textAnchor="middle"
-          dominantBaseline="middle"
+          x={labelPoint.x} y={labelPoint.y}
+          fontSize="5" fontFamily="monospace" fontWeight="300"
+          opacity="0.62" textAnchor="middle" dominantBaseline="middle"
         >
-          {frameTall}
+          {localFrameTall}
         </text>
       </g>
     );
@@ -704,140 +759,82 @@ function OffsetScaffoldTicks({
           { length: interiorTickCount },
           (_, tickIndex) => ((tickIndex + 1) * length) / (interiorTickCount + 1),
         );
-        const tickData = [
-          0,
-          ...distances,
-          length,
-        ].map((distance) => {
+        const tickData = [0, ...distances, length].map((distance) => {
           const t = distance / length;
-          const facePoint = {
-            x: start.x + dx * t,
-            y: start.y + dy * t,
-          };
-          const tickCenter = {
-            x: facePoint.x + outward.x * offset,
-            y: facePoint.y + outward.y * offset,
-          };
-          const labelPoint = {
-            x: facePoint.x + outward.x * labelOffset,
-            y: facePoint.y + outward.y * labelOffset,
-          };
-
-          return {
-            distance,
-            tickCenter,
-            labelPoint,
-            segmentIndex,
-          };
-        }).filter(({ distance, tickCenter, labelPoint, segmentIndex }) =>
-          isFiniteNumber(distance) &&
-          isFinitePoint(tickCenter) &&
-          isFinitePoint(labelPoint) &&
-          Number.isInteger(segmentIndex),
+          const facePoint = { x: start.x + dx * t, y: start.y + dy * t };
+          const tickCenter = { x: facePoint.x + outward.x * offset, y: facePoint.y + outward.y * offset };
+          const labelPoint = { x: facePoint.x + outward.x * labelOffset, y: facePoint.y + outward.y * labelOffset };
+          return { distance, tickCenter, labelPoint, segmentIndex };
+        }).filter(({ distance, tickCenter, labelPoint }) =>
+          isFiniteNumber(distance) && isFinitePoint(tickCenter) && isFinitePoint(labelPoint),
         );
         if (!tickData.length) return null;
 
         return (
           <g key={`scaffold-segment-${segmentIndex}`}>
             {tickData.map(({ distance, tickCenter, labelPoint }, tickIndex) => {
-              const isDuplicateRegularEndpointTick =
+              const isDuplicateEndpoint =
                 distance <= duplicateCornerTolerance ||
                 length - distance <= duplicateCornerTolerance;
+              if (isDuplicateEndpoint) return null;
 
-              if (isDuplicateRegularEndpointTick) return null;
+              const localFrameTall = getLocalFrameTall(tickCenter);
 
               return renderScaffoldTick({
                 key: `scaffold-tick-${segmentIndex}-${tickIndex}`,
                 tickCenter,
                 labelPoint,
                 outward,
+                localFrameTall,
               });
             })}
 
             {tickData.slice(0, -1).map((current, tickIndex) => {
-                const next = tickData[tickIndex + 1];
-                if (
-                  current.segmentIndex !== next.segmentIndex
-                ) {
-                  return null;
-                }
+              const next = tickData[tickIndex + 1];
+              if (current.segmentIndex !== next.segmentIndex) return null;
+              const center = {
+                x: (current.tickCenter.x + next.tickCenter.x) / 2,
+                y: (current.tickCenter.y + next.tickCenter.y) / 2,
+              };
+              const along = { x: dx / length, y: dy / length };
+              const braceLength = Math.min(14, Math.max(6, (next.distance - current.distance) * 0.34));
+              const braceDepth = 3;
+              const brace = {
+                x1: center.x - along.x * (braceLength / 2) - outward.x * braceDepth,
+                y1: center.y - along.y * (braceLength / 2) - outward.y * braceDepth,
+                x2: center.x + along.x * (braceLength / 2) + outward.x * braceDepth,
+                y2: center.y + along.y * (braceLength / 2) + outward.y * braceDepth,
+              };
+              if (!isFinitePoint(center) || !isFinitePoint(along) || !isFiniteNumber(braceLength) ||
+                !isFiniteNumber(brace.x1) || !isFiniteNumber(brace.y1) || !isFiniteNumber(brace.x2) || !isFiniteNumber(brace.y2)) return null;
 
-                const center = {
-                  x: (current.tickCenter.x + next.tickCenter.x) / 2,
-                  y: (current.tickCenter.y + next.tickCenter.y) / 2,
-                };
-                const along = { x: dx / length, y: dy / length };
-                const braceLength = Math.min(14, Math.max(6, (next.distance - current.distance) * 0.34));
-                const braceDepth = 3;
-                const brace = {
-                  x1: center.x - along.x * (braceLength / 2) - outward.x * braceDepth,
-                  y1: center.y - along.y * (braceLength / 2) - outward.y * braceDepth,
-                  x2: center.x + along.x * (braceLength / 2) + outward.x * braceDepth,
-                  y2: center.y + along.y * (braceLength / 2) + outward.y * braceDepth,
-                };
-
-                if (
-                  !isFinitePoint(center) ||
-                  !isFinitePoint(along) ||
-                  !isFiniteNumber(braceLength) ||
-                  !isFiniteNumber(brace.x1) ||
-                  !isFiniteNumber(brace.y1) ||
-                  !isFiniteNumber(brace.x2) ||
-                  !isFiniteNumber(brace.y2)
-                ) {
-                  return null;
-                }
-
-                return (
-                  <line
-                    key={`brace-${segmentIndex}-${tickIndex}`}
-                    x1={brace.x1}
-                    y1={brace.y1}
-                    x2={brace.x2}
-                    y2={brace.y2}
-                    strokeWidth="0.4"
-                    opacity="0.34"
-                  />
-                );
-              })}
+              return (
+                <line
+                  key={`brace-${segmentIndex}-${tickIndex}`}
+                  x1={brace.x1} y1={brace.y1} x2={brace.x2} y2={brace.y2}
+                  strokeWidth="0.4" opacity="0.34"
+                />
+              );
+            })}
           </g>
         );
       })}
 
+      {/* Corner legs — turnaround toggle controls double vs single */}
       {validPoints.map((cornerPoint, cornerIndex) => {
         const previousPoint = validPoints[(cornerIndex - 1 + validPoints.length) % validPoints.length];
         const nextPoint = validPoints[(cornerIndex + 1) % validPoints.length];
-        const incoming = {
-          dx: cornerPoint.x - previousPoint.x,
-          dy: cornerPoint.y - previousPoint.y,
-        };
-        const outgoing = {
-          dx: nextPoint.x - cornerPoint.x,
-          dy: nextPoint.y - cornerPoint.y,
-        };
+        const incoming = { dx: cornerPoint.x - previousPoint.x, dy: cornerPoint.y - previousPoint.y };
+        const outgoing = { dx: nextPoint.x - cornerPoint.x, dy: nextPoint.y - cornerPoint.y };
         const incomingLength = Math.sqrt(incoming.dx * incoming.dx + incoming.dy * incoming.dy);
         const outgoingLength = Math.sqrt(outgoing.dx * outgoing.dx + outgoing.dy * outgoing.dy);
+        if (!isFiniteNumber(incomingLength) || !isFiniteNumber(outgoingLength) || incomingLength <= 0 || outgoingLength <= 0) return null;
 
-        if (
-          !isFiniteNumber(incomingLength) ||
-          !isFiniteNumber(outgoingLength) ||
-          incomingLength <= 0 ||
-          outgoingLength <= 0
-        ) {
-          return null;
-        }
-
-        const incomingOutward = {
-          x: incoming.dy / incomingLength,
-          y: -incoming.dx / incomingLength,
-        };
-        const outgoingOutward = {
-          x: outgoing.dy / outgoingLength,
-          y: -outgoing.dx / outgoingLength,
-        };
-
+        const incomingOutward = { x: incoming.dy / incomingLength, y: -incoming.dx / incomingLength };
+        const outgoingOutward = { x: outgoing.dy / outgoingLength, y: -outgoing.dx / outgoingLength };
         if (!isFinitePoint(incomingOutward) || !isFinitePoint(outgoingOutward)) return null;
 
+        // The boxed (inner) corner tick — only shown when turnaroundBays is ON
         const boxedCornerTick = {
           x: cornerPoint.x + incomingOutward.x * offset + outgoingOutward.x * offset,
           y: cornerPoint.y + incomingOutward.y * offset + outgoingOutward.y * offset,
@@ -847,344 +844,51 @@ function OffsetScaffoldTicks({
           y: cornerPoint.y + incomingOutward.y * labelOffset + outgoingOutward.y * offset,
         };
 
+        const localFrameTall = getLocalFrameTall(cornerPoint);
+
         return (
           <g key={`corner-scaffold-ticks-${cornerIndex}`}>
+            {/* Incoming corner leg — always shown */}
             {renderScaffoldTick({
               key: `corner-incoming-${cornerIndex}`,
-              tickCenter: {
-                x: cornerPoint.x + incomingOutward.x * offset,
-                y: cornerPoint.y + incomingOutward.y * offset,
-              },
-              labelPoint: {
-                x: cornerPoint.x + incomingOutward.x * labelOffset,
-                y: cornerPoint.y + incomingOutward.y * labelOffset,
-              },
+              tickCenter: { x: cornerPoint.x + incomingOutward.x * offset, y: cornerPoint.y + incomingOutward.y * offset },
+              labelPoint: { x: cornerPoint.x + incomingOutward.x * labelOffset, y: cornerPoint.y + incomingOutward.y * labelOffset },
               outward: incomingOutward,
+              localFrameTall,
             })}
+            {/* Outgoing corner leg — always shown */}
             {renderScaffoldTick({
               key: `corner-outgoing-${cornerIndex}`,
-              tickCenter: {
-                x: cornerPoint.x + outgoingOutward.x * offset,
-                y: cornerPoint.y + outgoingOutward.y * offset,
-              },
-              labelPoint: {
-                x: cornerPoint.x + outgoingOutward.x * labelOffset,
-                y: cornerPoint.y + outgoingOutward.y * labelOffset,
-              },
+              tickCenter: { x: cornerPoint.x + outgoingOutward.x * offset, y: cornerPoint.y + outgoingOutward.y * offset },
+              labelPoint: { x: cornerPoint.x + outgoingOutward.x * labelOffset, y: cornerPoint.y + outgoingOutward.y * labelOffset },
               outward: outgoingOutward,
+              localFrameTall,
             })}
-            {isFinitePoint(boxedCornerTick) &&
-              isFinitePoint(boxedCornerLabel) &&
+            {/* Inner (boxed) corner leg — only shown when turnaroundBays is ON */}
+            {turnaroundBays && isFinitePoint(boxedCornerTick) && isFinitePoint(boxedCornerLabel) &&
               renderScaffoldTick({
                 key: `corner-boxed-leg-${cornerIndex}`,
                 tickCenter: boxedCornerTick,
                 labelPoint: boxedCornerLabel,
                 outward: incomingOutward,
+                localFrameTall,
               })}
           </g>
         );
       })}
-
     </g>
-  );
-}
-
-function StraightRun({
-  x1,
-  y1,
-  x2,
-  y2,
-  bays,
-  orientation,
-  normal,
-  frameTall,
-  gap,
-  short = false,
-  omitStart = false,
-  omitEnd = false,
-}: {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  bays: number;
-  orientation: RunOrientation;
-  normal: RunNormal;
-  frameTall: number;
-  gap: number;
-  short?: boolean;
-  omitStart?: boolean;
-  omitEnd?: boolean;
-}) {
-  const outwardOffset =
-    normal === "up"
-      ? { x: 0, y: -gap }
-      : normal === "down"
-        ? { x: 0, y: gap }
-        : normal === "left"
-          ? { x: -gap, y: 0 }
-          : { x: gap, y: 0 };
-  const points = Array.from({ length: bays + 1 }, (_, index) => {
-    const t = index / bays;
-    return {
-      x: x1 + (x2 - x1) * t,
-      y: y1 + (y2 - y1) * t,
-    };
-  });
-
-  const tick = 9;
-  const labelPoint = points[Math.floor(points.length / 2)];
-
-  function tickLine(point: { x: number; y: number }) {
-    const scaffoldPoint = { x: point.x + outwardOffset.x, y: point.y + outwardOffset.y };
-
-    if (orientation === "horizontal") {
-      return { x1: scaffoldPoint.x, y1: scaffoldPoint.y - tick / 2, x2: scaffoldPoint.x, y2: scaffoldPoint.y + tick / 2 };
-    }
-
-    return { x1: scaffoldPoint.x - tick / 2, y1: scaffoldPoint.y, x2: scaffoldPoint.x + tick / 2, y2: scaffoldPoint.y };
-  }
-
-  return (
-    <g stroke="#f8fafc" fill="none" strokeLinecap="square" strokeLinejoin="miter">
-      {points.map((point, index) => {
-        if ((index === 0 && omitStart) || (index === points.length - 1 && omitEnd)) return null;
-
-        const legLine = tickLine(point);
-
-        return (
-          <g key={`leg-${x1}-${y1}-${index}`}>
-            <line {...legLine} strokeWidth="1.1" opacity="0.82" />
-          </g>
-        );
-      })}
-
-      {!short && (
-        <FrameHeightLabel
-          x={labelPoint.x + outwardOffset.x}
-          y={labelPoint.y + outwardOffset.y}
-          normal={normal}
-          value={frameTall}
-        />
-      )}
-
-      {!short && points.slice(0, -1).map((point, index) => {
-        const next = points[index + 1];
-        const inset = 12;
-        const start = { x: point.x + outwardOffset.x, y: point.y + outwardOffset.y };
-        const end = { x: next.x + outwardOffset.x, y: next.y + outwardOffset.y };
-
-        if (orientation === "horizontal") {
-          return (
-            <line
-              key={`brace-${x1}-${y1}-${index}`}
-              x1={Math.min(start.x, end.x) + inset}
-              y1={start.y - 5}
-              x2={Math.max(start.x, end.x) - inset}
-              y2={start.y + 5}
-              strokeWidth="0.8"
-              opacity="0.62"
-            />
-          );
-        }
-
-        return (
-          <line
-            key={`brace-${x1}-${y1}-${index}`}
-            x1={start.x - 5}
-            y1={Math.min(start.y, end.y) + inset}
-            x2={start.x + 5}
-            y2={Math.max(start.y, end.y) - inset}
-            strokeWidth="0.8"
-            opacity="0.62"
-          />
-        );
-      })}
-    </g>
-  );
-}
-
-function TurnaroundBay({
-  x,
-  y,
-  width,
-  height,
-  direction,
-  frameTall,
-  gap,
-}: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  direction: "up" | "down";
-  frameTall: number;
-  gap: number;
-}) {
-  const y2 = direction === "down" ? y + height : y - height;
-  const offsetY = direction === "down" ? gap : -gap;
-  const tickY = y + offsetY;
-  const tickY2 = y2 + (direction === "down" ? -gap : gap);
-
-  return (
-    <g stroke="#f8fafc" fill="none" strokeLinecap="square" strokeLinejoin="miter">
-      <CornerDoubleLeg x={x} y={tickY} type="outside" />
-      <CornerDoubleLeg x={x + width} y={tickY} type="outside" />
-      <line x1={x + width / 2 - 5} y1={tickY2} x2={x + width / 2 + 5} y2={tickY2} strokeWidth="1.1" opacity="0.82" />
-
-      <FrameHeightLabel x={x + width / 2} y={tickY} normal={direction === "down" ? "down" : "up"} value={frameTall} />
-    </g>
-  );
-}
-
-function CornerDoubleLeg({
-  x,
-  y,
-  type,
-  normal,
-  gap = 0,
-}: {
-  x: number;
-  y: number;
-  type: "inside" | "outside";
-  normal?: RunNormal;
-  gap?: number;
-}) {
-  const height = type === "inside" ? 16 : 18;
-  const legGap = type === "inside" ? 4 : 5;
-  const outwardOffset =
-    normal === "up"
-      ? { x: 0, y: -gap }
-      : normal === "down"
-        ? { x: 0, y: gap }
-        : normal === "left"
-          ? { x: -gap, y: 0 }
-          : normal === "right"
-            ? { x: gap, y: 0 }
-            : { x: 0, y: 0 };
-  const legX = x + outwardOffset.x;
-  const legY = y + outwardOffset.y;
-
-  return (
-    <g stroke="#f8fafc" fill="none" strokeLinecap="square">
-      <line x1={legX - legGap} y1={legY - height / 2} x2={legX - legGap} y2={legY + height / 2} strokeWidth="1.15" />
-      <line x1={legX + legGap} y1={legY - height / 2} x2={legX + legGap} y2={legY + height / 2} strokeWidth="1.15" />
-    </g>
-  );
-}
-
-function ShortConnection({
-  x1,
-  y1,
-  x2,
-  y2,
-  normal,
-  gap,
-}: {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  normal: RunNormal;
-  gap: number;
-}) {
-  const outwardOffset =
-    normal === "up"
-      ? { x: 0, y: -gap }
-      : normal === "down"
-        ? { x: 0, y: gap }
-        : normal === "left"
-          ? { x: -gap, y: 0 }
-          : { x: gap, y: 0 };
-  const dots = Array.from({ length: 3 }, (_, index) => {
-    const t = (index + 1) / 4;
-    return {
-      x: x1 + (x2 - x1) * t + outwardOffset.x,
-      y: y1 + (y2 - y1) * t + outwardOffset.y,
-    };
-  });
-
-  return (
-    <g fill="#f8fafc">
-      {dots.map((dot, index) => (
-        <circle key={`dot-${index}`} cx={dot.x} cy={dot.y} r="2.4" />
-      ))}
-    </g>
-  );
-}
-
-function FrameHeightLabel({ x, y, normal, value }: { x: number; y: number; normal: RunNormal; value: number }) {
-  const offset = 22;
-  const label =
-    normal === "up"
-      ? { x: x + 5, y: y - offset }
-      : normal === "down"
-        ? { x: x + 5, y: y + offset + 4 }
-        : normal === "left"
-          ? { x: x - offset, y: y + 4 }
-          : { x: x + offset - 3, y: y + 4 };
-
-  return (
-    <text x={label.x} y={label.y} fill="#f8fafc" fontSize="10" fontFamily="monospace" fontWeight="700">
-      {value}
-    </text>
   );
 }
 
 function PieceIcon({ type }: { type: PieceType }) {
   return (
     <svg viewBox="0 0 80 54" className="h-14 w-full">
-      {type === "Straight Bay" && (
-        <>
-          <line x1="18" y1="12" x2="18" y2="44" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="62" y1="12" x2="62" y2="44" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1.25" />
-          <line x1="25" y1="36" x2="55" y2="24" stroke="#f8fafc" strokeWidth="1.25" />
-        </>
-      )}
-
-      {type === "Short Bay" && (
-        <>
-          <line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1" opacity="0.55" />
-          <circle cx="30" cy="30" r="2.5" fill="#f8fafc" />
-          <circle cx="40" cy="30" r="2.5" fill="#f8fafc" />
-          <circle cx="50" cy="30" r="2.5" fill="#f8fafc" />
-        </>
-      )}
-
-      {type === "Turnaround Bay" && (
-        <>
-          <line x1="20" y1="12" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="20" y1="42" x2="60" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="60" y1="42" x2="60" y2="12" stroke="#f8fafc" strokeWidth="1.5" />
-        </>
-      )}
-
-      {type === "Inside Corner" && (
-        <>
-          <line x1="18" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="18" y1="14" x2="18" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="18" y1="42" x2="58" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="16" y1="14" x2="16" y2="42" stroke="#f8fafc" strokeWidth="1" />
-        </>
-      )}
-
-      {type === "Outside Corner" && (
-        <>
-          <line x1="20" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="20" y1="14" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="20" y1="42" x2="40" y2="42" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="23" y1="14" x2="23" y2="42" stroke="#f8fafc" strokeWidth="1" />
-        </>
-      )}
-
-      {type === "End Bay" && (
-        <>
-          <line x1="40" y1="12" x2="40" y2="44" stroke="#f8fafc" strokeWidth="1.5" />
-          <line x1="28" y1="18" x2="52" y2="18" stroke="#f8fafc" strokeWidth="1.25" />
-          <line x1="28" y1="38" x2="52" y2="38" stroke="#f8fafc" strokeWidth="1.25" />
-        </>
-      )}
+      {type === "Straight Bay" && (<><line x1="18" y1="12" x2="18" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="62" y1="12" x2="62" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1.25" /><line x1="25" y1="36" x2="55" y2="24" stroke="#f8fafc" strokeWidth="1.25" /></>)}
+      {type === "Short Bay" && (<><line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1" opacity="0.55" /><circle cx="30" cy="30" r="2.5" fill="#f8fafc" /><circle cx="40" cy="30" r="2.5" fill="#f8fafc" /><circle cx="50" cy="30" r="2.5" fill="#f8fafc" /></>)}
+      {type === "Turnaround Bay" && (<><line x1="20" y1="12" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="42" x2="60" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="60" y1="42" x2="60" y2="12" stroke="#f8fafc" strokeWidth="1.5" /></>)}
+      {type === "Inside Corner" && (<><line x1="18" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="14" x2="18" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="42" x2="58" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="16" y1="14" x2="16" y2="42" stroke="#f8fafc" strokeWidth="1" /></>)}
+      {type === "Outside Corner" && (<><line x1="20" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="14" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="42" x2="40" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="23" y1="14" x2="23" y2="42" stroke="#f8fafc" strokeWidth="1" /></>)}
+      {type === "End Bay" && (<><line x1="40" y1="12" x2="40" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="28" y1="18" x2="52" y2="18" stroke="#f8fafc" strokeWidth="1.25" /><line x1="28" y1="38" x2="52" y2="38" stroke="#f8fafc" strokeWidth="1.25" /></>)}
     </svg>
   );
 }
@@ -1192,23 +896,17 @@ function PieceIcon({ type }: { type: PieceType }) {
 function GridAxisLabels() {
   const xLabels = Array.from({ length: 21 }, (_, index) => index * 5);
   const yLabels = Array.from({ length: 15 }, (_, index) => index * 5);
-
   return (
     <g opacity="0.45">
       {xLabels.map((value, index) => (
         <g key={`x-${value}`}>
-          <text x={54 + index * 50} y="42" fill="#a1a1aa" fontSize="10" fontFamily="monospace">
-            {value}'
-          </text>
+          <text x={54 + index * 50} y="42" fill="#a1a1aa" fontSize="10" fontFamily="monospace">{value}'</text>
           <line x1={58 + index * 50} y1="49" x2={58 + index * 50} y2="62" stroke="#a1a1aa" strokeWidth="0.7" />
         </g>
       ))}
-
       {yLabels.map((value, index) => (
         <g key={`y-${value}`}>
-          <text x="18" y={76 + index * 38} fill="#a1a1aa" fontSize="10" fontFamily="monospace">
-            {value}'
-          </text>
+          <text x="18" y={76 + index * 38} fill="#a1a1aa" fontSize="10" fontFamily="monospace">{value}'</text>
           <line x1="46" y1={72 + index * 38} x2="60" y2={72 + index * 38} stroke="#a1a1aa" strokeWidth="0.7" />
         </g>
       ))}
