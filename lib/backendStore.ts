@@ -158,8 +158,8 @@ function slugify(name: string) {
 
 function buildDefaultMaterialItems(): MaterialItem[] {
   const coreRates: Record<string, number> = {
-    Frames: 14.5,
-    Planks: 6.75,
+    Frames: 4,
+    Planks: 2,
     "Cross Braces": 3.25,
     Guardrails: 4.1,
     "Base Plates": 1.85,
