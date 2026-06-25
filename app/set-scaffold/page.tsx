@@ -99,12 +99,53 @@ function segLen(a: PlanPoint, b: PlanPoint) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-// Outward normal (left-hand rule for CCW polygon = outward)
-function outwardNormal(a: PlanPoint, b: PlanPoint): PlanPoint {
-  const dx = b.x - a.x; const dy = b.y - a.y;
+// Compute signed area of polygon (positive = CCW in standard math, negative = CW)
+// In SVG coords (Y down), positive = CW visually, negative = CCW visually
+function signedArea(points: PlanPoint[]): number {
+  let area = 0;
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += points[i].x * points[j].y;
+    area -= points[j].x * points[i].y;
+  }
+  return area / 2;
+}
+
+// Returns true if polygon is wound clockwise in SVG space (Y-down)
+// Note: in SVG coords (Y increases downward), signedArea > 0 means CCW visually,
+// signedArea < 0 means CW visually — opposite of standard math convention
+function isClockwiseSVG(points: PlanPoint[]): boolean {
+  return signedArea(points) < 0;
+}
+
+// Outward normal using polygon winding order.
+// In SVG coords (Y increases downward):
+//   If polygon is CW (signedArea > 0):  outward = LEFT of travel direction
+//   If polygon is CCW (signedArea < 0): outward = RIGHT of travel direction
+// This is mathematically guaranteed correct for any simple polygon.
+function computeOutwardNormal(
+  a: PlanPoint,
+  b: PlanPoint,
+  polygon: PlanPoint[],
+): PlanPoint {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
   const len = Math.sqrt(dx * dx + dy * dy);
   if (len === 0) return { x: 0, y: -1 };
-  return { x: dy / len, y: -dx / len };
+
+  // Right of travel direction (standard CCW outward in math coords)
+  const rightNormal = { x:  dy / len, y: -dx / len };
+  // Left of travel direction
+  const leftNormal  = { x: -dy / len, y:  dx / len };
+
+  if (polygon.length < 3) return rightNormal;
+
+  const area = signedArea(polygon);
+  // SVG Y-down: CW polygon has area > 0, CCW has area < 0
+  // CW polygon → outward is LEFT of travel
+  // CCW polygon → outward is RIGHT of travel
+  return area > 0 ? rightNormal : leftNormal;
 }
 
 function getFrameTallForPoint(
@@ -136,133 +177,182 @@ function getFrameTallForPoint(
   return Math.ceil((wallHeight - workerReachHeight) / frameHeight);
 }
 
-// ── Scaffold run computation — Rule Set v3.0 ─────────────────────────────────
-//
-// Returns an array of leg positions (SVG coordinates) for a single wall segment.
-// Each leg is perpendicular to the wall and offset 1' outward from the wall face.
-//
-// Rules applied (all distances in SVG pixels, converted from feet via pageUnitsPerFoot):
-//   RULE 0  — Every tick 1' offset from wall face
-//   RULE 1  — First leg at scaffoldWidth + 1' from start corner
-//   RULE 1b — Turnaround: first/last offset legs get inner mirror at scaffoldWidth distance
-//   RULE 2  — Maximize full bays; short bay at end always gets a tick
-//             Max gap from last leg to end corner = 8'; if >8' place one more leg
-//             If short remainder can't reach scaffoldWidth+1' offset → leg at corner itself
-//   RULE 7  — Always maximize full standard bays first
+// ── Scaffold Run Algorithm — Rule Set v4.0 ───────────────────────────────────
 
 type LegResult = {
-  wallPoint: PlanPoint;   // point on wall face
-  tickCenter: PlanPoint;  // 1' offset outward
-  labelPoint: PlanPoint;  // further offset for frame count label
-  isTurnaroundMirror: boolean; // is this the inner mirror leg of a turnaround bay?
+  wallPoint: PlanPoint;
+  tickTip: PlanPoint;
+  labelPoint: PlanPoint;
+  isTurnaroundMirror: boolean;
   isStartLeg: boolean;
   isEndLeg: boolean;
 };
 
+const STANDARD_BAY_LENGTHS_FT = [10, 8, 7, 5];
+const CROSS_PLANK_MAX_FT = 8; // wing walls ≤ 8' get cross-planked, no independent run
+const ANGLE_SNAP_THRESHOLD_DEG = 5; // snap to 90° if within this many degrees
+
+// Snap a direction vector to nearest 90° if close enough
+function snapNormal(normal: PlanPoint): PlanPoint {
+  const angle = Math.atan2(normal.y, normal.x);
+  const snapAngles = [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI];
+  let closest = snapAngles[0];
+  let minDiff = Math.abs(angle - snapAngles[0]);
+  for (const a of snapAngles) {
+    const diff = Math.abs(angle - a);
+    if (diff < minDiff) { minDiff = diff; closest = a; }
+  }
+  const thresholdRad = (ANGLE_SNAP_THRESHOLD_DEG * Math.PI) / 180;
+  if (minDiff < thresholdRad) {
+    return { x: Math.round(Math.cos(closest)), y: Math.round(Math.sin(closest)) };
+  }
+  return normal;
+}
+
+// Snap along direction to nearest 90°
+function snapAlong(along: PlanPoint): PlanPoint {
+  return snapNormal(along);
+}
+
+// Detect inside corners (re-entrant) using cross product
+// Returns array of booleans — true = inside corner (re-entrant) at that vertex
+function detectInsideCorners(polygon: PlanPoint[]): boolean[] {
+  const n = polygon.length;
+  const area = signedArea(polygon);
+  const isCW = area > 0; // CW in SVG Y-down space
+
+  return polygon.map((_, i) => {
+    const prev = polygon[(i - 1 + n) % n];
+    const curr = polygon[i];
+    const next = polygon[(i + 1) % n];
+    const d1x = curr.x - prev.x;
+    const d1y = curr.y - prev.y;
+    const d2x = next.x - curr.x;
+    const d2y = next.y - curr.y;
+    // Cross product z-component
+    const cross = d1x * d2y - d1y * d2x;
+    // For CW polygon in SVG (area > 0): re-entrant = cross < 0 (turns right)
+    // For CCW polygon in SVG (area < 0): re-entrant = cross > 0 (turns left)
+    return isCW ? cross > 0 : cross < 0;
+  });
+}
+
 function computeSegmentLegs(
   start: PlanPoint,
   end: PlanPoint,
+  segIndex: number,
   scaffoldWidthFt: number,
   bayLengthFt: number,
   pageUnitsPerFoot: number,
   turnaroundOn: boolean,
-  wallOffsetFt: number = 1,
+  polygon: PlanPoint[],
+  insideCorners: boolean[],
 ): LegResult[] {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const segLengthPx = Math.sqrt(dx * dx + dy * dy);
+  const rawDx = end.x - start.x;
+  const rawDy = end.y - start.y;
+  const segLengthPx = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
   if (!isFiniteNumber(segLengthPx) || segLengthPx <= 0) return [];
 
-  const along = { x: dx / segLengthPx, y: dy / segLengthPx };
-  const normal = { x: dy / segLengthPx, y: -dx / segLengthPx }; // outward normal
-
-  // Convert real-world feet to SVG pixels
   const puf = pageUnitsPerFoot;
-  const startOffsetPx = (scaffoldWidthFt + 1) * puf;    // Rule 1: scaffoldWidth + 1'
-  const bayLengthPx = bayLengthFt * puf;
-  const maxEndGapPx = 8 * puf;                           // Rule 2: max 8' gap to end
-  const wallOffsetPx = wallOffsetFt * puf;               // Rule 0: 1' from wall
-  const turnaroundMirrorPx = scaffoldWidthFt * puf;      // Rule 1b: mirror at scaffoldWidth
-  const labelOffsetPx = wallOffsetPx + 9;                // label slightly further out
+
+  // Snap along direction to avoid skewed ticks on nearly-axis-aligned walls
+  const rawAlong = { x: rawDx / segLengthPx, y: rawDy / segLengthPx };
+  const along = snapAlong(rawAlong);
+
+  const rawNormal = computeOutwardNormal(start, end, polygon.length >= 3 ? polygon : [start, end]);
+  const normal = snapNormal(rawNormal);
+
+  const bayPx        = bayLengthFt * puf;
+  const wallGapPx    = 1 * puf;               // 1' gap from wall face to start of tick
+  const tickLengthPx = scaffoldWidthFt * puf; // tick = scaffold width long
+  const labelOffPx   = wallGapPx + tickLengthPx + puf * 0.6;
+  const cornerOffPx  = (scaffoldWidthFt + 1) * puf; // 4' for 3' scaffold
+
+  // Check if end corners are inside corners — if so, stop run 1' before
+  const n = polygon.length;
+  const startCornerIsInside = insideCorners[segIndex];
+  const endCornerIsInside   = insideCorners[(segIndex + 1) % n];
+
+  // Effective run end — stop 1' (wallGapPx) before inside end corner
+  const runEndPx = endCornerIsInside
+    ? segLengthPx - wallGapPx
+    : segLengthPx;
+
+  // Wing wall cross-plank check — skip short walls entirely
+  const segLengthFt = segLengthPx / puf;
+  if (segLengthFt <= CROSS_PLANK_MAX_FT) return [];
+
+  function makeLeg(distAlongWall: number, isMirror = false, isStart = false, isEnd = false): LegResult {
+    const wp = {
+      x: start.x + along.x * distAlongWall,
+      y: start.y + along.y * distAlongWall,
+    };
+    const tickStart = { x: wp.x + normal.x * wallGapPx,                  y: wp.y + normal.y * wallGapPx };
+    const tickTip   = { x: wp.x + normal.x * (wallGapPx + tickLengthPx), y: wp.y + normal.y * (wallGapPx + tickLengthPx) };
+    const lp        = { x: wp.x + normal.x * labelOffPx,                 y: wp.y + normal.y * labelOffPx };
+    return { wallPoint: tickStart, tickTip, labelPoint: lp, isTurnaroundMirror: isMirror, isStartLeg: isStart, isEndLeg: isEnd };
+  }
 
   const legs: LegResult[] = [];
 
-  function makeLeg(distAlongWall: number, isTurnaroundMirror = false, isStart = false, isEnd = false): LegResult {
-    const wp = { x: start.x + along.x * distAlongWall, y: start.y + along.y * distAlongWall };
-    const tc = { x: wp.x + normal.x * wallOffsetPx, y: wp.y + normal.y * wallOffsetPx };
-    const lp = { x: wp.x + normal.x * labelOffsetPx, y: wp.y + normal.y * labelOffsetPx };
-    return { wallPoint: wp, tickCenter: tc, labelPoint: lp, isTurnaroundMirror, isStartLeg: isStart, isEndLeg: isEnd };
+  // ── START TICK placement ──────────────────────────────────────────────────
+  // Case A: Normal outside corner OR inside corner gap >= 3'
+  //   → place start tick scaffoldWidth+1' BEFORE the start corner
+  //   → first bay tick is startTick + 10' (so 10' from start tick, never >10' bay)
+  //
+  // Case B: Inside corner with gap < 3' (tight notch)
+  //   → skip start tick entirely
+  //   → begin run at dist=0 (the corner) with 1' clearance, then 10' bays
+
+  const startCornerTightNotch = startCornerIsInside && (cornerOffPx / puf < 3);
+  let runCursorPx: number;
+
+  if (startCornerTightNotch) {
+    // Case B: tight inside corner — no start tick, begin bays from corner
+    runCursorPx = 0;
+  } else {
+    // Case A: place start tick before corner, first bay is 10' from start tick
+    legs.push(makeLeg(-cornerOffPx, false, true, false));
+    runCursorPx = -cornerOffPx + bayPx; // FIX 2: first bay = startTick + 10'
   }
 
-  // ── RULE 1: First leg at scaffoldWidth + 1' from start ──────────────────
-  // If segment is too short to even place the first leg, place it at 0 (corner)
-  const firstLegDist = Math.min(startOffsetPx, segLengthPx);
-  legs.push(makeLeg(firstLegDist, false, true, false));
-
-  // Rule 1b: turnaround mirror for start leg (inner leg toward building)
-  if (turnaroundOn && firstLegDist + turnaroundMirrorPx <= segLengthPx) {
-    legs.push(makeLeg(firstLegDist + turnaroundMirrorPx, true, false, false));
+  // ── BAY TICKS — 10' from start tick, stopping at runEndPx ────────────────
+  // No bay ever exceeds 10'. The 4' corner offset is included in coverage.
+  let cursor = runCursorPx;
+  while (cursor < runEndPx - puf * 0.1) {
+    if (cursor >= 0) legs.push(makeLeg(cursor)); // only draw if on segment
+    cursor += bayPx;
   }
 
-  // ── RULE 7 + 2: Bay distribution from first leg toward end ──────────────
-  // Maximize full bays, then assess short bay
-  let cursor = firstLegDist + bayLengthPx;
+  // ── END TICK — try standard bay lengths from last placed tick ─────────────
+  // Only place if remaining distance >= 5' (smallest standard bay)
+  // If < 5' remaining, absorb into last full bay — no bastard bay
+  const bayLegs = legs.filter(l => !l.isStartLeg);
+  const lastAlongDist = bayLegs.length > 0
+    ? Math.max(...bayLegs.map(l => {
+        const wbx = l.wallPoint.x - normal.x * wallGapPx;
+        const wby = l.wallPoint.y - normal.y * wallGapPx;
+        return (wbx - start.x) * along.x + (wby - start.y) * along.y;
+      }))
+    : runCursorPx;
 
-  while (cursor < segLengthPx) {
-    const distToEnd = segLengthPx - cursor;
+  const remainingFt = (runEndPx - lastAlongDist) / puf;
 
-    if (distToEnd <= 0) break;
-
-    // Rule 2: if remaining distance after this leg would be > 8', we need another leg
-    // Place this leg, continue
-    if (distToEnd > maxEndGapPx) {
-      // Still more than 8' remaining after placing here — place leg and continue
-      legs.push(makeLeg(cursor));
-      cursor += bayLengthPx;
-    } else {
-      // Within 8' of end — this is the last interior leg
-      legs.push(makeLeg(cursor));
-      break;
-    }
-  }
-
-  // ── End leg: closing the run ─────────────────────────────────────────────
-  // Determine where the end leg goes
-  const lastPlacedDist = legs.filter(l => !l.isTurnaroundMirror).slice(-1)[0];
-  const lastDist = lastPlacedDist ? Math.sqrt(
-    (lastPlacedDist.wallPoint.x - start.x) ** 2 +
-    (lastPlacedDist.wallPoint.y - start.y) ** 2
-  ) : firstLegDist;
-
-  const remainingToEnd = segLengthPx - lastDist;
-
-  // Only add end leg if it's meaningfully different from the last placed leg
-  if (remainingToEnd > bayLengthPx * 0.15) {
-    // Rule 2: end leg placement
-    // Can we fit scaffoldWidth+1' offset from end?
-    const endLegIdealDist = segLengthPx - startOffsetPx;
-
-    if (endLegIdealDist > lastDist + bayLengthPx * 0.15) {
-      // Enough room for proper offset end leg
-      legs.push(makeLeg(endLegIdealDist, false, false, true));
-    } else {
-      // Short bay — place at segment end (corner point)
-      legs.push(makeLeg(segLengthPx, false, false, true));
-    }
-
-    // Rule 1b: turnaround mirror for end leg
-    if (turnaroundOn) {
-      const endLegActualDist = endLegIdealDist > lastDist + bayLengthPx * 0.15
-        ? endLegIdealDist
-        : segLengthPx;
-      const mirrorDist = endLegActualDist - turnaroundMirrorPx;
-      if (mirrorDist > lastDist + bayLengthPx * 0.1) {
-        legs.push(makeLeg(mirrorDist, true, false, false));
+  if (remainingFt >= 5) {
+    let endDist = runEndPx;
+    for (const bayFt of STANDARD_BAY_LENGTHS_FT) {
+      const candidate = lastAlongDist + bayFt * puf;
+      if (candidate <= runEndPx + puf * 0.1) {
+        endDist = Math.min(candidate, runEndPx);
+        break;
       }
     }
+    if ((endDist - lastAlongDist) / puf >= 5) {
+      legs.push(makeLeg(endDist, false, false, true));
+    }
   }
 
-  return legs.filter(l => isFinitePoint(l.tickCenter) && isFinitePoint(l.wallPoint));
+  return legs.filter(l => isFinitePoint(l.tickTip) && isFinitePoint(l.wallPoint));
 }
 
 // ── Main page ────────────────────────────────────────────────────────────────
@@ -275,6 +365,7 @@ export default function SetScaffoldPage() {
   const [turnaroundBays, setTurnaroundBays] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showScaffold, setShowScaffold] = useState(true);
+  const [viewerZoom, setViewerZoom] = useState(1);
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
   const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
 
@@ -287,20 +378,69 @@ export default function SetScaffoldPage() {
   const pageUnitsPerFoot = activeElevationData?.scale?.pageUnitsPerFoot ?? null;
   const scaleIsSet = pageUnitsPerFoot != null && pageUnitsPerFoot > 0;
 
-  const storedOverlayRows = useMemo(
-    () => getScaledOverlayRows(activeElevationData, 1200, 720, 110),
+  // ── Raw PDF coordinate approach ──────────────────────────────────────────
+  // Instead of rescaling points to fit a fixed 1200×720 SVG, keep points in
+  // their original PDF coordinate space. Set the SVG viewBox to match the
+  // bounding box of the raw points (with padding). This means:
+  //   svgPUF = pdfPUF exactly — no conversion, no scaling errors.
+
+  const rawPrimaryPoints = useMemo(
+    () => getPrimaryGeometryPoints(activeElevationData),
     [activeElevationData],
   );
-  const storedReferencePoints = useMemo(
-    () => getScaledReferencePoints(activeElevationData, 1200, 720, 110),
-    [activeElevationData],
-  );
-  const storedScaffoldOutline = useMemo(
-    () => getScaledPrimaryOutline(activeElevationData, 1200, 720, 110),
-    [activeElevationData],
-  );
-  const scaffoldOutline = storedScaffoldOutline ?? currentLevelOutline;
-  const isUsingFallbackGeometry = !storedScaffoldOutline;
+
+  // Compute bounding box of raw points for the SVG viewBox
+  const svgViewBox = useMemo(() => {
+    const pts = rawPrimaryPoints.filter(isFinitePoint);
+    if (pts.length < 2) return { x: 0, y: 0, w: 1200, h: 720 };
+    const minX = Math.min(...pts.map(p => p.x));
+    const maxX = Math.max(...pts.map(p => p.x));
+    const minY = Math.min(...pts.map(p => p.y));
+    const maxY = Math.max(...pts.map(p => p.y));
+    const pad = pageUnitsPerFoot ? pageUnitsPerFoot * 8 : 80; // 8ft padding around building
+    return {
+      x: minX - pad,
+      y: minY - pad,
+      w: (maxX - minX) + pad * 2,
+      h: (maxY - minY) + pad * 2,
+    };
+  }, [rawPrimaryPoints, pageUnitsPerFoot]);
+
+  // Raw overlay rows — points in PDF coordinate space, no rescaling
+  const rawOverlayRows = useMemo(() => {
+    const geometry = activeElevationData?.overlayGeometry;
+    if (!geometry) return [];
+    const allRows = geometry.fullOverlayRows.filter(row => row.points.length >= 2);
+    if (allRows.length === 0) return [];
+    return allRows.map((row, index) => ({
+      id: row.id ?? index,
+      level: row.level,
+      isKeyFloor: Boolean(row.isKeyFloor),
+      closed: Boolean(row.closed),
+      color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
+      points: row.points.filter(isFinitePoint),
+    })).filter(row => row.points.length >= 2);
+  }, [activeElevationData]);
+
+  // Raw reference points
+  const rawReferencePoints = useMemo(() => {
+    return activeElevationData?.overlayGeometry?.referencePoints?.filter(isFinitePoint) ?? [];
+  }, [activeElevationData]);
+
+  // The scaffold outline in raw PDF coordinates
+  const rawScaffoldOutline = useMemo(() => {
+    const pts = rawPrimaryPoints.filter(isFinitePoint);
+    return pts.length >= 3 ? pts : null;
+  }, [rawPrimaryPoints]);
+
+  // Use raw points if available, fall back to the scaled version for the fallback shape
+  const scaffoldOutline = rawScaffoldOutline ?? currentLevelOutline;
+  const isUsingFallbackGeometry = !rawScaffoldOutline;
+
+  // svgPageUnitsPerFoot = pdfPUF directly since we're in PDF coordinate space
+  // svgScale is 1.0 — no rescaling applied
+  const svgScale = 1;
+  const svgPageUnitsPerFoot = pageUnitsPerFoot;
 
   const storedElevationHeights = useMemo(() => {
     return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
@@ -320,16 +460,50 @@ export default function SetScaffoldPage() {
   // ── Compute all legs via Rule Set v3.0 ────────────────────────────────────
   // Uses real pageUnitsPerFoot if available, otherwise falls back to SVG-unit estimation
   const allSegmentLegs = useMemo(() => {
-    if (!scaleIsSet || !scaffoldOutline.length) return [];
-    const puf = pageUnitsPerFoot!;
+    if (!scaleIsSet || !pageUnitsPerFoot || !scaffoldOutline.length) return [];
+    const puf = pageUnitsPerFoot;
+    const insideCorners = detectInsideCorners(scaffoldOutline);
     const results: { segIndex: number; legs: LegResult[] }[] = [];
 
     for (let i = 0; i < scaffoldOutline.length; i++) {
       const start = scaffoldOutline[i];
       const end = scaffoldOutline[(i + 1) % scaffoldOutline.length];
-      const legs = computeSegmentLegs(start, end, scaffoldWidthFt, bayLengthFt, puf, turnaroundBays);
+      const legs = computeSegmentLegs(
+        start, end, i, scaffoldWidthFt, bayLengthFt, puf, turnaroundBays, scaffoldOutline, insideCorners
+      );
       results.push({ segIndex: i, legs });
     }
+
+    // ── Cross-segment deduplication ──────────────────────────────────────────
+    // At each corner, check the end tick of segment[i] against the start tick
+    // of segment[i+1]. If they are within 8' of each other, remove the end
+    // tick of segment[i] — keep the start tick of the new run.
+    const maxGapPx = 8 * puf;
+    const n = scaffoldOutline.length;
+
+    for (let i = 0; i < n; i++) {
+      const curr = results[i];
+      const next = results[(i + 1) % n];
+      if (!curr || !next) continue;
+
+      // End tick of current segment
+      const endTick = curr.legs.filter(l => !l.isStartLeg && !l.isTurnaroundMirror).slice(-1)[0];
+      // Start tick of next segment
+      const startTick = next.legs.find(l => l.isStartLeg);
+
+      if (!endTick || !startTick) continue;
+
+      const dist = Math.sqrt(
+        (endTick.wallPoint.x - startTick.wallPoint.x) ** 2 +
+        (endTick.wallPoint.y - startTick.wallPoint.y) ** 2
+      );
+
+      if (dist <= maxGapPx) {
+        // Remove end tick from current segment — gap is acceptable
+        curr.legs = curr.legs.filter(l => l !== endTick);
+      }
+    }
+
     return results;
   }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot]);
 
@@ -429,72 +603,99 @@ export default function SetScaffoldPage() {
         }
       />
 
-      <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
+      <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_340px]">
         {/* Canvas */}
-        <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
+        <section className="relative overflow-hidden border-r border-orange-500/20 bg-black flex flex-col">
 
-          {/* Scale lock overlay — blocks canvas when scale not set */}
+          {/* Scale lock overlay */}
           {!scaleIsSet && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
               <div className="rounded-[2rem] border border-yellow-500/40 bg-yellow-500/10 p-10 text-center shadow-2xl">
                 <div className="mb-4 text-4xl">⚠</div>
                 <p className="text-sm font-bold uppercase tracking-[0.2em] text-yellow-300">Scale Not Set</p>
                 <p className="mt-3 max-w-xs text-xs leading-5 text-zinc-400">
-                  Scale must be calibrated in Takeoff Workspace before scaffold layout can be generated. Return to Takeoff Workspace and set your scale first.
+                  Scale must be calibrated in Takeoff Workspace before scaffold layout can be generated.
                 </p>
-                <a
-                  href="/takeoff-workspace"
-                  className="mt-6 inline-block rounded-xl bg-yellow-400 px-6 py-3 text-xs font-bold text-black hover:bg-yellow-300"
-                >
+                <a href="/takeoff-workspace" className="mt-6 inline-block rounded-xl bg-yellow-400 px-6 py-3 text-xs font-bold text-black hover:bg-yellow-300">
                   Go to Takeoff Workspace →
                 </a>
               </div>
             </div>
           )}
 
+          {/* HUD — status pills + zoom controls */}
           <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
             <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay(c => !c)} />
             <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold(c => !c)} />
             <StatusPill label="Frame Tall" value={String(frameHeightCount)} />
-            <StatusPill
-              label="Turnaround"
-              active={turnaroundBays}
-              onClick={() => setTurnaroundBays(c => !c)}
-              value={turnaroundBays ? "ON" : "OFF"}
-            />
-            <StatusPill
-              label="Scale"
-              active={scaleIsSet}
-              value={scaleIsSet ? "Calibrated" : "Not Set"}
-            />
+            <StatusPill label="Turnaround" active={turnaroundBays} onClick={() => setTurnaroundBays(c => !c)} value={turnaroundBays ? "ON" : "OFF"} />
+            <StatusPill label="Scale" active={scaleIsSet} value={scaleIsSet ? "Calibrated" : "Not Set"} />
             {isUsingFallbackGeometry && (
               <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs font-bold text-yellow-300">
-                ⚠ Placeholder shape — trace Full Overlay in Takeoff Workspace
+                ⚠ Placeholder shape
               </div>
             )}
           </div>
 
+          {/* Zoom controls — top right */}
+          <div className="absolute right-5 top-5 z-20 flex items-center gap-1.5">
+            <button
+              onClick={() => setViewerZoom(z => Math.min(3, z + 0.15))}
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-black/80 text-zinc-400 hover:text-zinc-200 hover:border-orange-500/30 text-sm font-bold"
+            >+</button>
+            <span className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 font-mono text-[10px] text-zinc-400">
+              {Math.round(viewerZoom * 100)}%
+            </span>
+            <button
+              onClick={() => setViewerZoom(z => Math.max(0.3, z - 0.15))}
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-black/80 text-zinc-400 hover:text-zinc-200 hover:border-orange-500/30 text-sm font-bold"
+            >−</button>
+            <button
+              onClick={() => setViewerZoom(1)}
+              className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 text-[10px] text-zinc-500 hover:text-zinc-300"
+            >Fit</button>
+          </div>
+
+          {/* Background grid */}
           <div className="absolute inset-0 opacity-[0.10] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:36px_36px]" />
 
-          <div className="absolute inset-0 flex items-center justify-center p-10">
-            <div className="relative h-full w-full max-w-[1220px] rounded-[2rem] border border-zinc-800 bg-[#050505] shadow-2xl">
-              <svg viewBox="0 0 1200 720" className="h-full w-full">
-                <GridAxisLabels />
-                <CompassLabels />
+          {/* SVG viewer — fills available height above bottom bar */}
+          <div className="absolute inset-0 bottom-12 overflow-hidden">
+            <div className="relative h-full w-full rounded-[2rem]">
+
+              {/* Project name — vertical text on left edge */}
+              <div className="absolute left-2 top-1/2 z-20 -translate-y-1/2 -rotate-90 whitespace-nowrap">
+                <span className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-700">
+                  {activeProjectName}
+                </span>
+              </div>
+
+              {/* Overlay legend — small, bottom-left of viewer */}
+              <div className="absolute bottom-3 left-8 z-20 flex items-center gap-3 rounded-xl border border-zinc-900 bg-black/70 px-3 py-1.5 backdrop-blur">
+                <div className="flex items-center gap-1.5">
+                  <div className="h-px w-5 bg-[#2563eb]" />
+                  <span className="text-[9px] text-zinc-600">Current</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="h-px w-5 bg-[#22c55e]" />
+                  <span className="text-[9px] text-zinc-600">Below</span>
+                </div>
+              </div>
+
+              <svg
+                viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1/viewerZoom)) / 2} ${svgViewBox.y + (svgViewBox.h * (1 - 1/viewerZoom)) / 2} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
+                className="h-full w-full"
+              >
+                <GridAxisLabels viewBox={svgViewBox} pageUnitsPerFoot={pageUnitsPerFoot ?? 18} />
+                <CompassLabels viewBox={svgViewBox} />
 
                 {showOverlay && (
-                  storedOverlayRows.length ? (
-                    <StoredTakeoffOverlay rows={storedOverlayRows} referencePoints={storedReferencePoints} />
+                  rawOverlayRows.length ? (
+                    <StoredTakeoffOverlay rows={rawOverlayRows} referencePoints={rawReferencePoints} />
                   ) : (
                     <g>
-                      <path
-                        d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z"
-                        fill="transparent" stroke="#2563eb" strokeWidth="0.7" strokeLinejoin="miter"
-                      />
-                      <path
-                        d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z"
-                        fill="transparent" stroke="#22c55e" strokeWidth="0.6" strokeLinejoin="miter" opacity="0.9"
-                      />
+                      <path d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z" fill="transparent" stroke="#2563eb" strokeWidth="0.7" strokeLinejoin="miter" />
+                      <path d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z" fill="transparent" stroke="#22c55e" strokeWidth="0.6" strokeLinejoin="miter" opacity="0.9" />
                     </g>
                   )
                 )}
@@ -508,41 +709,21 @@ export default function SetScaffoldPage() {
                       frameHeight={frameHeight}
                       workerReachHeight={workerReachHeight}
                       frameTall={frameHeightCount}
+                      polygon={scaffoldOutline}
+                      svgPageUnitsPerFoot={pageUnitsPerFoot ?? 8}
+                      scaffoldWidthFt={scaffoldWidthFt}
                     />
                   </g>
                 )}
               </svg>
-
-              {/* Project info — bottom left */}
-              <div className="absolute bottom-5 left-5 z-20 space-y-2">
-                {/* Overlay legend */}
-                <div className="rounded-2xl border border-zinc-800 bg-black/85 px-4 py-3 backdrop-blur">
-                  <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500 mb-2">Overlay</p>
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="h-px w-8 bg-[#2563eb]" />
-                    <span className="text-[10px] text-zinc-400">Current Level</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="h-px w-8 bg-[#22c55e]" />
-                    <span className="text-[10px] text-zinc-400">Level Below</span>
-                  </div>
-                </div>
-                {/* Project bubble */}
-                <div className="rounded-2xl border border-zinc-800 bg-black/85 px-4 py-3 backdrop-blur">
-                  <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Project</p>
-                  <p className="mt-1 text-sm font-bold text-zinc-200">{activeProjectName}</p>
-                  <p className="mt-1 font-mono text-[11px] text-orange-300">
-                    {projectInfo.jobNumber}
-                  </p>
-                </div>
-              </div>
-
-              <div className="absolute bottom-5 right-5 flex gap-2">
-                <ViewerTool label="Regenerate" />
-                <ViewerTool label="Edit Bay" />
-                <ViewerTool label="Save Layout" primary />
-              </div>
             </div>
+          </div>
+
+          {/* Bottom action bar — centered below viewer */}
+          <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-3 border-t border-zinc-900 bg-[#080604] px-6 py-2.5">
+            <ViewerTool label="Regenerate" />
+            <ViewerTool label="Edit Bay" />
+            <ViewerTool label="Save Layout" primary />
           </div>
         </section>
 
@@ -692,6 +873,9 @@ function ScaffoldRunTicks({
   frameHeight,
   workerReachHeight,
   frameTall,
+  polygon,
+  svgPageUnitsPerFoot,
+  scaffoldWidthFt,
 }: {
   segmentLegs: { segIndex: number; legs: LegResult[] }[];
   points: PlanPoint[];
@@ -699,9 +883,10 @@ function ScaffoldRunTicks({
   frameHeight: number;
   workerReachHeight: number;
   frameTall: number;
+  polygon: PlanPoint[];
+  svgPageUnitsPerFoot: number;
+  scaffoldWidthFt: number;
 }) {
-  const tickLength = 10;
-
   function getLocalFrameTall(point: PlanPoint): number {
     if (elevationHeights.length === 0) return frameTall;
     return getFrameTallForPoint(point, points, elevationHeights, frameHeight, workerReachHeight, frameTall);
@@ -716,56 +901,70 @@ function ScaffoldRunTicks({
         const segEnd = points[(segIndex + 1) % points.length];
         if (!segStart || !segEnd) return null;
 
+        const normal = computeOutwardNormal(segStart, segEnd, polygon);
         const dx = segEnd.x - segStart.x;
         const dy = segEnd.y - segStart.y;
         const len = Math.sqrt(dx * dx + dy * dy);
-        const normal = len > 0 ? { x: dy / len, y: -dx / len } : { x: 0, y: -1 };
+        const wallGapPx    = 1 * svgPageUnitsPerFoot;
+        const tickLengthPx = scaffoldWidthFt * svgPageUnitsPerFoot;
 
         const structuralLegs = legs.filter(l => !l.isTurnaroundMirror);
 
         return (
           <g key={`seg-${segIndex}`}>
-            {/* Diagonal cross-braces between consecutive structural legs */}
-            {structuralLegs.slice(0, -1).map((leg, i) => {
-              const next = structuralLegs[i + 1];
-              const cx = (leg.tickCenter.x + next.tickCenter.x) / 2;
-              const cy = (leg.tickCenter.y + next.tickCenter.y) / 2;
-              const along = { x: dx / len, y: dy / len };
-              const bayPx = Math.sqrt((next.wallPoint.x - leg.wallPoint.x) ** 2 + (next.wallPoint.y - leg.wallPoint.y) ** 2);
-              const braceLen = Math.min(14, Math.max(6, bayPx * 0.34));
-              const depth = 3;
+
+            {/* Diagonal braces — from base of one tick to tip of next, 60% centered */}
+            {structuralLegs.filter(l => !l.isStartLeg).slice(0, -1).map((leg, i) => {
+              const bayLegs = structuralLegs.filter(l => !l.isStartLeg);
+              const next = bayLegs[i + 1];
+              if (!next) return null;
+              const cx = (leg.wallPoint.x + next.wallPoint.x) / 2;
+              const cy = (leg.wallPoint.y + next.wallPoint.y) / 2;
+              const bayPx = Math.sqrt(
+                (next.wallPoint.x - leg.wallPoint.x) ** 2 +
+                (next.wallPoint.y - leg.wallPoint.y) ** 2
+              );
+              const braceLen = bayPx * 0.6;
+              const halfBrace = braceLen / 2;
+              const along = len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
+              // Brace: from near wall on one side to near tip on other side
+              // x1 side = back along wall, close to wall face
+              // x2 side = forward along wall, close to tick tip
               return (
                 <line
                   key={`brace-${segIndex}-${i}`}
-                  x1={cx - along.x * (braceLen / 2) - normal.x * depth}
-                  y1={cy - along.y * (braceLen / 2) - normal.y * depth}
-                  x2={cx + along.x * (braceLen / 2) + normal.x * depth}
-                  y2={cy + along.y * (braceLen / 2) + normal.y * depth}
-                  strokeWidth="0.4" opacity="0.34"
+                  x1={cx - along.x * halfBrace + normal.x * wallGapPx * 0.5}
+                  y1={cy - along.y * halfBrace + normal.y * wallGapPx * 0.5}
+                  x2={cx + along.x * halfBrace + normal.x * (wallGapPx + tickLengthPx) * 0.9}
+                  y2={cy + along.y * halfBrace + normal.y * (wallGapPx + tickLengthPx) * 0.9}
+                  strokeWidth="0.7"
+                  opacity="0.55"
                 />
               );
             })}
 
-            {/* Tick marks for all legs — identical appearance regardless of type */}
-            {legs.map((leg, i) => {
+            {/* Tick lines — from wall face outward, perpendicular, scaffoldWidth long */}
+            {structuralLegs.map((leg, i) => {
               const localFrameTall = getLocalFrameTall(leg.wallPoint);
-
-              const t1 = {
-                x1: leg.tickCenter.x - normal.x * (tickLength / 2),
-                y1: leg.tickCenter.y - normal.y * (tickLength / 2),
-                x2: leg.tickCenter.x + normal.x * (tickLength / 2),
-                y2: leg.tickCenter.y + normal.y * (tickLength / 2),
-              };
-
-              if (!isFiniteNumber(t1.x1) || !isFiniteNumber(t1.y1) || !isFiniteNumber(t1.x2) || !isFiniteNumber(t1.y2)) return null;
-
+              if (!isFiniteNumber(leg.wallPoint.x) || !isFiniteNumber(leg.tickTip.x)) return null;
               return (
                 <g key={`leg-${segIndex}-${i}`}>
-                  <line x1={t1.x1} y1={t1.y1} x2={t1.x2} y2={t1.y2} strokeWidth="1" />
+                  <line
+                    x1={leg.wallPoint.x}
+                    y1={leg.wallPoint.y}
+                    x2={leg.tickTip.x}
+                    y2={leg.tickTip.y}
+                    strokeWidth="1.8"
+                  />
                   <text
-                    x={leg.labelPoint.x} y={leg.labelPoint.y}
-                    fontSize="5" fontFamily="monospace" fontWeight="300"
-                    opacity="0.62" textAnchor="middle" dominantBaseline="middle"
+                    x={leg.labelPoint.x}
+                    y={leg.labelPoint.y}
+                    fontSize={svgPageUnitsPerFoot * 0.5}
+                    fontFamily="monospace"
+                    fontWeight="600"
+                    opacity="0.85"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
                   >
                     {localFrameTall}
                   </text>
@@ -794,25 +993,28 @@ function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
   return [];
 }
 
-function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number) {
+function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } {
   const validPoints = points.filter(isFinitePoint);
-  if (validPoints.length < 2) return [];
+  if (validPoints.length < 2) return { points: [], svgScale: 1 };
   const minX = Math.min(...validPoints.map(p => p.x));
   const maxX = Math.max(...validPoints.map(p => p.x));
   const minY = Math.min(...validPoints.map(p => p.y));
   const maxY = Math.max(...validPoints.map(p => p.y));
   const gW = Math.max(1, maxX - minX); const gH = Math.max(1, maxY - minY);
-  const scale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
-  const dW = gW * scale; const dH = gH * scale;
+  const svgScale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
+  const dW = gW * svgScale; const dH = gH * svgScale;
   const oX = padding + (width - padding * 2 - dW) / 2;
   const oY = padding + (height - padding * 2 - dH) / 2;
-  return validPoints.map(p => ({ x: oX + (p.x - minX) * scale, y: oY + (p.y - minY) * scale }));
+  return {
+    points: validPoints.map(p => ({ x: oX + (p.x - minX) * svgScale, y: oY + (p.y - minY) * svgScale })),
+    svgScale,
+  };
 }
 
-function getScaledPrimaryOutline(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
+function getScaledPrimaryOutline(elevation: ProjectElevation | null, width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } | null {
   const points = getPrimaryGeometryPoints(elevation);
-  const mapped = mapGeometryPoints(points, width, height, padding);
-  return mapped.length >= 3 ? mapped : null;
+  const { points: mapped, svgScale } = mapGeometryPoints(points, width, height, padding);
+  return mapped.length >= 3 ? { points: mapped, svgScale } : null;
 }
 
 function getScaledOverlayRows(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
@@ -827,7 +1029,7 @@ function getScaledOverlayRows(elevation: ProjectElevation | null, width: number,
   return fallbackRows.map((row, index) => ({
     id: row.id ?? index, level: row.level, isKeyFloor: Boolean(row.isKeyFloor),
     closed: Boolean(row.closed), color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
-    points: mapGeometryPoints(allPoints.length >= 2 ? row.points : basePoints, width, height, padding),
+    points: mapGeometryPoints(allPoints.length >= 2 ? row.points : basePoints, width, height, padding).points,
   })).filter(row => row.points.length >= 2);
 }
 
@@ -836,7 +1038,7 @@ function getScaledReferencePoints(elevation: ProjectElevation | null, width: num
   if (!geometry || geometry.referencePoints.length < 1) return [];
   const basePoints = getPrimaryGeometryPoints(elevation);
   const allPoints = [...basePoints, ...geometry.referencePoints];
-  const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding);
+  const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding).points;
   return mappedAllPoints.slice(basePoints.length);
 }
 
@@ -875,35 +1077,64 @@ function StoredTakeoffOverlay({ rows, referencePoints }: {
   );
 }
 
-function CompassLabels() {
-  const style = { fontSize: "13", fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
+function CompassLabels({ viewBox }: { viewBox: { x: number; y: number; w: number; h: number } }) {
+  const style = { fontSize: String(viewBox.w * 0.012), fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
+  const cx = viewBox.x + viewBox.w / 2;
+  const cy = viewBox.y + viewBox.h / 2;
+  const pad = viewBox.w * 0.025;
   return (
     <g>
-      <text x="600" y="72" textAnchor="middle" {...style}>N</text>
-      <text x="600" y="700" textAnchor="middle" {...style}>S</text>
-      <text x="30" y="365" textAnchor="middle" {...style}>W</text>
-      <text x="1170" y="365" textAnchor="middle" {...style}>E</text>
+      <text x={cx} y={viewBox.y + pad} textAnchor="middle" {...style}>N</text>
+      <text x={cx} y={viewBox.y + viewBox.h - pad * 0.3} textAnchor="middle" {...style}>S</text>
+      <text x={viewBox.x + pad * 0.5} y={cy} textAnchor="middle" {...style}>W</text>
+      <text x={viewBox.x + viewBox.w - pad * 0.5} y={cy} textAnchor="middle" {...style}>E</text>
     </g>
   );
 }
 
-function GridAxisLabels() {
-  const xLabels = Array.from({ length: 21 }, (_, i) => i * 5);
-  const yLabels = Array.from({ length: 15 }, (_, i) => i * 5);
+function GridAxisLabels({ viewBox, pageUnitsPerFoot }: { viewBox: { x: number; y: number; w: number; h: number }; pageUnitsPerFoot: number }) {
+  // Draw tick marks every 5' along the edges of the viewBox
+  const fiveFootPx = pageUnitsPerFoot * 5;
+  const fontSize = Math.max(6, Math.min(11, viewBox.w * 0.009));
+
+  // How many 5' increments fit across the building
+  const xCount = Math.ceil(viewBox.w / fiveFootPx) + 1;
+  const yCount = Math.ceil(viewBox.h / fiveFootPx) + 1;
+
+  // Start labels from the building's real-world 0,0 origin (viewBox.x)
+  const xLabels = Array.from({ length: Math.min(xCount, 30) }, (_, i) => i);
+  const yLabels = Array.from({ length: Math.min(yCount, 20) }, (_, i) => i);
+
+  const tickLen = viewBox.w * 0.008;
+  const labelOffX = viewBox.x + viewBox.w * 0.015;
+  const labelOffY = viewBox.y + viewBox.h * 0.04;
+
   return (
-    <g opacity="0.45">
-      {xLabels.map((v, i) => (
-        <g key={`x-${v}`}>
-          <text x={54 + i * 50} y="42" fill="#a1a1aa" fontSize="10" fontFamily="monospace">{v}'</text>
-          <line x1={58 + i * 50} y1="49" x2={58 + i * 50} y2="62" stroke="#a1a1aa" strokeWidth="0.7" />
-        </g>
-      ))}
-      {yLabels.map((v, i) => (
-        <g key={`y-${v}`}>
-          <text x="18" y={76 + i * 38} fill="#a1a1aa" fontSize="10" fontFamily="monospace">{v}'</text>
-          <line x1="46" y1={72 + i * 38} x2="60" y2={72 + i * 38} stroke="#a1a1aa" strokeWidth="0.7" />
-        </g>
-      ))}
+    <g opacity="0.4">
+      {xLabels.map((i) => {
+        const x = viewBox.x + i * fiveFootPx;
+        if (x > viewBox.x + viewBox.w) return null;
+        return (
+          <g key={`x-${i}`}>
+            <text x={x} y={viewBox.y + tickLen * 2.5} fill="#a1a1aa" fontSize={fontSize} fontFamily="monospace" textAnchor="middle">
+              {i * 5}'
+            </text>
+            <line x1={x} y1={viewBox.y + tickLen} x2={x} y2={viewBox.y + tickLen * 2} stroke="#a1a1aa" strokeWidth={viewBox.w * 0.0005} />
+          </g>
+        );
+      })}
+      {yLabels.map((i) => {
+        const y = viewBox.y + i * fiveFootPx;
+        if (y > viewBox.y + viewBox.h) return null;
+        return (
+          <g key={`y-${i}`}>
+            <text x={viewBox.x + tickLen * 2.5} y={y} fill="#a1a1aa" fontSize={fontSize} fontFamily="monospace" textAnchor="middle" dominantBaseline="middle">
+              {i * 5}'
+            </text>
+            <line x1={viewBox.x + tickLen} y1={y} x2={viewBox.x + tickLen * 2} y2={y} stroke="#a1a1aa" strokeWidth={viewBox.w * 0.0005} />
+          </g>
+        );
+      })}
     </g>
   );
 }
