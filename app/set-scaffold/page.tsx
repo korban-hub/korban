@@ -19,13 +19,6 @@ import { getBackendSettings } from "@/lib/backendStore";
 
 type ScaffoldWidth = "3'" | "3'-6\"" | "5'";
 type PlankType = "Wood" | "Aluminum" | "Steel";
-type PieceType =
-  | "Straight Bay"
-  | "Short Bay"
-  | "Turnaround Bay"
-  | "Inside Corner"
-  | "Outside Corner"
-  | "End Bay";
 
 const projectInfo = {
   projectName: "Mare Island Apartments",
@@ -35,32 +28,14 @@ const projectInfo = {
 
 type PlanPoint = { x: number; y: number };
 
+// Fallback placeholder outline — shown when no real takeoff data exists
 const currentLevelOutline: PlanPoint[] = [
-  { x: 250, y: 150 },
-  { x: 835, y: 150 },
-  { x: 835, y: 230 },
-  { x: 770, y: 230 },
-  { x: 770, y: 300 },
-  { x: 910, y: 300 },
-  { x: 910, y: 505 },
-  { x: 805, y: 505 },
-  { x: 805, y: 575 },
-  { x: 350, y: 575 },
-  { x: 350, y: 520 },
-  { x: 215, y: 520 },
-  { x: 215, y: 345 },
-  { x: 165, y: 345 },
-  { x: 165, y: 230 },
+  { x: 250, y: 150 }, { x: 835, y: 150 }, { x: 835, y: 230 },
+  { x: 770, y: 230 }, { x: 770, y: 300 }, { x: 910, y: 300 },
+  { x: 910, y: 505 }, { x: 805, y: 505 }, { x: 805, y: 575 },
+  { x: 350, y: 575 }, { x: 350, y: 520 }, { x: 215, y: 520 },
+  { x: 215, y: 345 }, { x: 165, y: 345 }, { x: 165, y: 230 },
   { x: 250, y: 230 },
-];
-
-const scaffoldPieces: { type: PieceType; description: string; count: number }[] = [
-  { type: "Straight Bay", description: "Standard bay with brace centered between legs.", count: 42 },
-  { type: "Short Bay", description: "Under 8' connection shown with dots only.", count: 3 },
-  { type: "Turnaround Bay", description: "Squared return bay with no diagonal brace.", count: 2 },
-  { type: "Inside Corner", description: "Square inside corner with double-leg condition.", count: 2 },
-  { type: "Outside Corner", description: "Square outside corner with double-leg condition.", count: 6 },
-  { type: "End Bay", description: "Open end / termination bay.", count: 0 },
 ];
 
 const runSummary = [
@@ -78,9 +53,20 @@ const scaffoldMenuLinks: KorbanMenuLink[] = [
   { href: "/settings", label: "Settings" },
 ];
 
-function parseFeetValue(value: string) {
-  const parsed = Number(value.replace(/[^0-9.]/g, ""));
-  return Number.isFinite(parsed) ? parsed : 0;
+// ── Utility ──────────────────────────────────────────────────────────────────
+
+function parseFeetValue(value: string): number {
+  if (!value) return 0;
+  // Handle feet-inches format: "3'-6\"" → 3.5, "5'" → 5, "10'" → 10
+  const feetInchMatch = value.match(/^(\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?)(?:")?)?$/);
+  if (feetInchMatch) {
+    const feet = Number(feetInchMatch[1]);
+    const inches = Number(feetInchMatch[2] || 0);
+    return feet + inches / 12;
+  }
+  // Plain number fallback
+  const plain = Number(value.replace(/[^0-9.]/g, ""));
+  return Number.isFinite(plain) ? plain : 0;
 }
 
 function formatScaffoldWidth(value: number): ScaffoldWidth {
@@ -92,16 +78,12 @@ function formatScaffoldWidth(value: number): ScaffoldWidth {
 function parseFeetInches(input: string): number | null {
   const value = input.trim();
   if (!value || value === "--" || value === "0'") return null;
-  const normalized = value
-    .toLowerCase()
-    .replace(/feet|foot|ft/g, "'")
-    .replace(/inches|inch|in/g, '"')
-    .replace(/\s+/g, "")
-    .replace(/[–—]/g, "-");
-  const footMarkMatch = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/);
-  if (footMarkMatch) {
-    const feet = Number(footMarkMatch[1]);
-    const inches = Number(footMarkMatch[2] || 0);
+  const normalized = value.toLowerCase()
+    .replace(/feet|foot|ft/g, "'").replace(/inches|inch|in/g, '"')
+    .replace(/\s+/g, "").replace(/[–—]/g, "-");
+  const m = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/);
+  if (m) {
+    const feet = Number(m[1]); const inches = Number(m[2] || 0);
     if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
     return feet + inches / 12;
   }
@@ -109,8 +91,22 @@ function parseFeetInches(input: string): number | null {
   return Number.isNaN(plain) || plain === 0 ? null : plain;
 }
 
-// Compute per-leg frame count from elevation heights stored in overlay geometry
-// Each elevation direction maps to a compass side; legs on that side use that elevation's height
+function isFiniteNumber(v: number) { return Number.isFinite(v); }
+function isFinitePoint(p: PlanPoint) { return isFiniteNumber(p.x) && isFiniteNumber(p.y); }
+
+function segLen(a: PlanPoint, b: PlanPoint) {
+  const dx = b.x - a.x; const dy = b.y - a.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Outward normal (left-hand rule for CCW polygon = outward)
+function outwardNormal(a: PlanPoint, b: PlanPoint): PlanPoint {
+  const dx = b.x - a.x; const dy = b.y - a.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len === 0) return { x: 0, y: -1 };
+  return { x: dy / len, y: -dx / len };
+}
+
 function getFrameTallForPoint(
   point: PlanPoint,
   allPoints: PlanPoint[],
@@ -120,52 +116,176 @@ function getFrameTallForPoint(
   defaultFrameTall: number,
 ): number {
   if (!allPoints.length || !elevationHeights.length) return defaultFrameTall;
-
-  // Determine which side of the bounding box this point is closest to
-  const minX = Math.min(...allPoints.map((p) => p.x));
-  const maxX = Math.max(...allPoints.map((p) => p.x));
-  const minY = Math.min(...allPoints.map((p) => p.y));
-  const maxY = Math.max(...allPoints.map((p) => p.y));
-
-  const distToNorth = Math.abs(point.y - minY); // top edge = North
-  const distToSouth = Math.abs(point.y - maxY); // bottom edge = South
-  const distToWest = Math.abs(point.x - minX);  // left edge = West
-  const distToEast = Math.abs(point.x - maxX);  // right edge = East
-
-  const minDist = Math.min(distToNorth, distToSouth, distToWest, distToEast);
-
-  let elevationName = "North";
-  if (minDist === distToSouth) elevationName = "South";
-  else if (minDist === distToEast) elevationName = "East";
-  else if (minDist === distToWest) elevationName = "West";
-
-  const elev = elevationHeights.find((e) => e.elevation === elevationName);
+  const minX = Math.min(...allPoints.map(p => p.x));
+  const maxX = Math.max(...allPoints.map(p => p.x));
+  const minY = Math.min(...allPoints.map(p => p.y));
+  const maxY = Math.max(...allPoints.map(p => p.y));
+  const dN = Math.abs(point.y - minY), dS = Math.abs(point.y - maxY);
+  const dW = Math.abs(point.x - minX), dE = Math.abs(point.x - maxX);
+  const minD = Math.min(dN, dS, dW, dE);
+  let elevName = "North";
+  if (minD === dS) elevName = "South";
+  else if (minD === dE) elevName = "East";
+  else if (minD === dW) elevName = "West";
+  const elev = elevationHeights.find(e => e.elevation === elevName);
   if (!elev) return defaultFrameTall;
-
   const base = parseFeetInches(elev.overallHeightInput) ?? 0;
   const below = elev.belowGradeEnabled ? parseFeetInches(elev.belowGradeInput) ?? 0 : 0;
   const wallHeight = base + below;
   if (wallHeight <= 0) return defaultFrameTall;
-
   return Math.ceil((wallHeight - workerReachHeight) / frameHeight);
 }
+
+// ── Scaffold run computation — Rule Set v3.0 ─────────────────────────────────
+//
+// Returns an array of leg positions (SVG coordinates) for a single wall segment.
+// Each leg is perpendicular to the wall and offset 1' outward from the wall face.
+//
+// Rules applied (all distances in SVG pixels, converted from feet via pageUnitsPerFoot):
+//   RULE 0  — Every tick 1' offset from wall face
+//   RULE 1  — First leg at scaffoldWidth + 1' from start corner
+//   RULE 1b — Turnaround: first/last offset legs get inner mirror at scaffoldWidth distance
+//   RULE 2  — Maximize full bays; short bay at end always gets a tick
+//             Max gap from last leg to end corner = 8'; if >8' place one more leg
+//             If short remainder can't reach scaffoldWidth+1' offset → leg at corner itself
+//   RULE 7  — Always maximize full standard bays first
+
+type LegResult = {
+  wallPoint: PlanPoint;   // point on wall face
+  tickCenter: PlanPoint;  // 1' offset outward
+  labelPoint: PlanPoint;  // further offset for frame count label
+  isTurnaroundMirror: boolean; // is this the inner mirror leg of a turnaround bay?
+  isStartLeg: boolean;
+  isEndLeg: boolean;
+};
+
+function computeSegmentLegs(
+  start: PlanPoint,
+  end: PlanPoint,
+  scaffoldWidthFt: number,
+  bayLengthFt: number,
+  pageUnitsPerFoot: number,
+  turnaroundOn: boolean,
+  wallOffsetFt: number = 1,
+): LegResult[] {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const segLengthPx = Math.sqrt(dx * dx + dy * dy);
+  if (!isFiniteNumber(segLengthPx) || segLengthPx <= 0) return [];
+
+  const along = { x: dx / segLengthPx, y: dy / segLengthPx };
+  const normal = { x: dy / segLengthPx, y: -dx / segLengthPx }; // outward normal
+
+  // Convert real-world feet to SVG pixels
+  const puf = pageUnitsPerFoot;
+  const startOffsetPx = (scaffoldWidthFt + 1) * puf;    // Rule 1: scaffoldWidth + 1'
+  const bayLengthPx = bayLengthFt * puf;
+  const maxEndGapPx = 8 * puf;                           // Rule 2: max 8' gap to end
+  const wallOffsetPx = wallOffsetFt * puf;               // Rule 0: 1' from wall
+  const turnaroundMirrorPx = scaffoldWidthFt * puf;      // Rule 1b: mirror at scaffoldWidth
+  const labelOffsetPx = wallOffsetPx + 9;                // label slightly further out
+
+  const legs: LegResult[] = [];
+
+  function makeLeg(distAlongWall: number, isTurnaroundMirror = false, isStart = false, isEnd = false): LegResult {
+    const wp = { x: start.x + along.x * distAlongWall, y: start.y + along.y * distAlongWall };
+    const tc = { x: wp.x + normal.x * wallOffsetPx, y: wp.y + normal.y * wallOffsetPx };
+    const lp = { x: wp.x + normal.x * labelOffsetPx, y: wp.y + normal.y * labelOffsetPx };
+    return { wallPoint: wp, tickCenter: tc, labelPoint: lp, isTurnaroundMirror, isStartLeg: isStart, isEndLeg: isEnd };
+  }
+
+  // ── RULE 1: First leg at scaffoldWidth + 1' from start ──────────────────
+  // If segment is too short to even place the first leg, place it at 0 (corner)
+  const firstLegDist = Math.min(startOffsetPx, segLengthPx);
+  legs.push(makeLeg(firstLegDist, false, true, false));
+
+  // Rule 1b: turnaround mirror for start leg (inner leg toward building)
+  if (turnaroundOn && firstLegDist + turnaroundMirrorPx <= segLengthPx) {
+    legs.push(makeLeg(firstLegDist + turnaroundMirrorPx, true, false, false));
+  }
+
+  // ── RULE 7 + 2: Bay distribution from first leg toward end ──────────────
+  // Maximize full bays, then assess short bay
+  let cursor = firstLegDist + bayLengthPx;
+
+  while (cursor < segLengthPx) {
+    const distToEnd = segLengthPx - cursor;
+
+    if (distToEnd <= 0) break;
+
+    // Rule 2: if remaining distance after this leg would be > 8', we need another leg
+    // Place this leg, continue
+    if (distToEnd > maxEndGapPx) {
+      // Still more than 8' remaining after placing here — place leg and continue
+      legs.push(makeLeg(cursor));
+      cursor += bayLengthPx;
+    } else {
+      // Within 8' of end — this is the last interior leg
+      legs.push(makeLeg(cursor));
+      break;
+    }
+  }
+
+  // ── End leg: closing the run ─────────────────────────────────────────────
+  // Determine where the end leg goes
+  const lastPlacedDist = legs.filter(l => !l.isTurnaroundMirror).slice(-1)[0];
+  const lastDist = lastPlacedDist ? Math.sqrt(
+    (lastPlacedDist.wallPoint.x - start.x) ** 2 +
+    (lastPlacedDist.wallPoint.y - start.y) ** 2
+  ) : firstLegDist;
+
+  const remainingToEnd = segLengthPx - lastDist;
+
+  // Only add end leg if it's meaningfully different from the last placed leg
+  if (remainingToEnd > bayLengthPx * 0.15) {
+    // Rule 2: end leg placement
+    // Can we fit scaffoldWidth+1' offset from end?
+    const endLegIdealDist = segLengthPx - startOffsetPx;
+
+    if (endLegIdealDist > lastDist + bayLengthPx * 0.15) {
+      // Enough room for proper offset end leg
+      legs.push(makeLeg(endLegIdealDist, false, false, true));
+    } else {
+      // Short bay — place at segment end (corner point)
+      legs.push(makeLeg(segLengthPx, false, false, true));
+    }
+
+    // Rule 1b: turnaround mirror for end leg
+    if (turnaroundOn) {
+      const endLegActualDist = endLegIdealDist > lastDist + bayLengthPx * 0.15
+        ? endLegIdealDist
+        : segLengthPx;
+      const mirrorDist = endLegActualDist - turnaroundMirrorPx;
+      if (mirrorDist > lastDist + bayLengthPx * 0.1) {
+        legs.push(makeLeg(mirrorDist, true, false, false));
+      }
+    }
+  }
+
+  return legs.filter(l => isFinitePoint(l.tickCenter) && isFinitePoint(l.wallPoint));
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
 
 export default function SetScaffoldPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scaffoldWidth, setScaffoldWidth] = useState<ScaffoldWidth>("3'");
   const [plankType, setPlankType] = useState<PlankType>("Wood");
   const [standardBayLength, setStandardBayLength] = useState("10'");
-  // Turnaround: ON = double legs at all corners; OFF = inner corner leg removed
   const [turnaroundBays, setTurnaroundBays] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showScaffold, setShowScaffold] = useState(true);
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
   const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
 
-  const frameHeight = 6 + 4 / 12; // 6'-4"
+  const frameHeight = 6 + 4 / 12;
   const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
   const frameHeightCount = activeElevationData?.quantityEngine.frameTall ?? 7;
-  const scaffoldOffset = 12;
+
+  // pageUnitsPerFoot — from scale calibration in Takeoff Workspace
+  // If not set, Set Scaffold is locked (scale required before proceeding)
+  const pageUnitsPerFoot = activeElevationData?.scale?.pageUnitsPerFoot ?? null;
+  const scaleIsSet = pageUnitsPerFoot != null && pageUnitsPerFoot > 0;
 
   const storedOverlayRows = useMemo(
     () => getScaledOverlayRows(activeElevationData, 1200, 720, 110),
@@ -182,61 +302,85 @@ export default function SetScaffoldPage() {
   const scaffoldOutline = storedScaffoldOutline ?? currentLevelOutline;
   const isUsingFallbackGeometry = !storedScaffoldOutline;
 
-  // Extract elevation heights from stored overlay geometry for per-leg frame counts
   const storedElevationHeights = useMemo(() => {
     return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
   }, [activeElevationData]);
+
+  // Scaffold width in feet
+  const scaffoldWidthFt = useMemo(() => parseFeetValue(scaffoldWidth), [scaffoldWidth]);
+  const bayLengthFt = useMemo(() => parseFeetValue(standardBayLength) || 10, [standardBayLength]);
+
+  // Plank per level by width
+  const plankCountPerBay = useMemo(() => {
+    if (scaffoldWidth === "5'") return 6;
+    if (scaffoldWidth === "3'-6\"") return 4;
+    return 3;
+  }, [scaffoldWidth]);
+
+  // ── Compute all legs via Rule Set v3.0 ────────────────────────────────────
+  // Uses real pageUnitsPerFoot if available, otherwise falls back to SVG-unit estimation
+  const allSegmentLegs = useMemo(() => {
+    if (!scaleIsSet || !scaffoldOutline.length) return [];
+    const puf = pageUnitsPerFoot!;
+    const results: { segIndex: number; legs: LegResult[] }[] = [];
+
+    for (let i = 0; i < scaffoldOutline.length; i++) {
+      const start = scaffoldOutline[i];
+      const end = scaffoldOutline[(i + 1) % scaffoldOutline.length];
+      const legs = computeSegmentLegs(start, end, scaffoldWidthFt, bayLengthFt, puf, turnaroundBays);
+      results.push({ segIndex: i, legs });
+    }
+    return results;
+  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot]);
+
+  // ── Quantities derived from actual rendered legs (Rule Q3) ────────────────
+  const totals = useMemo(() => {
+    if (!scaleIsSet) {
+      // Fall back to formula-based when scale not set
+      const bayCount = activeElevationData?.quantityEngine.bayCount ?? runSummary.reduce((s, r) => s + r.bays, 0);
+      const legCount = activeElevationData?.quantityEngine.legCount ?? runSummary.reduce((s, r) => s + r.legs, 0);
+      const frames = legCount * frameHeightCount;
+      const planks = bayCount * plankCountPerBay * frameHeightCount;
+      const braces = activeElevationData?.quantityEngine.crossBraceCount ?? Math.max(0, bayCount - 5);
+      return { bays: bayCount, legs: legCount, frames, planks, braces };
+    }
+
+    // Count actual rendered legs (excluding turnaround mirror legs for frame count)
+    const structuralLegs = allSegmentLegs.flatMap(s => s.legs.filter(l => !l.isTurnaroundMirror));
+    const allLegs = allSegmentLegs.flatMap(s => s.legs);
+    const legCount = allLegs.length;
+
+    // Bay count = structural legs - 1 per segment (each segment: legs - 1 = bays)
+    let bayCount = 0;
+    for (const seg of allSegmentLegs) {
+      const structLegsInSeg = seg.legs.filter(l => !l.isTurnaroundMirror).length;
+      if (structLegsInSeg > 1) bayCount += structLegsInSeg - 1;
+    }
+
+    const frames = legCount * frameHeightCount;
+    const planks = bayCount * plankCountPerBay * frameHeightCount;
+    const braces = Math.max(0, bayCount - scaffoldOutline.length);
+
+    return { bays: bayCount, legs: legCount, frames, planks, braces };
+  }, [allSegmentLegs, frameHeightCount, plankCountPerBay, scaleIsSet, activeElevationData, scaffoldOutline.length]);
 
   useEffect(() => {
     function loadActiveElevation() {
       const elevation = getActiveElevation();
       const project = getActiveProject();
-      console.log("SET SCAFFOLD LOADED LF:", elevation.linearFeet);
       setActiveElevationData(elevation);
       setActiveProjectName(project.projectName || projectInfo.projectName);
       setScaffoldWidth(formatScaffoldWidth(elevation.scaffoldInput.scaffoldWidth));
       setStandardBayLength(`${elevation.scaffoldInput.standardBayLength}'`);
     }
-
     loadActiveElevation();
     window.addEventListener("focus", loadActiveElevation);
     window.addEventListener("pageshow", loadActiveElevation);
-
     return () => {
       window.removeEventListener("focus", loadActiveElevation);
       window.removeEventListener("pageshow", loadActiveElevation);
     };
   }, []);
-
-  // Plank per level by width: 3'=3, 3'6"=4, 5'=6
-  const plankCountPerBay = useMemo(() => {
-    if (scaffoldWidth === "5'") return 6;
-    if (scaffoldWidth === "3'-6\"") return 4;
-    return 3; // 3' default
-  }, [scaffoldWidth]);
-
-  // Corner count for turnaround adjustment
-  const cornerCount = scaffoldOutline.length;
-  const totals = useMemo(() => {
-    const bayCount = activeElevationData?.quantityEngine.bayCount ?? runSummary.reduce((s, r) => s + r.bays, 0);
-    const baseLegCount = activeElevationData?.quantityEngine.legCount ?? runSummary.reduce((s, r) => s + r.legs, 0);
-
-    // Turnaround OFF: remove inner corner leg per corner
-    const adjustedLegCount = turnaroundBays ? baseLegCount : Math.max(0, baseLegCount - cornerCount);
-
-    // Frames: legs × frameTall
-    const frames = adjustedLegCount * frameHeightCount;
-
-    // Planks: bays × planksPerLevel × frameTall
-    // Turnaround ON adds corner bays: each corner adds 1 extra bay worth of planks
-    const basePlanks = bayCount * plankCountPerBay * frameHeightCount;
-    const turnaroundPlanks = turnaroundBays ? cornerCount * plankCountPerBay * frameHeightCount : 0;
-    const planks = basePlanks + turnaroundPlanks;
-
-    const braces = activeElevationData?.quantityEngine.crossBraceCount ?? Math.max(0, bayCount - 5);
-
-    return { bays: bayCount, legs: adjustedLegCount, frames, planks, braces };
-  }, [activeElevationData, frameHeightCount, plankCountPerBay, turnaroundBays, cornerCount]);
 
   function saveScaffoldInput(updates: Partial<ScaffoldInput>) {
     const current = activeElevationData ?? getActiveElevation();
@@ -248,9 +392,7 @@ export default function SetScaffoldPage() {
       workerReachHeight: getBackendSettings().scaffold.workerReachHeight,
     });
     const nextElevation = {
-      ...current,
-      scaffoldInput,
-      quantityEngine,
+      ...current, scaffoldInput, quantityEngine,
       sectionView: { ...current.sectionView, wallOffset: scaffoldInput.wallOffset },
     };
     setActiveElevationData(nextElevation);
@@ -274,7 +416,7 @@ export default function SetScaffoldPage() {
         subtitle="Combined overlay to scaffold bay layout"
         menuLinks={scaffoldMenuLinks}
         menuOpen={menuOpen}
-        onMenuToggle={() => setMenuOpen((current) => !current)}
+        onMenuToggle={() => setMenuOpen(c => !c)}
         actionsClassName="gap-4"
         actions={
           <>
@@ -282,7 +424,7 @@ export default function SetScaffoldPage() {
             <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
             <KorbanHeaderMeta label="Reference" value={projectInfo.reference} />
             <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
-            <KorbanButton as="a" href="/estimate-review" variant="primary">Save & Continue</KorbanButton>
+            <KorbanButton as="a" href="/frame-configuration" variant="primary">Save & Continue</KorbanButton>
           </>
         }
       />
@@ -290,20 +432,44 @@ export default function SetScaffoldPage() {
       <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_400px]">
         {/* Canvas */}
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black">
+
+          {/* Scale lock overlay — blocks canvas when scale not set */}
+          {!scaleIsSet && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
+              <div className="rounded-[2rem] border border-yellow-500/40 bg-yellow-500/10 p-10 text-center shadow-2xl">
+                <div className="mb-4 text-4xl">⚠</div>
+                <p className="text-sm font-bold uppercase tracking-[0.2em] text-yellow-300">Scale Not Set</p>
+                <p className="mt-3 max-w-xs text-xs leading-5 text-zinc-400">
+                  Scale must be calibrated in Takeoff Workspace before scaffold layout can be generated. Return to Takeoff Workspace and set your scale first.
+                </p>
+                <a
+                  href="/takeoff-workspace"
+                  className="mt-6 inline-block rounded-xl bg-yellow-400 px-6 py-3 text-xs font-bold text-black hover:bg-yellow-300"
+                >
+                  Go to Takeoff Workspace →
+                </a>
+              </div>
+            </div>
+          )}
+
           <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
-            <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay((current) => !current)} />
-            <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold((current) => !current)} />
-            <StatusPill label="Grid" value="5' increments" />
+            <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay(c => !c)} />
+            <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold(c => !c)} />
             <StatusPill label="Frame Tall" value={String(frameHeightCount)} />
             <StatusPill
               label="Turnaround"
               active={turnaroundBays}
-              onClick={() => setTurnaroundBays((current) => !current)}
+              onClick={() => setTurnaroundBays(c => !c)}
               value={turnaroundBays ? "ON" : "OFF"}
+            />
+            <StatusPill
+              label="Scale"
+              active={scaleIsSet}
+              value={scaleIsSet ? "Calibrated" : "Not Set"}
             />
             {isUsingFallbackGeometry && (
               <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs font-bold text-yellow-300">
-                ⚠ Placeholder shape — trace Full Overlay in Takeoff Workspace for accurate tick marks
+                ⚠ Placeholder shape — trace Full Overlay in Takeoff Workspace
               </div>
             )}
           </div>
@@ -314,17 +480,7 @@ export default function SetScaffoldPage() {
             <div className="relative h-full w-full max-w-[1220px] rounded-[2rem] border border-zinc-800 bg-[#050505] shadow-2xl">
               <svg viewBox="0 0 1200 720" className="h-full w-full">
                 <GridAxisLabels />
-
-                {/* N/S/E/W compass labels */}
                 <CompassLabels />
-
-                <g>
-                  <text x="72" y="98" fill="#a1a1aa" fontSize="11" fontWeight="700">PROJECT OVERLAY</text>
-                  <line x1="72" y1="120" x2="112" y2="120" stroke="#2563eb" strokeWidth="2" />
-                  <text x="124" y="124" fill="#a1a1aa" fontSize="10">CURRENT LEVEL</text>
-                  <line x1="72" y1="142" x2="112" y2="142" stroke="#22c55e" strokeWidth="2" />
-                  <text x="124" y="146" fill="#a1a1aa" fontSize="10">LEVEL BELOW</text>
-                </g>
 
                 {showOverlay && (
                   storedOverlayRows.length ? (
@@ -343,34 +499,42 @@ export default function SetScaffoldPage() {
                   )
                 )}
 
-                {showScaffold && (
+                {showScaffold && scaleIsSet && (
                   <g className="scaffold-plan">
-                    <OffsetScaffoldTicks
+                    <ScaffoldRunTicks
+                      segmentLegs={allSegmentLegs}
                       points={scaffoldOutline}
-                      offset={scaffoldOffset}
-                      frameTall={frameHeightCount}
-                      turnaroundBays={turnaroundBays}
                       elevationHeights={storedElevationHeights}
                       frameHeight={frameHeight}
                       workerReachHeight={workerReachHeight}
+                      frameTall={frameHeightCount}
                     />
                   </g>
                 )}
               </svg>
 
-              <div className="absolute left-5 top-5 rounded-2xl border border-zinc-800 bg-black/85 px-4 py-3 backdrop-blur">
-                <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Project</p>
-                <p className="mt-1 text-sm font-bold text-zinc-200">{projectInfo.projectName}</p>
-                <p className="mt-1 font-mono text-[11px] text-orange-300">
-                  {projectInfo.jobNumber} · {projectInfo.reference}
-                </p>
-              </div>
-
-              <div className="absolute bottom-5 left-5 rounded-2xl border border-zinc-800 bg-black/80 p-4 backdrop-blur">
-                <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Generated Scaffold Layout</p>
-                <p className="mt-1 font-mono text-lg font-black text-orange-300">
-                  {totals.bays} Bays · {totals.legs} Legs
-                </p>
+              {/* Project info — bottom left */}
+              <div className="absolute bottom-5 left-5 z-20 space-y-2">
+                {/* Overlay legend */}
+                <div className="rounded-2xl border border-zinc-800 bg-black/85 px-4 py-3 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500 mb-2">Overlay</p>
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="h-px w-8 bg-[#2563eb]" />
+                    <span className="text-[10px] text-zinc-400">Current Level</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="h-px w-8 bg-[#22c55e]" />
+                    <span className="text-[10px] text-zinc-400">Level Below</span>
+                  </div>
+                </div>
+                {/* Project bubble */}
+                <div className="rounded-2xl border border-zinc-800 bg-black/85 px-4 py-3 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Project</p>
+                  <p className="mt-1 text-sm font-bold text-zinc-200">{activeProjectName}</p>
+                  <p className="mt-1 font-mono text-[11px] text-orange-300">
+                    {projectInfo.jobNumber}
+                  </p>
+                </div>
               </div>
 
               <div className="absolute bottom-5 right-5 flex gap-2">
@@ -386,56 +550,66 @@ export default function SetScaffoldPage() {
         <aside className="overflow-y-auto bg-[#080604] p-4">
           <Panel title="Backend Takeoff Info" subtitle="Current scaffold defaults">
             <ControlLabel label="Frame Width">
-              <select value={scaffoldWidth} onChange={(event) => updateScaffoldWidth(event.target.value as ScaffoldWidth)} className="control-input">
+              <select value={scaffoldWidth} onChange={e => updateScaffoldWidth(e.target.value as ScaffoldWidth)} className="control-input">
                 <option>3'</option>
                 <option>3'-6"</option>
                 <option>5'</option>
               </select>
             </ControlLabel>
-
             <ControlLabel label="Plank Count / Width">
               <input className="control-input" readOnly value={plankCountPerBay} />
             </ControlLabel>
-
             <ControlLabel label="Plank Type">
-              <select value={plankType} onChange={(event) => setPlankType(event.target.value as PlankType)} className="control-input">
+              <select value={plankType} onChange={e => setPlankType(e.target.value as PlankType)} className="control-input">
                 <option>Wood</option>
                 <option>Aluminum</option>
                 <option>Steel</option>
               </select>
             </ControlLabel>
-
             <ControlLabel label="Standard Bay Length">
-              <input value={standardBayLength} onChange={(event) => updateStandardBayLength(event.target.value)} className="control-input" />
+              <input value={standardBayLength} onChange={e => updateStandardBayLength(e.target.value)} className="control-input" />
             </ControlLabel>
-
-            {/* Turnaround toggle — moved here for clarity */}
             <button
-              onClick={() => setTurnaroundBays((current) => !current)}
+              onClick={() => setTurnaroundBays(c => !c)}
               className={`mt-3 flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left ${
-                turnaroundBays
-                  ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
-                  : "border-zinc-800 bg-black text-zinc-500"
+                turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 bg-black text-zinc-500"
               }`}
             >
               <div>
                 <span className="text-xs font-bold">Turnaround Bays</span>
                 <p className="mt-0.5 text-[10px] text-zinc-600">
-                  {turnaroundBays
-                    ? "ON — double legs kept at all corners"
-                    : "OFF — inner corner leg removed, count adjusted"}
+                  {turnaroundBays ? "ON — double legs at all offset corners" : "OFF — single leg at offset corners"}
                 </p>
               </div>
               <span className="font-mono text-xs font-bold">{turnaroundBays ? "ON" : "OFF"}</span>
             </button>
-
             <ControlLabel label="Frame Height Count">
               <input className="control-input" readOnly value={frameHeightCount} />
             </ControlLabel>
+            <ControlLabel label="Scale">
+              <input
+                className="control-input"
+                readOnly
+                value={(() => {
+                  if (!scaleIsSet) return "Not calibrated — set in Takeoff Workspace";
+                  const puf = pageUnitsPerFoot!;
+                  const inchesPerFoot = puf / 72;
+                  if (Math.abs(inchesPerFoot - 0.125) < 0.02) return "1/8\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.25) < 0.02) return "1/4\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.1875) < 0.02) return "3/16\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.0625) < 0.02) return "1/16\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.5) < 0.02) return "1/2\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.375) < 0.02) return "3/8\" = 1'";
+                  if (Math.abs(inchesPerFoot - 0.0833) < 0.015) return "1\" = 12'";
+                  const ratio = Math.round(12 / inchesPerFoot);
+                  return `1\" = ${ratio}'`;
+                })()}
+                style={{ color: scaleIsSet ? undefined : "#ef4444" }}
+              />
+            </ControlLabel>
           </Panel>
 
-          <Panel title="Scaffold Quantities" subtitle="Generated from scaffold layout">
-            {/* Frames and Planks — primary quantities, larger with orange glow */}
+          <Panel title="Scaffold Quantities" subtitle="Derived from rendered scaffold legs">
             <div className="mb-4 grid grid-cols-2 gap-2">
               <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-3 shadow-[0_0_18px_rgba(249,115,22,0.08)]">
                 <p className="text-[10px] uppercase tracking-widest text-zinc-500">Total Frames</p>
@@ -446,7 +620,6 @@ export default function SetScaffoldPage() {
                 <p className="mt-1 font-mono text-lg font-bold text-orange-300">{totals.planks.toLocaleString()}</p>
               </div>
             </div>
-            {/* All other quantities */}
             <div className="space-y-2">
               <QuantityRow label="Total Lineal Ft" value={`${(activeElevationData?.linearFeet ?? 482).toLocaleString()} LF`} />
               <QuantityRow label="Standard Bays" value={totals.bays.toLocaleString()} />
@@ -455,9 +628,7 @@ export default function SetScaffoldPage() {
               <QuantityRow label="Cross Braces" value={totals.braces.toLocaleString()} />
               <QuantityRow label="Plank Type" value={plankType} />
               <QuantityRow label="Planks / Level" value={String(plankCountPerBay)} />
-              <QuantityRow label="Corner Condition" value={turnaroundBays ? "Double Leg" : "Single Leg"} />
             </div>
-
             <div className="mt-4 space-y-2">
               {activeElevationData ? (
                 <div className="rounded-2xl border border-zinc-800 bg-black p-3">
@@ -470,7 +641,7 @@ export default function SetScaffoldPage() {
                   </p>
                 </div>
               ) : (
-                runSummary.map((run) => (
+                runSummary.map(run => (
                   <div key={run.label} className="rounded-2xl border border-zinc-800 bg-black p-3">
                     <div className="flex items-center justify-between">
                       <p className="text-xs font-bold text-zinc-300">{run.label}</p>
@@ -488,7 +659,7 @@ export default function SetScaffoldPage() {
           <Panel title="Next Step" subtitle="Move scaffold layout into section design">
             <div className="grid gap-2">
               <a href="/project-plan-desk" className="next-link">Return To Project Plan Desk</a>
-              <a href="/estimate-review" className="next-link-primary">Save & Continue</a>
+              <a href="/frame-configuration" className="next-link-primary">Save & Continue</a>
             </div>
           </Panel>
         </aside>
@@ -496,25 +667,15 @@ export default function SetScaffoldPage() {
 
       <style jsx global>{`
         .control-input {
-          width: 100%;
-          border-radius: 0.9rem;
-          border: 1px solid rgb(39 39 42);
-          background: #000;
-          padding: 0.75rem 0.9rem;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-          font-size: 0.8rem;
-          font-weight: 800;
-          color: rgb(253 186 116);
-          outline: none;
+          width: 100%; border-radius: 0.9rem; border: 1px solid rgb(39 39 42);
+          background: #000; padding: 0.75rem 0.9rem;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 0.8rem; font-weight: 800; color: rgb(253 186 116); outline: none;
         }
         .control-input:focus { border-color: rgba(249, 115, 22, 0.55); }
         .next-link, .next-link-primary {
-          display: block;
-          border-radius: 0.9rem;
-          padding: 0.9rem 1rem;
-          text-align: center;
-          font-size: 0.8rem;
-          font-weight: 800;
+          display: block; border-radius: 0.9rem; padding: 0.9rem 1rem;
+          text-align: center; font-size: 0.8rem; font-weight: 800;
         }
         .next-link { border: 1px solid rgb(39 39 42); background: #000; color: rgb(212 212 216); }
         .next-link-primary { background: rgb(249 115 22); color: #000; }
@@ -523,36 +684,108 @@ export default function SetScaffoldPage() {
   );
 }
 
-// ── Compass N/S/E/W labels placed at edges of the SVG viewport ──
-function CompassLabels() {
-  const style = { fontSize: "13", fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
+// ── ScaffoldRunTicks — renders pre-computed leg results ───────────────────────
+function ScaffoldRunTicks({
+  segmentLegs,
+  points,
+  elevationHeights,
+  frameHeight,
+  workerReachHeight,
+  frameTall,
+}: {
+  segmentLegs: { segIndex: number; legs: LegResult[] }[];
+  points: PlanPoint[];
+  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>;
+  frameHeight: number;
+  workerReachHeight: number;
+  frameTall: number;
+}) {
+  const tickLength = 10;
+
+  function getLocalFrameTall(point: PlanPoint): number {
+    if (elevationHeights.length === 0) return frameTall;
+    return getFrameTallForPoint(point, points, elevationHeights, frameHeight, workerReachHeight, frameTall);
+  }
+
   return (
-    <g>
-      {/* North — top center */}
-      <text x="600" y="72" textAnchor="middle" {...style}>N</text>
-      {/* South — bottom center */}
-      <text x="600" y="700" textAnchor="middle" {...style}>S</text>
-      {/* West — left center */}
-      <text x="30" y="365" textAnchor="middle" {...style}>W</text>
-      {/* East — right center */}
-      <text x="1170" y="365" textAnchor="middle" {...style}>E</text>
+    <g fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
+      {segmentLegs.map(({ segIndex, legs }) => {
+        if (legs.length === 0) return null;
+
+        const segStart = points[segIndex];
+        const segEnd = points[(segIndex + 1) % points.length];
+        if (!segStart || !segEnd) return null;
+
+        const dx = segEnd.x - segStart.x;
+        const dy = segEnd.y - segStart.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        const normal = len > 0 ? { x: dy / len, y: -dx / len } : { x: 0, y: -1 };
+
+        const structuralLegs = legs.filter(l => !l.isTurnaroundMirror);
+
+        return (
+          <g key={`seg-${segIndex}`}>
+            {/* Diagonal cross-braces between consecutive structural legs */}
+            {structuralLegs.slice(0, -1).map((leg, i) => {
+              const next = structuralLegs[i + 1];
+              const cx = (leg.tickCenter.x + next.tickCenter.x) / 2;
+              const cy = (leg.tickCenter.y + next.tickCenter.y) / 2;
+              const along = { x: dx / len, y: dy / len };
+              const bayPx = Math.sqrt((next.wallPoint.x - leg.wallPoint.x) ** 2 + (next.wallPoint.y - leg.wallPoint.y) ** 2);
+              const braceLen = Math.min(14, Math.max(6, bayPx * 0.34));
+              const depth = 3;
+              return (
+                <line
+                  key={`brace-${segIndex}-${i}`}
+                  x1={cx - along.x * (braceLen / 2) - normal.x * depth}
+                  y1={cy - along.y * (braceLen / 2) - normal.y * depth}
+                  x2={cx + along.x * (braceLen / 2) + normal.x * depth}
+                  y2={cy + along.y * (braceLen / 2) + normal.y * depth}
+                  strokeWidth="0.4" opacity="0.34"
+                />
+              );
+            })}
+
+            {/* Tick marks for all legs — identical appearance regardless of type */}
+            {legs.map((leg, i) => {
+              const localFrameTall = getLocalFrameTall(leg.wallPoint);
+
+              const t1 = {
+                x1: leg.tickCenter.x - normal.x * (tickLength / 2),
+                y1: leg.tickCenter.y - normal.y * (tickLength / 2),
+                x2: leg.tickCenter.x + normal.x * (tickLength / 2),
+                y2: leg.tickCenter.y + normal.y * (tickLength / 2),
+              };
+
+              if (!isFiniteNumber(t1.x1) || !isFiniteNumber(t1.y1) || !isFiniteNumber(t1.x2) || !isFiniteNumber(t1.y2)) return null;
+
+              return (
+                <g key={`leg-${segIndex}-${i}`}>
+                  <line x1={t1.x1} y1={t1.y1} x2={t1.x2} y2={t1.y2} strokeWidth="1" />
+                  <text
+                    x={leg.labelPoint.x} y={leg.labelPoint.y}
+                    fontSize="5" fontFamily="monospace" fontWeight="300"
+                    opacity="0.62" textAnchor="middle" dominantBaseline="middle"
+                  >
+                    {localFrameTall}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })}
     </g>
   );
 }
 
-function isFiniteNumber(value: number) {
-  return Number.isFinite(value);
-}
-
-function isFinitePoint(point: PlanPoint) {
-  return isFiniteNumber(point.x) && isFiniteNumber(point.y);
-}
+// ── Geometry helpers (unchanged) ─────────────────────────────────────────────
 
 function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
   const geometry = elevation?.overlayGeometry;
   if (!geometry) return [];
-  const keyFullOverlay = geometry.fullOverlayRows.find((row) => row.isKeyFloor && row.points.length >= 3);
-  const firstFullOverlay = geometry.fullOverlayRows.find((row) => row.points.length >= 3);
+  const keyFullOverlay = geometry.fullOverlayRows.find(row => row.isKeyFloor && row.points.length >= 3);
+  const firstFullOverlay = geometry.fullOverlayRows.find(row => row.points.length >= 3);
   if (geometry.tracedPerimeter.length >= 3) return geometry.tracedPerimeter;
   if (geometry.overlayPoints.length >= 3) return geometry.overlayPoints;
   if (keyFullOverlay) return keyFullOverlay.points;
@@ -564,21 +797,16 @@ function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
 function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number) {
   const validPoints = points.filter(isFinitePoint);
   if (validPoints.length < 2) return [];
-  const minX = Math.min(...validPoints.map((point) => point.x));
-  const maxX = Math.max(...validPoints.map((point) => point.x));
-  const minY = Math.min(...validPoints.map((point) => point.y));
-  const maxY = Math.max(...validPoints.map((point) => point.y));
-  const geometryWidth = Math.max(1, maxX - minX);
-  const geometryHeight = Math.max(1, maxY - minY);
-  const scale = Math.min((width - padding * 2) / geometryWidth, (height - padding * 2) / geometryHeight);
-  const drawnWidth = geometryWidth * scale;
-  const drawnHeight = geometryHeight * scale;
-  const offsetX = padding + (width - padding * 2 - drawnWidth) / 2;
-  const offsetY = padding + (height - padding * 2 - drawnHeight) / 2;
-  return validPoints.map((point) => ({
-    x: offsetX + (point.x - minX) * scale,
-    y: offsetY + (point.y - minY) * scale,
-  }));
+  const minX = Math.min(...validPoints.map(p => p.x));
+  const maxX = Math.max(...validPoints.map(p => p.x));
+  const minY = Math.min(...validPoints.map(p => p.y));
+  const maxY = Math.max(...validPoints.map(p => p.y));
+  const gW = Math.max(1, maxX - minX); const gH = Math.max(1, maxY - minY);
+  const scale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
+  const dW = gW * scale; const dH = gH * scale;
+  const oX = padding + (width - padding * 2 - dW) / 2;
+  const oY = padding + (height - padding * 2 - dH) / 2;
+  return validPoints.map(p => ({ x: oX + (p.x - minX) * scale, y: oY + (p.y - minY) * scale }));
 }
 
 function getScaledPrimaryOutline(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
@@ -591,19 +819,16 @@ function getScaledOverlayRows(elevation: ProjectElevation | null, width: number,
   const geometry = elevation?.overlayGeometry;
   const basePoints = getPrimaryGeometryPoints(elevation);
   if (!geometry || basePoints.length < 2) return [];
-  const allRows = geometry.fullOverlayRows.filter((row) => row.points.length >= 2);
+  const allRows = geometry.fullOverlayRows.filter(row => row.points.length >= 2);
   const fallbackRows = allRows.length
     ? allRows
     : [{ id: 0, isKeyFloor: true, level: geometry.levelName, points: basePoints, closed: basePoints.length >= 3, color: "#2563eb" }];
-  const allPoints = fallbackRows.flatMap((row) => row.points);
+  const allPoints = fallbackRows.flatMap(row => row.points);
   return fallbackRows.map((row, index) => ({
-    id: row.id ?? index,
-    level: row.level,
-    isKeyFloor: Boolean(row.isKeyFloor),
-    closed: Boolean(row.closed),
-    color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
+    id: row.id ?? index, level: row.level, isKeyFloor: Boolean(row.isKeyFloor),
+    closed: Boolean(row.closed), color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
     points: mapGeometryPoints(allPoints.length >= 2 ? row.points : basePoints, width, height, padding),
-  })).filter((row) => row.points.length >= 2);
+  })).filter(row => row.points.length >= 2);
 }
 
 function getScaledReferencePoints(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
@@ -618,7 +843,7 @@ function getScaledReferencePoints(elevation: ProjectElevation | null, width: num
 function pointsToSvgPath(points: PlanPoint[], closed: boolean) {
   if (points.length < 2) return "";
   const [first, ...rest] = points;
-  return `M${first.x} ${first.y} ${rest.map((point) => `L${point.x} ${point.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
+  return `M${first.x} ${first.y} ${rest.map(p => `L${p.x} ${p.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
 }
 
 function StoredTakeoffOverlay({ rows, referencePoints }: {
@@ -629,21 +854,19 @@ function StoredTakeoffOverlay({ rows, referencePoints }: {
     <g>
       {rows.map((row, index) => (
         <g key={`${row.id}-${index}`}>
-          <path
-            d={pointsToSvgPath(row.points, row.closed)}
-            fill="transparent"
+          <path d={pointsToSvgPath(row.points, row.closed)} fill="transparent"
             stroke={row.isKeyFloor ? "#2563eb" : row.color}
-            strokeWidth={row.isKeyFloor ? "0.9" : "0.6"}
-            strokeLinejoin="miter"
+            strokeWidth={row.isKeyFloor ? "0.9" : "0.6"} strokeLinejoin="miter"
             opacity={row.isKeyFloor ? 1 : 0.9}
           />
-          {row.points.map((point, pointIndex) => (
-            <circle key={`${row.id}-point-${pointIndex}`} cx={point.x} cy={point.y} r="2" fill={row.isKeyFloor ? "#60a5fa" : "#22c55e"} opacity="0.75" />
+          {row.points.map((point, pi) => (
+            <circle key={`${row.id}-pt-${pi}`} cx={point.x} cy={point.y} r="2"
+              fill={row.isKeyFloor ? "#60a5fa" : "#22c55e"} opacity="0.75" />
           ))}
         </g>
       ))}
-      {referencePoints.map((point, index) => (
-        <g key={`reference-point-${index}`}>
+      {referencePoints.map((point, i) => (
+        <g key={`ref-${i}`}>
           <line x1={point.x - 5} y1={point.y} x2={point.x + 5} y2={point.y} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
           <line x1={point.x} y1={point.y - 5} x2={point.x} y2={point.y + 5} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
         </g>
@@ -652,337 +875,33 @@ function StoredTakeoffOverlay({ rows, referencePoints }: {
   );
 }
 
-function OffsetScaffoldTicks({
-  points,
-  offset,
-  frameTall,
-  turnaroundBays,
-  elevationHeights,
-  frameHeight,
-  workerReachHeight,
-}: {
-  points: PlanPoint[];
-  offset: number;
-  frameTall: number;
-  turnaroundBays: boolean;
-  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>;
-  frameHeight: number;
-  workerReachHeight: number;
-}) {
-  const tickLength = 10;
-  const labelOffset = 21;
-  // Standard bay spacing — used as the reference for how many bays fit per segment
-  const standardBaySpacing = 46;
-  // Segments shorter than this threshold get NO interior legs —
-  // just the two corner legs at each end. This prevents the cluster
-  // problem (Image #2) where short walls bunch all legs together.
-  const minSegmentForInterior = standardBaySpacing * 0.6;
-  const duplicateCornerTolerance = 2;
-
-  const validPoints = points.filter(isFinitePoint);
-  if (validPoints.length < 2 || !isFiniteNumber(offset) || !isFiniteNumber(frameTall)) return null;
-
-  const closedSegments = validPoints.map((point, index) => ({
-    start: point,
-    end: validPoints[(index + 1) % validPoints.length],
-  }));
-
-  function getLocalFrameTall(point: PlanPoint): number {
-    if (elevationHeights.length === 0) return frameTall;
-    return getFrameTallForPoint(point, validPoints, elevationHeights, frameHeight, workerReachHeight, frameTall);
-  }
-
-  function renderScaffoldTick({
-    key,
-    tickCenter,
-    labelPoint,
-    outward,
-    localFrameTall,
-  }: {
-    key: string;
-    tickCenter: PlanPoint;
-    labelPoint: PlanPoint;
-    outward: PlanPoint;
-    localFrameTall: number;
-  }) {
-    if (!isFinitePoint(tickCenter) || !isFinitePoint(labelPoint) || !isFinitePoint(outward)) return null;
-    const tick = {
-      x1: tickCenter.x - outward.x * (tickLength / 2),
-      y1: tickCenter.y - outward.y * (tickLength / 2),
-      x2: tickCenter.x + outward.x * (tickLength / 2),
-      y2: tickCenter.y + outward.y * (tickLength / 2),
-    };
-    if (!isFiniteNumber(tick.x1) || !isFiniteNumber(tick.y1) || !isFiniteNumber(tick.x2) || !isFiniteNumber(tick.y2)) return null;
-
-    return (
-      <g key={key}>
-        <line x1={tick.x1} y1={tick.y1} x2={tick.x2} y2={tick.y2} strokeWidth="1" />
-        <text
-          x={labelPoint.x} y={labelPoint.y}
-          fontSize="5" fontFamily="monospace" fontWeight="300"
-          opacity="0.62" textAnchor="middle" dominantBaseline="middle"
-        >
-          {localFrameTall}
-        </text>
-      </g>
-    );
-  }
-
+function CompassLabels() {
+  const style = { fontSize: "13", fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
   return (
-    <g fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
-      {closedSegments.map(({ start, end }, segmentIndex) => {
-        const dx = end.x - start.x;
-        const dy = end.y - start.y;
-        const length = Math.sqrt(dx * dx + dy * dy);
-        if (!isFiniteNumber(length) || length <= 0) return null;
-
-        const outward = { x: dy / length, y: -dx / length };
-        if (!isFinitePoint(outward)) return null;
-
-        // ── Adaptive bay distribution ────────────────────────────────────────
-        // SHORT segments (< minSegmentForInterior): no interior legs at all.
-        //   Corner legs at each end handle it. Short-bay dots render instead.
-        // LONGER segments: compute bay count by rounding length / standardBaySpacing,
-        //   then distribute legs EVENLY across the full segment length.
-        //   This means a 1.5-bay wall gets 1 interior leg at the midpoint,
-        //   not a cluster at one end. Legs are always spread, never bunched.
-        // ─────────────────────────────────────────────────────────────────────
-        let interiorLegDistances: number[] = [];
-        if (length >= minSegmentForInterior) {
-          const rawBayCount = Math.max(1, Math.round(length / standardBaySpacing));
-          // interior legs = bay boundaries between the two endpoint corners
-          interiorLegDistances = Array.from(
-            { length: rawBayCount - 1 },
-            (_, i) => ((i + 1) * length) / rawBayCount,
-          );
-        }
-
-        // Short bay — render 3 dots between corner legs (scaffold drawing convention)
-        if (length < minSegmentForInterior) {
-          const dotCount = 3;
-          return (
-            <g key={`scaffold-segment-${segmentIndex}`}>
-              {Array.from({ length: dotCount }, (_, i) => {
-                const t = (i + 1) / (dotCount + 1);
-                const fp = { x: start.x + dx * t, y: start.y + dy * t };
-                return (
-                  <circle
-                    key={`shortbay-dot-${segmentIndex}-${i}`}
-                    cx={fp.x + outward.x * offset}
-                    cy={fp.y + outward.y * offset}
-                    r="1.8" fill="#f8fafc" stroke="none" opacity="0.5"
-                  />
-                );
-              })}
-            </g>
-          );
-        }
-
-        // Build interior tick data — never at 0 or length (those are corner territory)
-        const tickData = interiorLegDistances.map((distance) => {
-          const t = distance / length;
-          const facePoint = { x: start.x + dx * t, y: start.y + dy * t };
-          const tickCenter = { x: facePoint.x + outward.x * offset, y: facePoint.y + outward.y * offset };
-          const labelPoint = { x: facePoint.x + outward.x * labelOffset, y: facePoint.y + outward.y * labelOffset };
-          return { distance, tickCenter, labelPoint, segmentIndex };
-        }).filter(({ distance, tickCenter, labelPoint }) =>
-          isFiniteNumber(distance) &&
-          isFinitePoint(tickCenter) &&
-          isFinitePoint(labelPoint) &&
-          distance > duplicateCornerTolerance &&
-          length - distance > duplicateCornerTolerance,
-        );
-
-        return (
-          <g key={`scaffold-segment-${segmentIndex}`}>
-            {tickData.map(({ distance, tickCenter, labelPoint }, tickIndex) => {
-              const localFrameTall = getLocalFrameTall(tickCenter);
-              return renderScaffoldTick({
-                key: `scaffold-tick-${segmentIndex}-${tickIndex}`,
-                tickCenter,
-                labelPoint,
-                outward,
-                localFrameTall,
-              });
-            })}
-
-            {tickData.slice(0, -1).map((current, tickIndex) => {
-              const next = tickData[tickIndex + 1];
-              if (current.segmentIndex !== next.segmentIndex) return null;
-              const center = {
-                x: (current.tickCenter.x + next.tickCenter.x) / 2,
-                y: (current.tickCenter.y + next.tickCenter.y) / 2,
-              };
-              const along = { x: dx / length, y: dy / length };
-              const braceLength = Math.min(14, Math.max(6, (next.distance - current.distance) * 0.34));
-              const braceDepth = 3;
-              const brace = {
-                x1: center.x - along.x * (braceLength / 2) - outward.x * braceDepth,
-                y1: center.y - along.y * (braceLength / 2) - outward.y * braceDepth,
-                x2: center.x + along.x * (braceLength / 2) + outward.x * braceDepth,
-                y2: center.y + along.y * (braceLength / 2) + outward.y * braceDepth,
-              };
-              if (!isFinitePoint(center) || !isFinitePoint(along) || !isFiniteNumber(braceLength) ||
-                !isFiniteNumber(brace.x1) || !isFiniteNumber(brace.y1) || !isFiniteNumber(brace.x2) || !isFiniteNumber(brace.y2)) return null;
-
-              return (
-                <line
-                  key={`brace-${segmentIndex}-${tickIndex}`}
-                  x1={brace.x1} y1={brace.y1} x2={brace.x2} y2={brace.y2}
-                  strokeWidth="0.4" opacity="0.34"
-                />
-              );
-            })}
-          </g>
-        );
-      })}
-
-      {/* Corner legs — hybrid 3-tier + span-over rule (hard-coded per spec)
-       *
-       * SPAN-OVER: if segment ≤ 0.7×bay long AND perpendicular depth ≤ 0.2×bay
-       *   → skip all corner legs for both endpoints of that segment
-       *   → main wall legs span over the protrusion cleanly
-       *
-       * TIER 3: if incoming segment < 0.5×bay
-       *   → 1 midpoint leg only, suppress both corner legs for that pair
-       *
-       * TIER 1+2: standard corner legs (incoming + outgoing, boxed if turnaround ON)
-       */}
-      {(() => {
-        // Pre-compute which corners are suppressed by the span-over rule
-        const suppressedCorners = new Set<number>();
-        validPoints.forEach((cornerPoint, cornerIndex) => {
-          const nextIndex = (cornerIndex + 1) % validPoints.length;
-          const nextPoint = validPoints[nextIndex];
-          const prevPoint = validPoints[(cornerIndex - 1 + validPoints.length) % validPoints.length];
-          const segDx = nextPoint.x - cornerPoint.x;
-          const segDy = nextPoint.y - cornerPoint.y;
-          const segLength = Math.sqrt(segDx * segDx + segDy * segDy);
-          if (!isFiniteNumber(segLength) || segLength <= 0) return;
-          // Length threshold: ≤ 0.7 × standardBaySpacing
-          if (segLength > standardBaySpacing * 0.7) return;
-          // Perpendicular depth: cross product of incoming unit and outgoing segment
-          const inDx = cornerPoint.x - prevPoint.x;
-          const inDy = cornerPoint.y - prevPoint.y;
-          const inLen = Math.sqrt(inDx * inDx + inDy * inDy);
-          if (!isFiniteNumber(inLen) || inLen <= 0) return;
-          const perpDepth = Math.abs(segDx * (-inDy / inLen) + segDy * (inDx / inLen));
-          // Depth threshold: ≤ 0.2 × standardBaySpacing
-          if (perpDepth <= standardBaySpacing * 0.2) {
-            suppressedCorners.add(cornerIndex);
-            suppressedCorners.add(nextIndex);
-          }
-        });
-
-        return validPoints.map((cornerPoint, cornerIndex) => {
-          const previousPoint = validPoints[(cornerIndex - 1 + validPoints.length) % validPoints.length];
-          const nextPoint = validPoints[(cornerIndex + 1) % validPoints.length];
-          const incoming = { dx: cornerPoint.x - previousPoint.x, dy: cornerPoint.y - previousPoint.y };
-          const outgoing = { dx: nextPoint.x - cornerPoint.x, dy: nextPoint.y - cornerPoint.y };
-          const incomingLength = Math.sqrt(incoming.dx * incoming.dx + incoming.dy * incoming.dy);
-          const outgoingLength = Math.sqrt(outgoing.dx * outgoing.dx + outgoing.dy * outgoing.dy);
-          if (!isFiniteNumber(incomingLength) || !isFiniteNumber(outgoingLength) || incomingLength <= 0 || outgoingLength <= 0) return null;
-
-          const incomingOutward = { x: incoming.dy / incomingLength, y: -incoming.dx / incomingLength };
-          const outgoingOutward = { x: outgoing.dy / outgoingLength, y: -outgoing.dx / outgoingLength };
-          if (!isFinitePoint(incomingOutward) || !isFinitePoint(outgoingOutward)) return null;
-
-          const localFrameTall = getLocalFrameTall(cornerPoint);
-
-          // SPAN-OVER: skip this corner entirely
-          if (suppressedCorners.has(cornerIndex)) {
-            return <g key={`corner-scaffold-ticks-${cornerIndex}`} />;
-          }
-
-          // TIER 3: incoming segment very short → single midpoint leg, no corner leg
-          if (incomingLength < standardBaySpacing * 0.5) {
-            const midFace = {
-              x: previousPoint.x + incoming.dx * 0.5,
-              y: previousPoint.y + incoming.dy * 0.5,
-            };
-            return (
-              <g key={`corner-scaffold-ticks-${cornerIndex}`}>
-                {renderScaffoldTick({
-                  key: `corner-tier3-mid-${cornerIndex}`,
-                  tickCenter: { x: midFace.x + incomingOutward.x * offset, y: midFace.y + incomingOutward.y * offset },
-                  labelPoint: { x: midFace.x + incomingOutward.x * labelOffset, y: midFace.y + incomingOutward.y * labelOffset },
-                  outward: incomingOutward,
-                  localFrameTall,
-                })}
-              </g>
-            );
-          }
-
-          // TIER 1 & 2: standard corner legs
-          const boxedCornerTick = {
-            x: cornerPoint.x + incomingOutward.x * offset + outgoingOutward.x * offset,
-            y: cornerPoint.y + incomingOutward.y * offset + outgoingOutward.y * offset,
-          };
-          const boxedCornerLabel = {
-            x: cornerPoint.x + incomingOutward.x * labelOffset + outgoingOutward.x * offset,
-            y: cornerPoint.y + incomingOutward.y * labelOffset + outgoingOutward.y * offset,
-          };
-
-          return (
-            <g key={`corner-scaffold-ticks-${cornerIndex}`}>
-              {renderScaffoldTick({
-                key: `corner-incoming-${cornerIndex}`,
-                tickCenter: { x: cornerPoint.x + incomingOutward.x * offset, y: cornerPoint.y + incomingOutward.y * offset },
-                labelPoint: { x: cornerPoint.x + incomingOutward.x * labelOffset, y: cornerPoint.y + incomingOutward.y * labelOffset },
-                outward: incomingOutward,
-                localFrameTall,
-              })}
-              {renderScaffoldTick({
-                key: `corner-outgoing-${cornerIndex}`,
-                tickCenter: { x: cornerPoint.x + outgoingOutward.x * offset, y: cornerPoint.y + outgoingOutward.y * offset },
-                labelPoint: { x: cornerPoint.x + outgoingOutward.x * labelOffset, y: cornerPoint.y + outgoingOutward.y * labelOffset },
-                outward: outgoingOutward,
-                localFrameTall,
-              })}
-              {turnaroundBays && isFinitePoint(boxedCornerTick) && isFinitePoint(boxedCornerLabel) &&
-                renderScaffoldTick({
-                  key: `corner-boxed-leg-${cornerIndex}`,
-                  tickCenter: boxedCornerTick,
-                  labelPoint: boxedCornerLabel,
-                  outward: incomingOutward,
-                  localFrameTall,
-                })}
-            </g>
-          );
-        });
-      })()}
+    <g>
+      <text x="600" y="72" textAnchor="middle" {...style}>N</text>
+      <text x="600" y="700" textAnchor="middle" {...style}>S</text>
+      <text x="30" y="365" textAnchor="middle" {...style}>W</text>
+      <text x="1170" y="365" textAnchor="middle" {...style}>E</text>
     </g>
   );
 }
 
-function PieceIcon({ type }: { type: PieceType }) {
-  return (
-    <svg viewBox="0 0 80 54" className="h-14 w-full">
-      {type === "Straight Bay" && (<><line x1="18" y1="12" x2="18" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="62" y1="12" x2="62" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1.25" /><line x1="25" y1="36" x2="55" y2="24" stroke="#f8fafc" strokeWidth="1.25" /></>)}
-      {type === "Short Bay" && (<><line x1="18" y1="30" x2="62" y2="30" stroke="#f8fafc" strokeWidth="1" opacity="0.55" /><circle cx="30" cy="30" r="2.5" fill="#f8fafc" /><circle cx="40" cy="30" r="2.5" fill="#f8fafc" /><circle cx="50" cy="30" r="2.5" fill="#f8fafc" /></>)}
-      {type === "Turnaround Bay" && (<><line x1="20" y1="12" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="42" x2="60" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="60" y1="42" x2="60" y2="12" stroke="#f8fafc" strokeWidth="1.5" /></>)}
-      {type === "Inside Corner" && (<><line x1="18" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="14" x2="18" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="18" y1="42" x2="58" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="16" y1="14" x2="16" y2="42" stroke="#f8fafc" strokeWidth="1" /></>)}
-      {type === "Outside Corner" && (<><line x1="20" y1="14" x2="58" y2="14" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="14" x2="20" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="20" y1="42" x2="40" y2="42" stroke="#f8fafc" strokeWidth="1.5" /><line x1="23" y1="14" x2="23" y2="42" stroke="#f8fafc" strokeWidth="1" /></>)}
-      {type === "End Bay" && (<><line x1="40" y1="12" x2="40" y2="44" stroke="#f8fafc" strokeWidth="1.5" /><line x1="28" y1="18" x2="52" y2="18" stroke="#f8fafc" strokeWidth="1.25" /><line x1="28" y1="38" x2="52" y2="38" stroke="#f8fafc" strokeWidth="1.25" /></>)}
-    </svg>
-  );
-}
-
 function GridAxisLabels() {
-  const xLabels = Array.from({ length: 21 }, (_, index) => index * 5);
-  const yLabels = Array.from({ length: 15 }, (_, index) => index * 5);
+  const xLabels = Array.from({ length: 21 }, (_, i) => i * 5);
+  const yLabels = Array.from({ length: 15 }, (_, i) => i * 5);
   return (
     <g opacity="0.45">
-      {xLabels.map((value, index) => (
-        <g key={`x-${value}`}>
-          <text x={54 + index * 50} y="42" fill="#a1a1aa" fontSize="10" fontFamily="monospace">{value}'</text>
-          <line x1={58 + index * 50} y1="49" x2={58 + index * 50} y2="62" stroke="#a1a1aa" strokeWidth="0.7" />
+      {xLabels.map((v, i) => (
+        <g key={`x-${v}`}>
+          <text x={54 + i * 50} y="42" fill="#a1a1aa" fontSize="10" fontFamily="monospace">{v}'</text>
+          <line x1={58 + i * 50} y1="49" x2={58 + i * 50} y2="62" stroke="#a1a1aa" strokeWidth="0.7" />
         </g>
       ))}
-      {yLabels.map((value, index) => (
-        <g key={`y-${value}`}>
-          <text x="18" y={76 + index * 38} fill="#a1a1aa" fontSize="10" fontFamily="monospace">{value}'</text>
-          <line x1="46" y1={72 + index * 38} x2="60" y2={72 + index * 38} stroke="#a1a1aa" strokeWidth="0.7" />
+      {yLabels.map((v, i) => (
+        <g key={`y-${v}`}>
+          <text x="18" y={76 + i * 38} fill="#a1a1aa" fontSize="10" fontFamily="monospace">{v}'</text>
+          <line x1="46" y1={72 + i * 38} x2="60" y2={72 + i * 38} stroke="#a1a1aa" strokeWidth="0.7" />
         </g>
       ))}
     </g>
@@ -1024,16 +943,11 @@ function QuantityRow({ label, value }: { label: string; value: string }) {
 
 function StatusPill({ label, value, active, onClick }: { label: string; value?: string; active?: boolean; onClick?: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      className={`rounded-2xl border px-4 py-2 text-xs font-bold ${
-        active === undefined
-          ? "border-zinc-800 bg-black/80 text-zinc-300"
-          : active
-            ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
-            : "border-zinc-800 bg-black/80 text-zinc-500"
-      }`}
-    >
+    <button onClick={onClick} className={`rounded-2xl border px-4 py-2 text-xs font-bold ${
+      active === undefined ? "border-zinc-800 bg-black/80 text-zinc-300"
+        : active ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+        : "border-zinc-800 bg-black/80 text-zinc-500"
+    }`}>
       {label}
       {value && <span className="ml-2 font-mono text-orange-300">{value}</span>}
     </button>

@@ -197,8 +197,12 @@ export default function EstimateReviewPage() {
       const backendSettings = getBackendSettings();
       setPartialExteriorMarkupPercent(backendSettings.pricing.partialExteriorMarkupPercent ?? 6);
       // FIX: correct Backend fallback defaults — $4/frame, $2/plank
-      setFrameRate(backendSettings.pricing.frameMonthlyRate ?? 4);
-      setPlankRate(backendSettings.pricing.plankMonthlyRate ?? 2);
+      // Load rates from backend — clamp to sensible defaults if stale values detected
+      // Backend spec: frames = $4/ea, planks = $2/ea
+      const storedFrameRate = backendSettings.pricing.frameMonthlyRate;
+      const storedPlankRate = backendSettings.pricing.plankMonthlyRate;
+      setFrameRate((storedFrameRate != null && storedFrameRate <= 10) ? storedFrameRate : 4);
+      setPlankRate((storedPlankRate != null && storedPlankRate <= 5) ? storedPlankRate : 2);
       setAppRate(backendSettings.labor.apprenticeRate ?? 48);
       setJourneyRate(backendSettings.labor.journeymanRate ?? 72);
       setForemanRate(backendSettings.labor.foremanRate ?? 85);

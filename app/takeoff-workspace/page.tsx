@@ -438,13 +438,33 @@ export default function TakeoffWorkspace() {
     }
   }
 
+  const renderTaskRef = useRef<any>(null);
+  const renderIdRef = useRef<number>(0);
+
   useEffect(() => {
+    const renderId = ++renderIdRef.current;
+
     async function renderPdfPage() {
       if (!pdfDoc || !canvasRef.current) return;
 
-      const page = await pdfDoc.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: zoom });
+      // Cancel any in-progress render before starting a new one
+      if (renderTaskRef.current) {
+        try { renderTaskRef.current.cancel(); } catch {}
+        renderTaskRef.current = null;
+      }
+
+      // Capture zoom/page at the time this render started
+      const renderZoom = zoom;
+      const renderPage = pageNumber;
+
+      const page = await pdfDoc.getPage(renderPage);
+
+      // Stale check — if a newer render started while we awaited getPage, abort
+      if (renderId !== renderIdRef.current) return;
+
+      const viewport = page.getViewport({ scale: renderZoom });
       const canvas = canvasRef.current;
+      if (!canvas) return;
       const context = canvas.getContext("2d");
       if (!context) return;
 
@@ -452,7 +472,20 @@ export default function TakeoffWorkspace() {
       canvas.height = viewport.height;
       context.clearRect(0, 0, canvas.width, canvas.height);
 
-      await page.render({ canvasContext: context, viewport }).promise;
+      const renderTask = page.render({ canvasContext: context, viewport });
+      renderTaskRef.current = renderTask;
+
+      try {
+        await renderTask.promise;
+      } catch (error: any) {
+        if (error?.name !== "RenderingCancelledException") {
+          console.error("PDF render error:", error);
+        }
+      } finally {
+        if (renderId === renderIdRef.current) {
+          renderTaskRef.current = null;
+        }
+      }
     }
 
     renderPdfPage();
@@ -752,6 +785,43 @@ export default function TakeoffWorkspace() {
     );
   }
 
+  // Store All Heights — builds a complete updated heights array for all
+  // four elevations at once and saves in a single call so nothing is lost
+  function storeAllHeights() {
+    const updatedHeights: typeof elevationHeights = elevationOptions.map((elev) => {
+      const current = elevationHeights.find((item) => item.elevation === elev);
+      if (!current) return elevationHeights.find((item) => item.elevation === elev)!;
+      const parsed = parseFeetInches(current.overallHeightInput);
+      if (parsed === null || parsed < 0) return current;
+      return { ...current, overallHeightInput: formatFeetInches(parsed) };
+    });
+
+    // Apply duplicate logic
+    (["North", "East"] as const).forEach((elev) => {
+      if (duplicateElevationHeights[elev]) {
+        const opposite = getOppositeElevation(elev);
+        if (opposite) {
+          const source = updatedHeights.find((h) => h.elevation === elev);
+          if (source) {
+            const idx = updatedHeights.findIndex((h) => h.elevation === opposite);
+            if (idx >= 0) {
+              updatedHeights[idx] = {
+                ...updatedHeights[idx],
+                overallHeightInput: source.overallHeightInput,
+                belowGradeEnabled: source.belowGradeEnabled,
+                belowGradeInput: source.belowGradeInput,
+              };
+            }
+          }
+        }
+      }
+    });
+
+    setElevationHeights(updatedHeights);
+    // Save using active elevation but pass ALL updated heights so all flow downstream
+    saveWorkspaceElevation(activeElevation, updatedHeights, fullOverlayRows);
+  }
+
   function getActivePickColor() {
     if (pickTarget?.type === "full") {
       const row = fullOverlayRows.find((item) => item.id === pickTarget.id);
@@ -977,80 +1047,50 @@ export default function TakeoffWorkspace() {
               )}
             </KorbanWorkspaceHud>
 
-            {/* PDF controls - centered at bottom using built-in bottom-center position */}
-            <KorbanWorkspaceHud position="bottom-center" className="max-w-[calc(100%-2rem)] flex-nowrap overflow-x-auto rounded-2xl border border-orange-500/20 bg-black/80 px-3 py-2 backdrop-blur" style={{ flexWrap: "nowrap" }}>
-              <span className="max-w-[180px] truncate rounded-full border border-orange-500/20 bg-black px-3 py-1.5 text-[10px] text-zinc-400">
-                {pdfFileName || "No PDF Loaded"}
+            {/* PDF controls - single row always, scrolls horizontally before wrapping */}
+            <KorbanWorkspaceHud
+              position="bottom-center"
+              className="rounded-2xl border border-orange-500/20 bg-black/80 px-2 py-1.5 backdrop-blur"
+              style={{ flexWrap: "nowrap", overflowX: "auto", maxWidth: "calc(100% - 2rem)", gap: "4px" }}
+            >
+              <span className="w-28 shrink-0 truncate rounded-full border border-orange-500/20 bg-black px-2 py-1 text-[9px] text-zinc-400">
+                {pdfFileName || "No PDF"}
               </span>
 
               <KorbanButton
                 variant="ghost"
-                className="px-2 py-1.5 text-[10px]"
+                className="shrink-0 px-2 py-1 text-[9px]"
                 disabled={!pdfDoc || pageNumber <= 1}
-                onClick={() => {
-                  const nextPage = Math.max(1, pageNumber - 1);
-                  setPageNumber(nextPage);
-                  setPageJump(String(nextPage));
-                }}
+                onClick={() => { const p = Math.max(1, pageNumber - 1); setPageNumber(p); setPageJump(String(p)); }}
               >
-                Prev
+                ‹
               </KorbanButton>
 
-              <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1 text-[10px]">
+              <div className="flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-black px-1.5 py-0.5 text-[9px]">
                 <input
                   value={pageJump}
-                  onChange={(event) => setPageJump(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") goToPage();
-                  }}
-                  className="w-10 rounded bg-zinc-950 px-1 py-0.5 text-center text-zinc-200 outline-none"
+                  onChange={(e) => setPageJump(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") goToPage(); }}
+                  className="w-8 rounded bg-zinc-950 px-1 py-0.5 text-center text-zinc-200 outline-none"
                 />
-                <span className="text-zinc-500">/ {numPages || 0}</span>
-                <button
-                  disabled={!pdfDoc}
-                  onClick={goToPage}
-                  className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
-                >
-                  Go
-                </button>
+                <span className="text-zinc-500">/{numPages || 0}</span>
+                <button disabled={!pdfDoc} onClick={goToPage} className="rounded bg-zinc-900 px-1 py-0.5 text-zinc-300 disabled:opacity-40">Go</button>
               </div>
 
               <KorbanButton
                 variant="ghost"
-                className="px-2 py-1.5 text-[10px]"
+                className="shrink-0 px-2 py-1 text-[9px]"
                 disabled={!pdfDoc || pageNumber >= numPages}
-                onClick={() => {
-                  const nextPage = Math.min(numPages, pageNumber + 1);
-                  setPageNumber(nextPage);
-                  setPageJump(String(nextPage));
-                }}
+                onClick={() => { const p = Math.min(numPages, pageNumber + 1); setPageNumber(p); setPageJump(String(p)); }}
               >
-                Next
+                ›
               </KorbanButton>
 
-              <KorbanButton
-                variant="ghost"
-                className="px-2 py-1.5 text-[10px]"
-                disabled={!pdfDoc}
-                onClick={() => setZoom((current) => Math.max(0.1, current - 0.1))}
-              >
-                −
-              </KorbanButton>
-              <KorbanStatusPill label="Zoom" value={`${Math.round(zoom * 100)}%`} />
-              <KorbanButton
-                variant="ghost"
-                className="px-2 py-1.5 text-[10px]"
-                disabled={!pdfDoc}
-                onClick={() => setZoom((current) => Math.min(3, current + 0.1))}
-              >
-                +
-              </KorbanButton>
-              <KorbanButton variant="ghost" className="px-2 py-1.5 text-[10px]" disabled={!pdfDoc} onClick={() => setZoom(0.25)}>
-                Fit Page
-              </KorbanButton>
-              <KorbanButton variant="ghost" className="px-2 py-1.5 text-[10px]" disabled={!pdfDoc} onClick={() => setZoom(0.5)}>
-                Fit Width
-              </KorbanButton>
+              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom((c) => Math.max(0.1, c - 0.1))}>−</KorbanButton>
+              <span className="shrink-0 rounded-lg border border-zinc-800 bg-black/80 px-2 py-1 text-[9px] font-bold text-orange-300">{Math.round(zoom * 100)}%</span>
+              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom((c) => Math.min(3, c + 0.1))}>+</KorbanButton>
+              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom(0.25)}>Fit</KorbanButton>
+              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom(0.5)}>Width</KorbanButton>
             </KorbanWorkspaceHud>
 
             <div className="absolute inset-0 overflow-auto pb-24 pt-16">
@@ -1175,6 +1215,7 @@ export default function TakeoffWorkspace() {
             setDuplicateElevationHeights={setDuplicateElevationHeights}
             updateElevationHeight={updateElevationHeight}
             storeManualOverallHeight={storeManualOverallHeight}
+            storeAllHeights={storeAllHeights}
             keyFloorLf={keyFloorLf}
             tolerancePercent={tolerancePercent}
             pickTarget={pickTarget}
@@ -1219,6 +1260,7 @@ function TakeoffHub({
   setDuplicateElevationHeights,
   updateElevationHeight,
   storeManualOverallHeight,
+  storeAllHeights,
   keyFloorLf,
   tolerancePercent,
   pickTarget,
@@ -1256,6 +1298,7 @@ function TakeoffHub({
   setDuplicateElevationHeights: React.Dispatch<React.SetStateAction<Record<"North" | "East", boolean>>>;
   updateElevationHeight: (elevation: ElevationName, updates: Partial<ElevationHeight>) => void;
   storeManualOverallHeight: (elevation: ElevationName) => void;
+  storeAllHeights: () => void;
   keyFloorLf: number;
   tolerancePercent: number;
   pickTarget: PickTarget;
@@ -1553,8 +1596,8 @@ function TakeoffHub({
                       />
                     </div>
 
-                    {/* Pick from PDF + per-elevation Store button */}
-                    <div className="mt-2 grid grid-cols-4 gap-1.5">
+                    {/* PDF pick buttons + Store — Start / Close / Store */}
+                    <div className="mt-2 grid grid-cols-3 gap-1.5">
                       <button
                         onClick={(e) => { e.stopPropagation(); startPick({ type: "heightOverall", elevation: item.elevation }); }}
                         className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isOverallPickActive && !hasPendingOverall ? "animate-pulse border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)]" : "border-zinc-800"}`}
@@ -1567,16 +1610,10 @@ function TakeoffHub({
                       >
                         Close
                       </button>
+                      {/* Store — works with direct input OR after PDF pick */}
                       <button
-                        onClick={(e) => { e.stopPropagation(); storePick(); }}
-                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingOverall ? "bg-yellow-400 text-black hover:bg-yellow-300" : "border border-white/20 bg-white/5 text-white"}`}
-                      >
-                        Pick
-                      </button>
-                      {/* Per-elevation Store — works with direct input, no pick required */}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); storeManualOverallHeight(item.elevation); }}
-                        className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[10px] font-semibold text-orange-300 hover:bg-orange-500/20"
+                        onClick={(e) => { e.stopPropagation(); hasPendingOverall ? storePick() : storeManualOverallHeight(item.elevation); }}
+                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingOverall ? "bg-yellow-400 text-black hover:bg-yellow-300" : "border border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"}`}
                       >
                         Store
                       </button>
@@ -1585,9 +1622,9 @@ function TakeoffHub({
                 );
               })}
             </div>
-            {/* Store All — captures all 4 at once */}
+            {/* Store All — saves all 4 elevations in one atomic write */}
             <button
-              onClick={() => elevationOptions.forEach((elev) => storeManualOverallHeight(elev))}
+              onClick={storeAllHeights}
               className="mt-3 w-full rounded-xl border border-orange-500/40 bg-orange-500/15 px-3 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/25"
             >
               Store All Heights

@@ -1,694 +1,590 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  KorbanButton,
+  KorbanHeader,
+  KorbanHeaderMeta,
+  type KorbanMenuLink,
+} from "@/components/korban";
+import {
+  getActiveElevation,
+  getActiveProject,
+  saveActiveElevation,
+  type ProjectElevation,
+} from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
-const projectConditions = [
-  "Bad Access Areas",
-  "Adjacent Properties",
-  "Grade Changes",
-  "Gabled Walls",
-  "Setbacks / Pop-Outs",
-  "Free-Stand",
-];
+// ── Frame catalog ─────────────────────────────────────────────────────────────
+// Grouped by scaffold width family. Frame Configuration only uses frames
+// matching the scaffold width selected in Set Scaffold.
 
-const finishOptions = ["Stucco", "EIFS", "Masonry", "Glazing", "Paint"];
-const scaffoldWidths = ["3'", "3'6\"", "5'"];
-const workflowSteps = ["Upload PDF", "Scale", "Overlay", "Frame Configuration", "Set Scaffold"];
-const draftSteps = ["Draft", "Select Section", "Draft Section"];
-const productionOptions = ["Competitive", "Average", "Conservative"];
+type FrameWidth = "3'" | "3'-6\"" | "5'";
 
-type FrameResult = {
-  wallHeightFeet: number;
-  deckOffsetFeet: number;
-  requiredScaffoldHeightFeet: number;
-  frames64: number;
-  frames5: number;
-  frames3: number;
-  jackExtensionInches: number;
-  totalFrameStackHeightFeet: number;
-  scaffoldWidth: string;
-  production: string;
+type FrameSize = {
+  code: string;
+  heightFt: number;   // decimal feet
+  widthLabel: string;
+  family: FrameWidth;
+  isTall: boolean;    // standard tall frame (6'-4")
+  isMason: boolean;   // mason frame
 };
 
-function parseFeetInches(input: string): number | null {
-  if (!input.trim()) return null;
+const FRAME_CATALOG: FrameSize[] = [
+  // 3' wide family
+  { code: "FO6L3",  heightFt: 6 + 4/12, widthLabel: "3'",   family: "3'",     isTall: true,  isMason: false },
+  { code: "FO5L3",  heightFt: 5,         widthLabel: "3'",   family: "3'",     isTall: false, isMason: false },
+  { code: "FM33",   heightFt: 3,         widthLabel: "3'",   family: "3'",     isTall: false, isMason: false },
+  // 42" wide family
+  { code: "FO6L42", heightFt: 6 + 4/12, widthLabel: "42\"", family: "3'-6\"", isTall: true,  isMason: false },
+  { code: "FO5L42", heightFt: 5,         widthLabel: "42\"", family: "3'-6\"", isTall: false, isMason: false },
+  { code: "FM342",  heightFt: 3,         widthLabel: "42\"", family: "3'-6\"", isTall: false, isMason: false },
+  // 5' wide family
+  { code: "FO6L",   heightFt: 6 + 4/12, widthLabel: "5'",   family: "5'",     isTall: true,  isMason: false },
+  { code: "FM5",    heightFt: 5,         widthLabel: "5'",   family: "5'",     isTall: false, isMason: true  },
+  { code: "FM3",    heightFt: 3,         widthLabel: "5'",   family: "5'",     isTall: false, isMason: true  },
+  // 2' wide family
+  { code: "FO6L2",  heightFt: 6 + 4/12, widthLabel: "2'",   family: "3'",     isTall: true,  isMason: false },
+  { code: "FO5L2",  heightFt: 5,         widthLabel: "2'",   family: "3'",     isTall: false, isMason: false },
+  { code: "FM32",   heightFt: 3,         widthLabel: "2'",   family: "3'",     isTall: false, isMason: false },
+];
 
-  const cleaned = input.trim().replace(/"/g, "").replace(/ft/gi, "");
+// ── Types ──────────────────────────────────────────────────────────────────────
 
-  if (cleaned.includes("-")) {
-    const [feetRaw, inchesRaw] = cleaned.split("-");
-    const feet = Number(feetRaw);
-    const inches = Number(inchesRaw || 0);
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
+type FrameLevel = {
+  frameCode: string;
+  heightFt: number;
+  position: number; // distance from grade in feet
+  isTall: boolean;
+};
 
-  if (cleaned.includes("'")) {
-    const [feetRaw, inchesRaw] = cleaned.split("'");
-    const feet = Number(feetRaw);
-    const inches = Number(inchesRaw || 0);
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
+type FrameConfiguration = {
+  option: "A" | "B" | "C";
+  label: string;
+  recommended: boolean;
+  levels: FrameLevel[];      // bottom to top
+  screwJackExtensionIn: number; // inches
+  totalHeightFt: number;
+  targetHeightFt: number;
+  gapFt: number;             // totalHeight - targetHeight (positive = above wall)
+  tallCount: number;
+  fiveCount: number;
+  threeCount: number;
+  frameSummary: string;
+};
 
-  const feet = Number(cleaned);
-  return Number.isNaN(feet) ? null : feet;
-}
+type BracketCondition = {
+  levelIndex: number;   // which frame level (0 = bottom)
+  deviationIn: number;  // wall deviation in inches at this level
+  bracketSizeIn: 10 | 20 | 30;
+  direction: "in" | "out"; // bracket extends toward or away from wall
+};
 
-function formatFeetInches(decimalFeet: number) {
-  const safeFeet = Math.max(0, decimalFeet);
-  let feet = Math.floor(safeFeet);
-  let inches = Math.round((safeFeet - feet) * 12);
+const frameConfigMenuLinks: KorbanMenuLink[] = [
+  { href: "/set-scaffold", label: "Set Scaffold" },
+  { href: "/section-view", label: "Section View" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/backend", label: "Backend" },
+];
 
-  if (inches === 12) {
-    feet += 1;
-    inches = 0;
-  }
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
+function formatFt(decimalFeet: number) {
+  const safe = Math.max(0, decimalFeet);
+  let feet = Math.floor(safe);
+  let inches = Math.round((safe - feet) * 12);
+  if (inches === 12) { feet += 1; inches = 0; }
   return `${feet}'-${inches}"`;
 }
 
-function calculateFrameStack(
-  wallHeightInput: string,
-  deckOffsetInput: string,
-  scaffoldWidth: string,
-  production: string
-): FrameResult | null {
-  const wallHeightFeet = parseFeetInches(wallHeightInput);
-  const deckOffsetFeet = parseFeetInches(deckOffsetInput);
-
-  if (wallHeightFeet === null || deckOffsetFeet === null) return null;
-
-  const requiredScaffoldHeightFeet = Math.max(0, wallHeightFeet - deckOffsetFeet);
-
-  const frame64Height = 6 + 4 / 12;
-  const frame5Height = 5;
-  const frame3Height = 3;
-  const maxJackExtensionFeet = 16 / 12;
-
-  let bestStack: FrameResult | null = null;
-
-  for (let frames64 = 0; frames64 <= 20; frames64 += 1) {
-    for (let frames5 = 0; frames5 <= 4; frames5 += 1) {
-      for (let frames3 = 0; frames3 <= 4; frames3 += 1) {
-        const frameHeight =
-          frames64 * frame64Height + frames5 * frame5Height + frames3 * frame3Height;
-
-        const jackExtensionFeet = requiredScaffoldHeightFeet - frameHeight;
-
-        if (jackExtensionFeet < -0.01 || jackExtensionFeet > maxJackExtensionFeet) {
-          continue;
-        }
-
-        const totalFrames = frames64 + frames5 + frames3;
-        const jackExtensionInches = Math.max(0, jackExtensionFeet * 12);
-
-        const candidate: FrameResult = {
-          wallHeightFeet,
-          deckOffsetFeet,
-          requiredScaffoldHeightFeet,
-          frames64,
-          frames5,
-          frames3,
-          jackExtensionInches,
-          totalFrameStackHeightFeet: frameHeight + jackExtensionFeet,
-          scaffoldWidth,
-          production,
-        };
-
-        if (!bestStack) {
-          bestStack = candidate;
-          continue;
-        }
-
-        const bestTotalFrames = bestStack.frames64 + bestStack.frames5 + bestStack.frames3;
-        const bestSpecialFrames = bestStack.frames5 + bestStack.frames3;
-        const candidateSpecialFrames = frames5 + frames3;
-
-        if (
-          totalFrames < bestTotalFrames ||
-          (totalFrames === bestTotalFrames &&
-            candidateSpecialFrames < bestSpecialFrames) ||
-          (totalFrames === bestTotalFrames &&
-            candidateSpecialFrames === bestSpecialFrames &&
-            jackExtensionInches < bestStack.jackExtensionInches)
-        ) {
-          bestStack = candidate;
-        }
-      }
-    }
-  }
-
-  if (bestStack) return bestStack;
-
-  const frames64 = Math.ceil(requiredScaffoldHeightFeet / frame64Height);
-
-  return {
-    wallHeightFeet,
-    deckOffsetFeet,
-    requiredScaffoldHeightFeet,
-    frames64,
-    frames5: 0,
-    frames3: 0,
-    jackExtensionInches: 0,
-    totalFrameStackHeightFeet: frames64 * frame64Height,
-    scaffoldWidth,
-    production,
-  };
+function formatScaffoldWidth(value: number): FrameWidth {
+  if (value >= 5) return "5'";
+  if (value >= 3.5) return "3'-6\"";
+  return "3'";
 }
 
-export default function Home() {
-  const [selectedConditions, setSelectedConditions] = useState<string[]>([]);
-  const [selectedFinishes, setSelectedFinishes] = useState<string[]>(["Stucco"]);
-  const [activeStep, setActiveStep] = useState("Upload PDF");
-  const [scaffoldWidth, setScaffoldWidth] = useState("3'");
-  const [production, setProduction] = useState("Average");
-  const [showFrameConfiguration, setShowFrameConfiguration] = useState(false);
-  const [topWallHeight, setTopWallHeight] = useState("28-7");
-  const [topDeckOffset, setTopDeckOffset] = useState("6");
+function parseFeetInches(input: string): number | null {
+  const value = input.trim();
+  if (!value || value === "--" || value === "0'") return null;
+  const normalized = value.toLowerCase().replace(/feet|foot|ft/g, "'").replace(/inches|inch|in/g, '"').replace(/\s+/g, "").replace(/[–—]/g, "-");
+  const m = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/);
+  if (m) {
+    const feet = Number(m[1]); const inches = Number(m[2] || 0);
+    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
+    return feet + inches / 12;
+  }
+  const plain = Number(normalized.replace(/"/g, ""));
+  return Number.isNaN(plain) || plain === 0 ? null : plain;
+}
 
-  const draftMode = draftSteps.includes(activeStep);
+/**
+ * Core stack algorithm — Rule Set v3.0
+ *
+ * Stacking order: shortest at bottom, tallest at top
+ *   GRADE → screw jack → [3' frame?] → [5' frame?] → [6'-4" frames × N] → top
+ *
+ * Algorithm:
+ *   1. Calculate target = wallHeight - workerReachHeight
+ *   2. Maximize 6'-4" frames
+ *   3. Try base combinations: none / 3' / 5' / 3'+5'
+ *   4. Cover remainder with screw jack (≤ screwJackMaxIn / 12)
+ *   5. If no solution, adjust tall count ±1 and retry
+ */
+function calculateStack(
+  targetFt: number,
+  tallFrameHeightFt: number,
+  screwJackMaxIn: number,
+  offsetVariant: number = 0, // -1, 0, +1 for options B/A/C
+): { levels: FrameLevel[]; screwJackIn: number; totalFt: number } | null {
+  const screwJackMaxFt = screwJackMaxIn / 12;
+  const baseCombos: Array<{ threeH: boolean; fiveH: boolean }> = [
+    { threeH: false, fiveH: false },
+    { threeH: true,  fiveH: false },
+    { threeH: false, fiveH: true  },
+    { threeH: true,  fiveH: true  },
+  ];
 
-  const dateTimeStamp = useMemo(() => {
-    return new Date().toLocaleString([], {
-      month: "2-digit",
-      day: "2-digit",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
+  for (const combo of baseCombos) {
+    const baseHeight = (combo.threeH ? 3 : 0) + (combo.fiveH ? 5 : 0);
+    const remainingAfterBase = targetFt - baseHeight;
+    if (remainingAfterBase < 0) continue;
+
+    let tallCount = Math.floor(remainingAfterBase / tallFrameHeightFt) + offsetVariant;
+    if (tallCount < 0) continue;
+
+    const stackedHeight = tallCount * tallFrameHeightFt + baseHeight;
+    const remainder = targetFt - stackedHeight;
+
+    if (remainder >= 0 && remainder <= screwJackMaxFt) {
+      // Valid solution found
+      const levels: FrameLevel[] = [];
+      let pos = 0;
+
+      // Bottom up: 3' first, then 5', then tall frames
+      if (combo.threeH) {
+        levels.push({ frameCode: "FM", heightFt: 3, position: pos, isTall: false });
+        pos += 3;
+      }
+      if (combo.fiveH) {
+        levels.push({ frameCode: "FO5", heightFt: 5, position: pos, isTall: false });
+        pos += 5;
+      }
+      for (let i = 0; i < tallCount; i++) {
+        levels.push({ frameCode: "FO6", heightFt: tallFrameHeightFt, position: pos, isTall: true });
+        pos += tallFrameHeightFt;
+      }
+
+      return {
+        levels,
+        screwJackIn: Math.round(remainder * 12),
+        totalFt: stackedHeight + remainder,
+      };
+    }
+  }
+  return null;
+}
+
+function buildFrameSummary(levels: FrameLevel[], tallFrameHeightFt: number, screwJackIn: number): string {
+  const tallCount = levels.filter(l => l.isTall).length;
+  const fiveCount = levels.filter(l => !l.isTall && l.heightFt === 5).length;
+  const threeCount = levels.filter(l => !l.isTall && l.heightFt === 3).length;
+  const parts: string[] = [];
+  if (tallCount > 0) parts.push(`${tallCount} × ${formatFt(tallFrameHeightFt)}`);
+  if (fiveCount > 0) parts.push(`${fiveCount} × 5'-0"`);
+  if (threeCount > 0) parts.push(`${threeCount} × 3'-0"`);
+  parts.push(`+ ${screwJackIn}" jack`);
+  return parts.join(" + ");
+}
+
+function generateThreeOptions(
+  wallHeightFt: number,
+  workerReachFt: number,
+  tallFrameFt: number,
+  screwJackMaxIn: number,
+): FrameConfiguration[] {
+  const targetFt = Math.max(0, wallHeightFt - workerReachFt);
+  const configs: FrameConfiguration[] = [];
+
+  const variants: Array<{ variant: number; option: "A" | "B" | "C"; label: string }> = [
+    { variant: 0,  option: "A", label: "Optimal Stack" },
+    { variant: -1, option: "B", label: "Conservative" },
+    { variant: 1,  option: "C", label: "Extended" },
+  ];
+
+  for (const { variant, option, label } of variants) {
+    const result = calculateStack(targetFt, tallFrameFt, screwJackMaxIn, variant);
+    if (!result) continue;
+
+    const gapFt = result.totalFt - targetFt;
+    const tallCount = result.levels.filter(l => l.isTall).length;
+    const fiveCount = result.levels.filter(l => !l.isTall && l.heightFt === 5).length;
+    const threeCount = result.levels.filter(l => !l.isTall && l.heightFt === 3).length;
+
+    configs.push({
+      option,
+      label,
+      recommended: option === "A",
+      levels: result.levels,
+      screwJackExtensionIn: result.screwJackIn,
+      totalHeightFt: result.totalFt,
+      targetHeightFt: targetFt,
+      gapFt,
+      tallCount,
+      fiveCount,
+      threeCount,
+      frameSummary: buildFrameSummary(result.levels, tallFrameFt, result.screwJackIn),
+    });
+  }
+
+  // Deduplicate — remove identical stacks (can happen at extreme heights)
+  const seen = new Set<string>();
+  return configs.filter(c => {
+    const key = c.frameSummary;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+export default function FrameConfigurationPage() {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState("Frame Configuration");
+  const [selectedOption, setSelectedOption] = useState<"A" | "B" | "C">("A");
+  const [distanceFromTopInput, setDistanceFromTopInput] = useState("");
+  const [useCustomTopDistance, setUseCustomTopDistance] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  const backend = getBackendSettings();
+  const tallFrameFt = backend.scaffold.frameHeight ?? (6 + 4 / 12);
+  const workerReachFt = backend.scaffold.workerReachHeight ?? 6;
+  const screwJackMaxIn = backend.scaffold.screwJackMaxExtension ?? 12;
+
+  useEffect(() => {
+    const elevation = getActiveElevation();
+    const project = getActiveProject();
+    setActiveElevationData(elevation);
+    setActiveProjectName(project.projectName || "Frame Configuration");
+    window.addEventListener("focus", () => {
+      setActiveElevationData(getActiveElevation());
     });
   }, []);
 
-  const frameResult = useMemo(() => {
-    return calculateFrameStack(topWallHeight, topDeckOffset, scaffoldWidth, production);
-  }, [topWallHeight, topDeckOffset, scaffoldWidth, production]);
+  const wallHeightFt = useMemo(() => {
+    return activeElevationData?.wallHeight ?? 42;
+  }, [activeElevationData]);
 
-  function toggleCondition(condition: string) {
-    setSelectedConditions((current) =>
-      current.includes(condition)
-        ? current.filter((item) => item !== condition)
-        : [...current, condition]
-    );
+  const scaffoldWidthFt = useMemo(() => {
+    return activeElevationData?.scaffoldInput?.scaffoldWidth ?? 3;
+  }, [activeElevationData]);
+
+  const scaffoldWidthLabel = formatScaffoldWidth(scaffoldWidthFt);
+
+  // If custom top distance is set, recalculate wall height target
+  const effectiveWallHeightFt = useMemo(() => {
+    if (!useCustomTopDistance) return wallHeightFt;
+    const customDist = parseFeetInches(distanceFromTopInput);
+    if (customDist === null) return wallHeightFt;
+    // User wants top deck at (wallHeight - customDist) from grade
+    // so effectiveTarget = wallHeight - customDist + workerReach (to back-calc wall height equiv)
+    return wallHeightFt - customDist + workerReachFt;
+  }, [wallHeightFt, distanceFromTopInput, useCustomTopDistance, workerReachFt]);
+
+  const configurations = useMemo(() => {
+    return generateThreeOptions(effectiveWallHeightFt, workerReachFt, tallFrameFt, screwJackMaxIn);
+  }, [effectiveWallHeightFt, workerReachFt, tallFrameFt, screwJackMaxIn]);
+
+  const activeConfig = useMemo(() => {
+    return configurations.find(c => c.option === selectedOption) ?? configurations[0];
+  }, [configurations, selectedOption]);
+
+  // Frame family for this scaffold width
+  const frameFamily = FRAME_CATALOG.filter(f => f.family === scaffoldWidthLabel);
+
+  function saveConfiguration() {
+    if (!activeConfig || !activeElevationData) return;
+    const updated = {
+      ...activeElevationData,
+      quantityEngine: {
+        ...activeElevationData.quantityEngine,
+        frameTall: activeConfig.levels.length,
+        frameCount: activeConfig.levels.length * (activeElevationData.quantityEngine.legCount ?? 0),
+      },
+    };
+    saveActiveElevation(updated);
+    setActiveElevationData(updated);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2000);
   }
 
-  function toggleFinish(finish: string) {
-    setSelectedFinishes((current) =>
-      current.includes(finish)
-        ? current.filter((item) => item !== finish)
-        : [...current, finish]
-    );
-  }
-
-  function activateStep(step: string) {
-    setActiveStep(step);
-  }
-
-  function toggleFrameConfiguration() {
-    setActiveStep("Frame Configuration");
-    setShowFrameConfiguration((current) => !current);
-  }
+  const totalFrameCount = activeConfig
+    ? activeConfig.levels.length * (activeElevationData?.quantityEngine.legCount ?? 0)
+    : 0;
 
   return (
-    <main className="h-screen overflow-hidden bg-zinc-950 text-white">
-      <header className="flex h-16 items-center justify-between border-b border-orange-500/20 bg-black px-6">
-        <div>
-          <h1 className="text-xl font-bold tracking-[0.35em] text-orange-500">
-            KORBAN
-          </h1>
-          <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
-            Scaffold Intelligence Platform
-          </p>
-        </div>
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanHeader
+        title="Frame Configuration"
+        subtitle="Frame makeup and jump count per leg — quantity engine for section view"
+        menuLinks={frameConfigMenuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen(c => !c)}
+        actionsClassName="gap-4"
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={activeProjectName} />
+            <KorbanHeaderMeta label="Wall Height" value={formatFt(wallHeightFt)} />
+            <KorbanHeaderMeta label="Width" value={scaffoldWidthLabel} />
+            {savedFlash && (
+              <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-300">
+                ✓ Saved
+              </span>
+            )}
+            <KorbanButton as="a" href="/set-scaffold" variant="ghost">Set Scaffold</KorbanButton>
+            <KorbanButton variant="primary" onClick={saveConfiguration}>Save & Continue</KorbanButton>
+          </>
+        }
+      />
 
-        <div className="flex items-center gap-3">
-          <button className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:border-orange-500/40 hover:bg-orange-500/10">
-            Save Draft
-          </button>
-          <button className="rounded-full bg-orange-500 px-5 py-2 text-sm font-semibold text-black hover:bg-orange-400">
-            Generate Estimate
-          </button>
-        </div>
-      </header>
+      <div className="overflow-y-auto h-[calc(100vh-125px)] bg-[#080604] p-6">
+        <div className="mx-auto max-w-4xl space-y-5">
 
-      <div
-        className={`grid h-[calc(100vh-64px)] ${
-          draftMode ? "grid-cols-[300px_minmax(0,1fr)_220px_340px]" : "grid-cols-[300px_minmax(0,1fr)_340px]"
-        }`}
-      >
-        <aside className="overflow-y-auto border-r border-orange-500/20 bg-[#090909] p-4">
-          <section className="mb-4 rounded-2xl border border-orange-500/20 bg-black p-4">
-            <h2 className="text-xs uppercase tracking-[0.25em] text-orange-400">
-              Project Information
-            </h2>
-
-            <div className="mt-4 space-y-3">
-              <input
-                placeholder="Project Name"
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
-              />
-              <input
-                placeholder="Address / Location"
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
-              />
-              <input
-                placeholder="Estimator"
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
-              />
+          {/* Top row — key numbers */}
+          <div className="grid grid-cols-4 gap-4">
+            <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 shadow-[0_0_20px_rgba(249,115,22,0.07)]">
+              <p className="text-[9px] uppercase tracking-[0.2em] text-zinc-500 mb-2">Total Jumps</p>
+              <p className="font-mono text-3xl font-bold text-orange-300">{activeConfig?.levels.length ?? 0}</p>
+              <p className="text-[10px] text-zinc-600 mt-1">per leg</p>
             </div>
-          </section>
-
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
-            <h2 className="text-xs uppercase tracking-[0.25em] text-zinc-500">
-              Standards
-            </h2>
-
-            <div className="mt-4 space-y-3">
-              <div>
-                <label className="text-xs text-zinc-500">Scaffold Width</label>
-                <select
-                  value={scaffoldWidth}
-                  onChange={(event) => setScaffoldWidth(event.target.value)}
-                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
-                >
-                  {scaffoldWidths.map((width) => (
-                    <option key={width}>{width}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs text-zinc-500">Production Mode</label>
-                <select
-                  value={production}
-                  onChange={(event) => setProduction(event.target.value)}
-                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-orange-500"
-                >
-                  {productionOptions.map((option) => (
-                    <option key={option}>{option}</option>
-                  ))}
-                </select>
-              </div>
+            <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 shadow-[0_0_20px_rgba(249,115,22,0.07)]">
+              <p className="text-[9px] uppercase tracking-[0.2em] text-zinc-500 mb-2">Total Frames</p>
+              <p className="font-mono text-3xl font-bold text-orange-300">{totalFrameCount.toLocaleString()}</p>
+              <p className="text-[10px] text-zinc-600 mt-1">jumps × legs</p>
             </div>
-          </section>
-
-          <section className="rounded-2xl border border-zinc-800 bg-black p-4">
-            <h2 className="text-xs uppercase tracking-[0.25em] text-zinc-500">
-              Exterior Finish
-            </h2>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              {finishOptions.map((finish) => {
-                const selected = selectedFinishes.includes(finish);
-
-                return (
-                  <button
-                    key={finish}
-                    onClick={() => toggleFinish(finish)}
-                    className={`rounded-full border px-3 py-1.5 text-xs transition ${
-                      selected
-                        ? "border-orange-500 bg-orange-500 text-black"
-                        : "border-zinc-700 text-zinc-400 hover:border-orange-500/50"
-                    }`}
-                  >
-                    {finish}
-                  </button>
-                );
-              })}
+            <div className="rounded-2xl border border-zinc-800 bg-black p-4">
+              <p className="text-[9px] uppercase tracking-[0.2em] text-zinc-500 mb-2">Wall Height</p>
+              <p className="font-mono text-2xl font-bold text-zinc-200">{formatFt(wallHeightFt)}</p>
+              <p className="text-[10px] text-zinc-600 mt-1">from grade</p>
             </div>
-          </section>
-        </aside>
-
-        <section className="overflow-y-auto bg-[#070707] p-5">
-          <div className="mb-4 rounded-2xl border border-orange-500/20 bg-black/70 p-4">
-            <div className="mb-4 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.25em] text-orange-400">
-                  Takeoff Workflow
-                </h2>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Upload plans, scale, overlay, configure frames, set scaffold, and draft sections.
-                </p>
-              </div>
-
-              <div className="rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-500">
-                Active: {activeStep}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              {workflowSteps.slice(0, 3).map((step) => (
-                <button
-                  key={step}
-                  onClick={() => activateStep(step)}
-                  className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${
-                    activeStep === step
-                      ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                      : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"
-                  }`}
-                >
-                  {step}
-                </button>
-              ))}
-
-              <button
-                onClick={toggleFrameConfiguration}
-                className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${
-                  showFrameConfiguration
-                    ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                    : "border-orange-500/70 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
-                }`}
-              >
-                Frame Configuration
-              </button>
-
-              <button
-                onClick={() => activateStep("Set Scaffold")}
-                className={`rounded-xl border px-4 py-2.5 text-xs font-semibold transition ${
-                  activeStep === "Set Scaffold"
-                    ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                    : "border-orange-500/30 bg-black text-orange-300 hover:border-orange-500"
-                }`}
-              >
-                Set Scaffold
-              </button>
-
-              {draftSteps.map((step) => (
-                <button
-                  key={step}
-                  onClick={() => activateStep(step)}
-                  className={`rounded-xl border px-3.5 py-2.5 text-xs transition ${
-                    activeStep === step
-                      ? "border-orange-500 bg-orange-500 text-black shadow-[0_0_20px_rgba(249,115,22,0.35)]"
-                      : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/60"
-                  }`}
-                >
-                  {step}
-                </button>
-              ))}
+            <div className="rounded-2xl border border-zinc-800 bg-black p-4">
+              <p className="text-[9px] uppercase tracking-[0.2em] text-zinc-500 mb-2">Frame Height</p>
+              <p className="font-mono text-2xl font-bold text-zinc-200">{formatFt(activeConfig?.totalHeightFt ?? 0)}</p>
+              <p className="text-[10px] text-zinc-600 mt-1">scaffold reach</p>
             </div>
           </div>
 
-          <div className="relative flex h-[calc(100vh-365px)] min-h-[500px] items-center justify-center overflow-hidden rounded-[28px] border border-zinc-800 bg-black shadow-[inset_0_0_80px_rgba(249,115,22,0.04)]">
-            <div className="pointer-events-none absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#f97316_1px,transparent_1px),linear-gradient(to_bottom,#f97316_1px,transparent_1px)] bg-[size:38px_38px]" />
+          <div className="grid grid-cols-[1fr_1fr_300px] gap-5">
 
-            <div className="relative z-10 text-center">
-              <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-3xl text-orange-500">
-                +
-              </div>
-              <h2 className="text-2xl font-semibold">Design Workspace</h2>
-              <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">
-                Upload plans, set scale, create overlays, establish elevations,
-                identify scaffold conditions, and prepare draft sections.
-              </p>
-            </div>
-          </div>
+            {/* Frame options */}
+            <div className="col-span-2 space-y-4">
+              <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Frame Configuration</h2>
+                    <p className="mt-1 text-xs text-zinc-600">Select the frame makeup that fits your site</p>
+                  </div>
+                  <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+                </div>
 
-          {!showFrameConfiguration && (
-            <div className="mt-5 rounded-2xl border border-orange-500/25 bg-orange-500/5 p-4">
-              <h2 className="mb-1 text-xs uppercase tracking-[0.25em] text-orange-400">
-                Project Coordination
-              </h2>
-              <p className="mb-4 text-xs text-zinc-500">Select all that apply.</p>
+                {configurations.length === 0 && (
+                  <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-400">
+                    ⚠ No valid configuration found. Check wall height and screw jack settings in Backend.
+                  </div>
+                )}
 
-              <div className="flex flex-wrap gap-2">
-                {projectConditions.map((condition) => {
-                  const selected = selectedConditions.includes(condition);
-
-                  return (
+                <div className="space-y-3">
+                  {configurations.map(config => (
                     <button
-                      key={condition}
-                      onClick={() => toggleCondition(condition)}
-                      className={`rounded-full border px-4 py-2 text-xs transition ${
-                        selected
-                          ? "border-orange-500 bg-orange-500 text-black"
-                          : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/50"
+                      key={config.option}
+                      onClick={() => setSelectedOption(config.option)}
+                      className={`w-full rounded-2xl border p-4 text-left transition ${
+                        selectedOption === config.option
+                          ? "border-orange-500/50 bg-orange-500/5 shadow-[0_0_20px_rgba(249,115,22,0.10)]"
+                          : "border-zinc-800 bg-black hover:border-zinc-700"
                       }`}
                     >
-                      {condition}
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded-md ${
+                            selectedOption === config.option ? "bg-orange-500 text-black" : "bg-zinc-800 text-zinc-400"
+                          }`}>
+                            {config.option}
+                          </span>
+                          <span className="text-xs font-bold text-zinc-200">{config.label}</span>
+                          {config.recommended && (
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-orange-400 border border-orange-500/30 rounded px-1.5 py-0.5">
+                              Recommended
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono text-sm font-bold text-orange-300">{config.levels.length} jumps</span>
+                      </div>
+
+                      <p className="font-mono text-[11px] text-zinc-400 mb-3">{config.frameSummary}</p>
+
+                      <div className="grid grid-cols-4 gap-2">
+                        <MiniStat label="Reach" value={formatFt(config.totalHeightFt)} />
+                        <MiniStat label="Screw Jack" value={`${config.screwJackExtensionIn}"`} accent={config.screwJackExtensionIn > screwJackMaxIn} />
+                        <MiniStat label={"6'-4\" Frames"} value={String(config.tallCount)} />
+                        <MiniStat label="Short Frames" value={String(config.fiveCount + config.threeCount)} muted={config.fiveCount + config.threeCount === 0} />
+                      </div>
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
+              </div>
+
+              {/* Top distance override */}
+              <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Top Distance Override</h2>
+                    <p className="mt-1 text-xs text-zinc-600">Set exact distance from top deck to wall top — overrides worker reach default</p>
+                  </div>
+                  <button
+                    onClick={() => setUseCustomTopDistance(c => !c)}
+                    className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-bold transition ${
+                      useCustomTopDistance
+                        ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                        : "border-zinc-800 bg-black text-zinc-500"
+                    }`}
+                  >
+                    <span className={`h-2 w-2 rounded-full ${useCustomTopDistance ? "bg-orange-400" : "bg-zinc-600"}`} />
+                    {useCustomTopDistance ? "Custom ON" : "Default"}
+                  </button>
+                </div>
+                {useCustomTopDistance ? (
+                  <div>
+                    <input
+                      value={distanceFromTopInput}
+                      onChange={e => setDistanceFromTopInput(e.target.value)}
+                      placeholder={`e.g. 2'-6" (default: ${formatFt(workerReachFt)})`}
+                      className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
+                    />
+                    <p className="mt-1 text-[10px] text-zinc-600">Frame configuration recalculates automatically.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3">
+                    <InfoChip label="Wall Height" value={formatFt(wallHeightFt)} />
+                    <InfoChip label="Worker Reach" value={formatFt(workerReachFt)} />
+                    <InfoChip label="Net Frame Height" value={formatFt(Math.max(0, effectiveWallHeightFt - workerReachFt))} />
+                  </div>
+                )}
               </div>
             </div>
-          )}
 
-          {showFrameConfiguration && (
-            <div className="mt-4 rounded-2xl border border-orange-500/25 bg-black p-4 shadow-[0_0_30px_rgba(249,115,22,0.08)]">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-400">
-                    Frame Configuration
-                  </h2>
-                  <p className="mt-1 text-xs text-zinc-500">
-                    Compact frame stack calculator for the selected scaffold set.
-                  </p>
-                </div>
+            {/* Right column — level detail + inventory */}
+            <div className="space-y-4">
 
-                <button
-                  onClick={() => setShowFrameConfiguration(false)}
-                  className="rounded-full border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
-                >
-                  Collapse
-                </button>
-              </div>
-
-              <div className="mt-4 grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                    Inputs
-                  </h3>
-
-                  <div className="mt-3 space-y-3">
-                    <div>
-                      <label className="text-xs text-zinc-500">Top of Wall Height</label>
-                      <input
-                        value={topWallHeight}
-                        onChange={(event) => setTopWallHeight(event.target.value)}
-                        placeholder={`28-7 or 28'7"`}
-                        className="mt-1.5 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
-                      />
+              {/* Selected config detail */}
+              {activeConfig && (
+                <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
+                  <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400 mb-3">Level Detail</h2>
+                  <div className="space-y-1.5">
+                    {/* Screw jack */}
+                    <div className="flex items-center gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-3 py-2">
+                      <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 flex-shrink-0" />
+                      <span className="text-[10px] font-bold text-yellow-300">Screw Jack</span>
+                      <span className="ml-auto font-mono text-[10px] text-yellow-400">{activeConfig.screwJackExtensionIn}"</span>
                     </div>
-
-                    <div>
-                      <label className="text-xs text-zinc-500">Deck Below Top of Wall</label>
-                      <input
-                        value={topDeckOffset}
-                        onChange={(event) => setTopDeckOffset(event.target.value)}
-                        placeholder="6"
-                        className="mt-1.5 w-full rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs text-white outline-none focus:border-orange-500"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                          Width
-                        </p>
-                        <p className="mt-1 font-mono text-sm font-semibold text-orange-500">
-                          {scaffoldWidth}
-                        </p>
+                    {/* Levels bottom to top */}
+                    {activeConfig.levels.map((level, i) => (
+                      <div key={i} className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${level.isTall ? "border-orange-500/15 bg-orange-500/5" : "border-zinc-800 bg-zinc-950/70"}`}>
+                        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${level.isTall ? "bg-orange-400" : "bg-zinc-500"}`} />
+                        <span className={`text-[10px] font-bold ${level.isTall ? "text-orange-300" : "text-zinc-400"}`}>{formatFt(level.heightFt)} Frame</span>
+                        <span className="ml-auto text-[9px] text-zinc-600">L{i + 1}</span>
                       </div>
-
-                      <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                          Pace
-                        </p>
-                        <p className="mt-1 font-mono text-sm font-semibold text-orange-500">
-                          {production}
-                        </p>
-                      </div>
+                    ))}
+                    {/* Reach zone */}
+                    <div className="flex items-center gap-2 rounded-lg border border-zinc-700/30 bg-zinc-900/30 px-3 py-2 border-dashed">
+                      <div className="w-1.5 h-1.5 rounded-full bg-zinc-500 flex-shrink-0" />
+                      <span className="text-[10px] text-zinc-500">Worker Reach +{formatFt(workerReachFt)}</span>
                     </div>
                   </div>
+                  <div className="mt-3 pt-3 border-t border-zinc-800 space-y-1.5">
+                    <QuantRow label={"6'-4\" Frames"} value={String(activeConfig.tallCount)} />
+                    <QuantRow label={"5'-0\" Frames"} value={String(activeConfig.fiveCount)} />
+                    <QuantRow label={"3'-0\" Frames"} value={String(activeConfig.threeCount)} />
+                    <QuantRow label="Screw Jack" value={`${activeConfig.screwJackExtensionIn}"`} />
+                  </div>
                 </div>
+              )}
 
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                    Stack Output
-                  </h3>
-
-                  {frameResult ? (
-                    <>
-                      <div className="mt-3 grid gap-3 md:grid-cols-4">
-                        <CompactMetric
-                          label="Required Height"
-                          value={formatFeetInches(frameResult.requiredScaffoldHeightFeet)}
-                        />
-                        <CompactMetric
-                          label={`6'4" Frames`}
-                          value={String(frameResult.frames64)}
-                        />
-                        <CompactMetric
-                          label={`5' / 3' Frames`}
-                          value={`${frameResult.frames5} / ${frameResult.frames3}`}
-                        />
-                        <CompactMetric
-                          label="Jack Extension"
-                          value={`${frameResult.jackExtensionInches.toFixed(1)}"`}
-                        />
+              {/* Inventory View */}
+              <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
+                <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400 mb-3">Inventory View</h2>
+                <p className="text-[10px] text-zinc-600 mb-3">{scaffoldWidthLabel} width family</p>
+                <div className="space-y-1.5">
+                  {frameFamily.map(frame => (
+                    <div key={frame.code} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[10px] font-bold text-orange-300">{frame.code}</span>
+                        {frame.isTall && <span className="text-[8px] font-bold text-orange-400 border border-orange-500/20 rounded px-1">TALL</span>}
+                        {frame.isMason && <span className="text-[8px] font-bold text-zinc-500 border border-zinc-700 rounded px-1">MASON</span>}
                       </div>
-
-                      <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-800">
-                        <table className="w-full text-left text-xs">
-                          <thead className="bg-black text-zinc-500">
-                            <tr>
-                              <th className="px-3 py-2 font-medium">Material</th>
-                              <th className="px-3 py-2 font-medium">Description</th>
-                              <th className="px-3 py-2 text-right font-medium">Qty / Leg</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-zinc-900 bg-zinc-950/70">
-                            <MaterialRowSmall
-                              code="F-64"
-                              description={`6'4" Frame`}
-                              qty={frameResult.frames64}
-                            />
-                            <MaterialRowSmall
-                              code="F-5"
-                              description="5' Frame"
-                              qty={frameResult.frames5}
-                            />
-                            <MaterialRowSmall
-                              code="F-3"
-                              description="3' Frame"
-                              qty={frameResult.frames3}
-                            />
-                            <MaterialRowSmall
-                              code="SJ"
-                              description="Screw Jack Extension"
-                              qty={Number(frameResult.jackExtensionInches.toFixed(1))}
-                            />
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <p className="mt-3 text-xs leading-5 text-zinc-500">
-                        Stack target uses top of wall minus deck offset. This keeps the top working deck
-                        below wall height while using 6&apos;4&quot;, 5&apos;, 3&apos; frames and screw jack adjustment.
-                      </p>
-                    </>
-                  ) : (
-                    <div className="mt-3 rounded-xl border border-zinc-800 bg-black p-4 text-xs text-zinc-500">
-                      Enter valid wall height and deck offset to calculate frame configuration.
+                      <span className="text-[9px] text-zinc-500">{formatFt(frame.heightFt)} × {frame.widthLabel}</span>
                     </div>
-                  )}
+                  ))}
                 </div>
               </div>
+
             </div>
-          )}
-        </section>
+          </div>
 
-        {draftMode && (
-          <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#070707] p-3">
-            <h2 className="mb-4 text-xs uppercase tracking-[0.22em] text-orange-400">
-              Drafting
-            </h2>
+          {/* Navigation */}
+          <div className="grid grid-cols-2 gap-3">
+            <a href="/set-scaffold" className="block rounded-xl border border-zinc-800 bg-black px-4 py-3 text-center text-xs font-bold text-zinc-400 hover:border-orange-500/30 hover:text-orange-300">
+              ← Back to Set Scaffold
+            </a>
+            <button onClick={saveConfiguration} className="rounded-xl bg-orange-500 px-4 py-3 text-center text-xs font-bold text-black hover:bg-orange-400">
+              Save & Continue to Section View →
+            </button>
+          </div>
 
-            {["Scaffold Parts", "Cloud Callouts", "Add Notes"].map((item) => (
-              <button
-                key={item}
-                className="mb-3 w-full rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-left text-xs text-zinc-300 hover:border-orange-500/40"
-              >
-                {item}
-              </button>
-            ))}
-          </aside>
-        )}
-
-        <aside className="overflow-y-auto border-l border-orange-500/20 bg-[#090909] p-4">
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold">Estimate & Proposal</h2>
-                <p className="mt-1 text-xs text-zinc-500">Live estimate builder</p>
-              </div>
-              <p className="text-right text-[10px] leading-4 text-zinc-600">
-                {dateTimeStamp}
-              </p>
-            </div>
-          </section>
-
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
-            <h3 className="mb-3 text-xs uppercase tracking-[0.22em] text-orange-400">
-              Project Scope
-            </h3>
-            <div className="space-y-2 text-xs text-zinc-400">
-              <p>Lineal Footage: 0 LF</p>
-              <p>Average Wall Height: {frameResult ? formatFeetInches(frameResult.wallHeightFeet) : "0'"}</p>
-              <p>Scaffold Width: {scaffoldWidth}</p>
-              <p>
-                Exterior Finish:{" "}
-                {selectedFinishes.length > 0 ? selectedFinishes.join(", ") : "Not Selected"}
-              </p>
-              <p>Elevations Included: Pending</p>
-            </div>
-          </section>
-
-          <section className="mb-4 rounded-2xl border border-zinc-800 bg-black p-4">
-            <h3 className="mb-3 text-xs uppercase tracking-[0.22em] text-orange-400">
-              Frame Stack
-            </h3>
-
-            <div className="space-y-2 text-xs text-zinc-400">
-              <p>Required Height: {frameResult ? formatFeetInches(frameResult.requiredScaffoldHeightFeet) : "Not Set"}</p>
-              <p>6&apos;4&quot; Frames: {frameResult ? frameResult.frames64 : 0}</p>
-              <p>5&apos; Frames: {frameResult ? frameResult.frames5 : 0}</p>
-              <p>3&apos; Frames: {frameResult ? frameResult.frames3 : 0}</p>
-              <p>Jack Extension: {frameResult ? `${frameResult.jackExtensionInches.toFixed(1)}"` : `0"`}</p>
-            </div>
-          </section>
-
-          <MetricCard label="Estimated LF" value="0" />
-          <MetricCard label="Bay Count" value="0" />
-          <MetricCard label="Frames" value={frameResult ? String(frameResult.frames64 + frameResult.frames5 + frameResult.frames3) : "0"} />
-          <MetricCard label="Labor Hours" value="0" />
-
-          <section className="mt-4 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-orange-300">Estimate Total</p>
-            <h3 className="mt-3 font-mono text-3xl font-bold text-orange-500">$0</h3>
-          </section>
-
-          <section className="mt-4 rounded-2xl border border-orange-500/20 bg-black/70 p-3 shadow-[0_0_25px_rgba(249,115,22,0.08)]">
-            <h3 className="mb-2 text-xs font-semibold text-zinc-300">Alerts</h3>
-            <p className="text-xs text-zinc-500">No alerts detected.</p>
-          </section>
-        </aside>
+        </div>
       </div>
     </main>
   );
 }
-
-function MetricCard({ label, value }: { label: string; value: string }) {
+function ConfigPanel({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div className="mb-3 rounded-2xl border border-zinc-800 bg-black p-4">
-      <p className="text-xs uppercase tracking-[0.2em] text-zinc-600">{label}</p>
-      <h3 className="mt-3 font-mono text-3xl font-bold text-orange-500">{value}</h3>
+    <section className="rounded-[1.6rem] border border-zinc-800 bg-korban-raised p-4 shadow-2xl">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">{title}</h2>
+          {subtitle && <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>}
+        </div>
+        <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function InfoChip({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-black px-2.5 py-2">
+      <p className="text-[8px] uppercase tracking-widest text-zinc-600 mb-0.5">{label}</p>
+      <p className="font-mono text-xs font-bold text-orange-300">{value}</p>
     </div>
   );
 }
 
-function CompactMetric({ label, value }: { label: string; value: string }) {
+function MiniStat({ label, value, accent = false, muted = false }: { label: string; value: string; accent?: boolean; muted?: boolean }) {
   return (
-    <div className="rounded-xl border border-zinc-800 bg-black p-3">
-      <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
-      <h3 className="mt-2 font-mono text-lg font-bold text-orange-500">{value}</h3>
+    <div className="rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+      <p className="text-[8px] uppercase tracking-widest text-zinc-600 mb-0.5">{label}</p>
+      <p className={`font-mono text-xs font-bold ${accent ? "text-red-400" : muted ? "text-zinc-500" : "text-orange-300"}`}>{value}</p>
     </div>
   );
 }
 
-function MaterialRowSmall({
-  code,
-  description,
-  qty,
-}: {
-  code: string;
-  description: string;
-  qty: number;
-}) {
+function QuantRow({ label, value }: { label: string; value: string }) {
   return (
-    <tr className="text-zinc-300">
-      <td className="px-3 py-2 font-mono text-orange-400">{code}</td>
-      <td className="px-3 py-2">{description}</td>
-      <td className="px-3 py-2 text-right font-mono">{qty}</td>
-    </tr>
+    <div className="flex items-center justify-between border-b border-zinc-900 pb-1.5 last:border-b-0 last:pb-0">
+      <span className="text-[10px] text-zinc-500">{label}</span>
+      <span className="font-mono text-[10px] font-bold text-zinc-200">{value}</span>
+    </div>
   );
 }

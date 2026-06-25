@@ -3,21 +3,8 @@
  *
  * KORBAN's single source of truth for estimator-configurable defaults.
  * This is the "Backend" — the control center an estimator sets up once,
- * which then quietly feeds Takeoff Workspace, Set Scaffold, Estimate
- * Review, and the Proposal output.
- *
- * This file replaces ratesStore.ts. All of ratesStore's original exports
- * (getRates, getInstallDays, getDismantleDays, getBlendedLaborRate,
- * getLogistics, getMonthlyRentalRevenue) are preserved below with the
- * same names and signatures, so Estimate Review keeps working with only
- * an import-path change — no logic changes required there.
- *
- * Data flow:
- *   Backend Settings (this file)
- *     -> Project Plan Desk / Takeoff Workspace (reads company + scaffold defaults)
- *     -> Set Scaffold (reads scaffold + material defaults)
- *     -> Estimate Review (reads labor + pricing defaults)
- *     -> Proposal (reads company + proposal defaults)
+ * which then quietly feeds Takeoff Workspace, Set Scaffold, Frame
+ * Configuration, Section View, Estimate Review, and the Proposal output.
  */
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -36,31 +23,31 @@ export type CompanySettings = {
 
 export type ScaffoldDefaults = {
   scaffoldType: string;
-  defaultScaffoldWidth: number; // feet
-  defaultBayLength: number; // feet
-  wallOffset: number; // feet
+  defaultScaffoldWidth: number;
+  defaultBayLength: number;
+  wallOffset: number;
   turnaroundBaysEnabled: boolean;
   insideCornerLogic: string;
   outsideCornerLogic: string;
   bracePattern: "Every Bay" | "Every Other Bay" | "Custom";
-  frameHeight: number; // feet (decimal, e.g. 6.333 = 6'-4")
-  /**
-   * Standard worker reach height from the top scaffold deck. The top
-   * deck never needs to reach the full wall height — a worker standing
-   * on it can reach roughly this far above. Frame stack height is
-   * therefore calculated from (wallHeight - workerReachHeight), not the
-   * raw wall height. Editable per company since crew height/reach varies
-   * (some companies plan 5' for shorter crew members). Default 6'.
-   */
+  frameHeight: number;
   workerReachHeight: number;
+  /**
+   * Maximum screw jack extension in inches. Range 1"–18". Default 12" (1 foot).
+   * Used by Frame Configuration to calculate the base frame stack — the
+   * remaining height after stacking frames is covered by the screw jack
+   * up to this maximum. Keeping the default at 12" (not the full 18")
+   * ensures a safe working margin below the physical limit.
+   */
+  screwJackMaxExtension: number;
   jumpLogic: string;
 };
 
 export type MaterialItem = {
   id: string;
   name: string;
-  isCore: boolean; // core inventory item vs. specialty/optional
-  unitRate: number; // monthly rental rate per unit
+  isCore: boolean;
+  unitRate: number;
 };
 
 export type MaterialDefaults = {
@@ -70,13 +57,13 @@ export type MaterialDefaults = {
 export type LaborDefaults = {
   installCrewSize: number;
   dismantleCrewSize: number;
-  installProductionRate: number; // bays/day or similar
+  installProductionRate: number;
   dismantleProductionRate: number;
-  apprenticeRate: number; // $/hr
-  journeymanRate: number; // $/hr
-  foremanRate: number; // $/hr
+  apprenticeRate: number;
+  journeymanRate: number;
+  foremanRate: number;
   travelTimeHours: number;
-  truckDeliveryRate: number; // $ per trip
+  truckDeliveryRate: number;
   mobilizationCost: number;
   dismantleCost: number;
 };
@@ -94,12 +81,6 @@ export type PricingDefaults = {
   markupPercent: number;
   marginPercent: number;
   taxPercent: number;
-  /**
-   * Extra markup applied when a job is priced/mobilized elevation-by-
-   * elevation instead of as one complete exterior job. Reflects the real
-   * cost of multiple separate mobilizations (more truck trips, less
-   * efficient loading, more setup/teardown per visit). Default 6%.
-   */
   partialExteriorMarkupPercent: number;
 };
 
@@ -112,7 +93,7 @@ export type AddAlternateDefault = {
 
 export type ProposalDefaults = {
   clientLogoUrl: string;
-  proposalNumberFormat: string; // e.g. "KRB-{YYMMDD}-{seq}"
+  proposalNumberFormat: string;
   introLanguage: string;
   scopeLanguage: string;
   exclusionsLanguage: string;
@@ -206,6 +187,8 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     bracePattern: "Every Bay",
     frameHeight: 6 + 4 / 12,
     workerReachHeight: 6,
+    // Default 12" (1 foot) — safe working margin below the 18" physical max
+    screwJackMaxExtension: 12,
     jumpLogic: "Standard",
   },
   material: {
@@ -317,6 +300,8 @@ function normalizeScaffold(value: unknown): ScaffoldDefaults {
     bracePattern: asEnum(r.bracePattern, d.bracePattern, ["Every Bay", "Every Other Bay", "Custom"] as const),
     frameHeight: asNumber(r.frameHeight, d.frameHeight),
     workerReachHeight: asNumber(r.workerReachHeight, d.workerReachHeight),
+    // Clamp to valid range 1–18 inches
+    screwJackMaxExtension: Math.min(18, Math.max(1, asNumber(r.screwJackMaxExtension, d.screwJackMaxExtension))),
     jumpLogic: asString(r.jumpLogic, d.jumpLogic),
   };
 }
@@ -339,8 +324,6 @@ function normalizeMaterial(value: unknown): MaterialDefaults {
     return { items: defaults };
   }
 
-  // Merge stored items with defaults by id, so newly-added default items
-  // (e.g. if we expand the default list later) still show up.
   const storedById = new Map<string, unknown>();
   r.items.forEach((item) => {
     if (isRecord(item) && typeof item.id === "string") {
@@ -352,7 +335,6 @@ function normalizeMaterial(value: unknown): MaterialDefaults {
     storedById.has(fallback.id) ? normalizeMaterialItem(storedById.get(fallback.id), fallback) : fallback,
   );
 
-  // Preserve any custom items the user added beyond the defaults.
   const defaultIds = new Set(defaults.map((item) => item.id));
   const customItems = r.items
     .filter((item): item is Record<string, unknown> => isRecord(item) && typeof item.id === "string" && !defaultIds.has(item.id as string))
@@ -450,7 +432,6 @@ function normalizeBackendSettings(value: unknown): BackendSettings {
 
 export function getBackendSettings(): BackendSettings {
   if (!canUseStorage()) return DEFAULT_BACKEND_SETTINGS;
-
   try {
     const raw = window.localStorage.getItem(BACKEND_SETTINGS_KEY);
     if (!raw) return DEFAULT_BACKEND_SETTINGS;
@@ -481,9 +462,6 @@ export function resetBackendSettings(): void {
 }
 
 // ─── Backwards-compatible exports (formerly ratesStore.ts) ────────────────
-// These preserve the exact function names/signatures Estimate Review
-// already imports, so that page needs zero logic changes — only the
-// import path changes from "@/lib/ratesStore" to "@/lib/backendStore".
 
 export type KorbanRates = {
   frameMonthlyRate: number;
@@ -511,10 +489,6 @@ const PRODUCTION_DAY_DEFAULTS = {
   dismantlePercent: 60,
 };
 
-/**
- * Adapts the new BackendSettings shape into the old KorbanRates shape
- * that Estimate Review's existing code already expects.
- */
 export function getRates(): KorbanRates {
   const settings = getBackendSettings();
   return {
