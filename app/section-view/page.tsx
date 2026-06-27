@@ -347,8 +347,11 @@ export default function SectionViewPage() {
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
-    return { x: x / zoom, y: y / zoom };
+    // Allow clicks slightly outside (within 10px) for edge picking
+    if (x < -10 || y < -10 || x > rect.width + 10 || y > rect.height + 10) return null;
+    const clampedX = Math.max(0, Math.min(rect.width, x));
+    const clampedY = Math.max(0, Math.min(rect.height, y));
+    return { x: clampedX / zoom, y: clampedY / zoom };
   }
 
   function handleCanvasClick(e: React.MouseEvent<HTMLDivElement>) {
@@ -409,13 +412,19 @@ export default function SectionViewPage() {
     return buildFrameLevels(activeElevationData, tallFrameFt, workerReachFt, screwJackMaxIn);
   }, [activeElevationData, tallFrameFt, workerReachFt, screwJackMaxIn]);
 
+  // Scaffold side — user can toggle which side of wall the scaffold sits on
+  const [scaffoldOnLeft, setScaffoldOnLeft] = useState(true);
+
   // Determine scaffold x position from grade point + wall offset
   const scaffoldXPdf = useMemo(() => {
     if (!gradePoint || !pageUnitsPerFoot || wallProfilePoints.length === 0) return null;
-    // Place scaffold at wall x - (wallOffset in PDF units) — to the left of wall
     const primaryWallX = wallProfilePoints[0].x;
-    return primaryWallX - wallOffsetFt * pageUnitsPerFoot;
-  }, [gradePoint, pageUnitsPerFoot, wallProfilePoints, wallOffsetFt]);
+    const offsetPx = wallOffsetFt * pageUnitsPerFoot;
+    // Left of wall = subtract, Right of wall = add
+    return scaffoldOnLeft
+      ? primaryWallX - offsetPx
+      : primaryWallX + offsetPx;
+  }, [gradePoint, pageUnitsPerFoot, wallProfilePoints, wallOffsetFt, scaffoldOnLeft]);
 
   // Detect bracket conditions
   const brackets = useMemo(() => {
@@ -497,106 +506,99 @@ export default function SectionViewPage() {
           <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
             {/* Upload button */}
             <label className={`cursor-pointer rounded-2xl border px-4 py-2 text-xs font-bold transition ${pdfDoc ? "border-zinc-800 bg-black/80 text-zinc-400" : "border-orange-500/40 bg-orange-500/10 text-orange-300"}`}>
-              {pdfDoc ? pdfFileName.slice(0, 20) + (pdfFileName.length > 20 ? "…" : "") : "Upload Section PDF"}
+              {pdfDoc ? pdfFileName.slice(0, 20) + (pdfFileName.length > 20 ? "…" : "") : "① Upload Section PDF"}
               <input ref={uploadRef} type="file" accept="application/pdf" onChange={handlePdfUpload} className="hidden" />
             </label>
 
-            {/* Pick grade */}
-            {pdfDoc && (
-              <button
-                onClick={() => setPickMode(pickMode === "grade" ? null : "grade")}
-                className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
-                  pickMode === "grade"
-                    ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
-                    : gradePoint
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                    : "border-orange-500/30 bg-orange-500/10 text-orange-300"
-                }`}
-              >
-                {pickMode === "grade" ? "Click Grade Line…" : gradePoint ? "✓ Grade Set" : "1. Set Grade"}
-              </button>
-            )}
+            {/* Divider */}
+            <div className="h-5 w-px bg-zinc-800" />
 
-            {/* Pick wall profile */}
-            {pdfDoc && gradePoint && (
-              <button
-                onClick={() => setPickMode(pickMode === "wall" ? null : "wall")}
-                className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
-                  pickMode === "wall"
-                    ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
-                    : wallProfilePdf.length > 0
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                    : "border-orange-500/30 bg-orange-500/10 text-orange-300"
-                }`}
-              >
-                {pickMode === "wall"
-                  ? `Tracing… (${wallProfilePdf.length} pts — click Done when finished)`
-                  : wallProfilePdf.length > 0
-                  ? `✓ Wall Profile (${wallProfilePdf.length} pts)`
-                  : "2. Trace Wall Profile"}
-              </button>
-            )}
+            {/* Set Scale */}
+            <button
+              onClick={() => { if (pdfDoc) setPickMode(pickMode === "scale1" || pickMode === "scale2" ? null : "scale1"); }}
+              className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
+                !pdfDoc ? "border-zinc-800 bg-zinc-950 text-zinc-600"
+                : pickMode === "scale1" || pickMode === "scale2" ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
+                : pageUnitsPerFoot ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                : "border-orange-500/30 bg-orange-500/10 text-orange-300"
+              }`}
+            >
+              {pickMode === "scale1" ? "→ Click S1…" : pickMode === "scale2" ? "→ Click S2…" : pageUnitsPerFoot ? "✓ Scale Set" : "② Set Scale"}
+            </button>
 
-            {/* Done tracing */}
+            {/* Set Grade */}
+            <button
+              onClick={() => { if (pdfDoc) setPickMode(pickMode === "grade" ? null : "grade"); }}
+              className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
+                !pdfDoc ? "border-zinc-800 bg-zinc-950 text-zinc-600"
+                : pickMode === "grade" ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
+                : gradePoint ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                : "border-orange-500/30 bg-orange-500/10 text-orange-300"
+              }`}
+            >
+              {pickMode === "grade" ? "Click Grade Line…" : gradePoint ? "✓ Grade Set" : "③ Set Grade"}
+            </button>
+
+            {/* Trace Wall */}
+            <button
+              onClick={() => { if (pdfDoc) setPickMode(pickMode === "wall" ? null : "wall"); }}
+              className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
+                !pdfDoc ? "border-zinc-800 bg-zinc-950 text-zinc-600"
+                : pickMode === "wall" ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
+                : wallProfilePdf.length > 0 ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                : "border-orange-500/30 bg-orange-500/10 text-orange-300"
+              }`}
+            >
+              {pickMode === "wall" ? `Tracing… (${wallProfilePdf.length} pts)` : wallProfilePdf.length > 0 ? `✓ Wall (${wallProfilePdf.length} pts)` : "④ Trace Wall"}
+            </button>
+
+            {/* Done / Clear */}
             {pickMode === "wall" && wallProfilePdf.length >= 1 && (
-              <button
-                onClick={() => setPickMode(null)}
-                className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-bold text-emerald-300"
-              >
-                Done Tracing
-              </button>
+              <button onClick={() => setPickMode(null)} className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-bold text-emerald-300">Done</button>
             )}
-
-            {/* Clear wall */}
             {wallProfilePdf.length > 0 && (
+              <button onClick={() => { setWallProfilePdf([]); setPickMode(null); }} className="rounded-2xl border border-zinc-800 bg-black/80 px-3 py-2 text-xs text-zinc-500 hover:text-red-400 hover:border-red-500/30">Clear Wall</button>
+            )}
+
+            {/* Scaffold side toggle */}
+            {canGenerateSection && (
               <button
-                onClick={() => { setWallProfilePdf([]); setPickMode(null); }}
-                className="rounded-2xl border border-zinc-800 bg-black/80 px-3 py-2 text-xs text-zinc-500 hover:text-red-400 hover:border-red-500/30"
+                onClick={() => setScaffoldOnLeft(s => !s)}
+                className="rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs font-bold text-zinc-300 hover:border-orange-500/40 hover:text-orange-300 transition"
               >
-                Clear Wall
+                Scaffold: {scaffoldOnLeft ? "← Left of Wall" : "Right of Wall →"}
               </button>
             )}
 
-            {/* Set Scale — calibrate directly on section sheet */}
-            {pdfDoc && (
-              <>
-                <button
-                  onClick={() => setPickMode(pickMode === "scale1" || pickMode === "scale2" ? null : "scale1")}
-                  className={`rounded-2xl border px-4 py-2 text-xs font-bold transition ${
-                    pickMode === "scale1" || pickMode === "scale2"
-                      ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
-                      : pageUnitsPerFoot
-                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                      : "border-zinc-700 bg-black/80 text-zinc-400"
-                  }`}
-                >
-                  {pickMode === "scale1" ? "Click Point 1…" : pickMode === "scale2" ? "Click Point 2…" : pageUnitsPerFoot ? "✓ Scale Set" : "Set Scale"}
-                </button>
-
-                {/* Known distance input + confirm — only shown while calibrating */}
-                {(pickMode === "scale1" || pickMode === "scale2" || scalePoints.length === 2) && (
-                  <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-black/90 px-3 py-1.5 backdrop-blur">
-                    <span className="text-[10px] text-zinc-500">Known distance</span>
-                    <input
-                      value={knownScaleFeet}
-                      onChange={e => setKnownScaleFeet(e.target.value)}
-                      placeholder="e.g. 10'"
-                      className="w-16 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-orange-300 outline-none"
-                    />
-                    {scalePoints.length === 2 && knownScaleFeet && (
-                      <button
-                        onClick={calibrateScale}
-                        className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 text-[10px] font-bold text-emerald-300"
-                      >
-                        Set
-                      </button>
-                    )}
-                  </div>
-                )}
-              </>
+            {/* S1/S2 hint + distance input */}
+            {(pickMode === "scale1" || pickMode === "scale2") && (
+              <div className="rounded-2xl border border-yellow-500/20 bg-yellow-500/5 px-3 py-2 text-[10px] text-yellow-300">
+                {pickMode === "scale1" ? "Click S1 on known dimension" : "Click S2 — other end"}
+              </div>
             )}
-
-            {/* Warnings */}
+            {(pickMode === "scale1" || pickMode === "scale2" || scalePoints.length === 2) && (
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-black/90 px-3 py-1.5">
+                <span className="text-[10px] text-zinc-500">Distance</span>
+                <input value={knownScaleFeet} onChange={e => setKnownScaleFeet(e.target.value)} placeholder="e.g. 10'" className="w-16 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-[10px] font-mono text-orange-300 outline-none" />
+                {scalePoints.length === 2 && knownScaleFeet && (
+                  <button onClick={calibrateScale} className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 text-[10px] font-bold text-emerald-300">Confirm</button>
+                )}
+              </div>
+            )}
+            {pageUnitsPerFoot && !pickMode && (
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[10px] font-mono text-emerald-300">
+                {(() => {
+                  const scales = [
+                    { label: '1/16"=1\'', puf: 0.75 }, { label: '1/8"=1\'', puf: 1.5 },
+                    { label: '1/4"=1\'', puf: 3 }, { label: '3/8"=1\'', puf: 4.5 },
+                    { label: '1/2"=1\'', puf: 6 }, { label: '3/4"=1\'', puf: 9 },
+                    { label: '1"=1\'', puf: 12 }, { label: '1-1/2"=1\'', puf: 18 },
+                  ];
+                  const closest = scales.reduce((a, b) => Math.abs(b.puf - pageUnitsPerFoot) < Math.abs(a.puf - pageUnitsPerFoot) ? b : a);
+                  return `≈ ${closest.label}`;
+                })()}
+              </div>
+            )}
             {overThirtyWarnings.length > 0 && (
               <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-xs font-bold text-red-300">
                 ⚠ {overThirtyWarnings.length} level{overThirtyWarnings.length > 1 ? "s" : ""} need additional scaffold run (&gt;30")
@@ -677,6 +679,33 @@ export default function SectionViewPage() {
                       </div>
                     );
                   })}
+
+                  {/* Scale calibration markers S1 / S2 */}
+                  {scalePoints.map((pt, i) => {
+                    const s = markerStyle(pt);
+                    return (
+                      <div key={`scale-${i}`} className="absolute z-30 -translate-x-1/2 -translate-y-1/2" style={{ left: s.left, top: s.top }}>
+                        <div className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-emerald-400 bg-emerald-400/20 text-[8px] font-bold text-emerald-300">
+                          S{i + 1}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Scale calibration line between S1 and S2 */}
+                  {scalePoints.length === 2 && (() => {
+                    const ox = canvasRef.current?.offsetLeft ?? 32;
+                    const oy = canvasRef.current?.offsetTop ?? 32;
+                    return (
+                      <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full">
+                        <line
+                          x1={scalePoints[0].x * zoom + ox} y1={scalePoints[0].y * zoom + oy}
+                          x2={scalePoints[1].x * zoom + ox} y2={scalePoints[1].y * zoom + oy}
+                          stroke="#34d399" strokeWidth="1.5" strokeDasharray="6 3" opacity="0.8"
+                        />
+                      </svg>
+                    );
+                  })()}
 
                   {/* Wall profile polyline */}
                   {wallProfilePdf.length >= 2 && (() => {
@@ -931,7 +960,7 @@ export default function SectionViewPage() {
                 <QuantRow label="Short Frames" value={String(frameLevels.filter(l => !l.isTall).length)} />
                 <QuantRow label="Scaffold Width" value={formatFt(scaffoldWidthFt)} />
                 <QuantRow label="Wall Height" value={formatFt(activeElevationData?.wallHeight ?? 0)} />
-                <QuantRow label="Worker Reach" value={formatFt(workerReachFt)} />
+                <QuantRow label="Avg. Laborer Reach" value={formatFt(workerReachFt)} />
               </div>
             )}
             <a href="/frame-configuration" className="mt-3 block rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-center text-[10px] font-bold text-orange-300 hover:bg-orange-500/20">

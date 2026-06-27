@@ -205,14 +205,16 @@ function generateThreeOptions(
   const targetFt = Math.max(0, wallHeightFt - workerReachFt);
   const configs: FrameConfiguration[] = [];
 
-  const variants: Array<{ variant: number; option: "A" | "B" | "C"; label: string }> = [
-    { variant: 0,  option: "A", label: "Optimal Stack" },
-    { variant: -1, option: "B", label: "Conservative" },
-    { variant: 1,  option: "C", label: "Extended" },
+  const variants: Array<{ variant: number; option: "A" | "B" | "C"; label: string; relaxed: boolean }> = [
+    { variant: 0,  option: "A", label: "Optimal",      relaxed: false },
+    { variant: -1, option: "B", label: "Conservative", relaxed: true  },
+    { variant: 1,  option: "C", label: "Extended",     relaxed: true  },
   ];
 
-  for (const { variant, option, label } of variants) {
-    const result = calculateStack(targetFt, tallFrameFt, screwJackMaxIn, variant);
+  for (const { variant, option, label, relaxed } of variants) {
+    // For B and C use a relaxed screw jack max (up to 18") so they always generate
+    const jackMax = relaxed ? 18 : screwJackMaxIn;
+    const result = calculateStack(targetFt, tallFrameFt, jackMax, variant);
     if (!result) continue;
 
     const gapFt = result.totalFt - targetFt;
@@ -236,10 +238,10 @@ function generateThreeOptions(
     });
   }
 
-  // Deduplicate — remove identical stacks (can happen at extreme heights)
+  // Only deduplicate truly identical option+summary combos
   const seen = new Set<string>();
   return configs.filter(c => {
-    const key = c.frameSummary;
+    const key = `${c.option}-${c.frameSummary}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -315,10 +317,11 @@ export default function FrameConfigurationPage() {
     };
     saveActiveElevation(updated);
     setActiveElevationData(updated);
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 2000);
+    window.location.href = "/section-view";
   }
 
+  const allOptions: Array<"A" | "B" | "C"> = ["A", "B", "C"];
+  const optionLabels: Record<string, string> = { A: "Optimal", B: "Conservative", C: "Extended" };
   const totalFrameCount = activeConfig
     ? activeConfig.levels.length * (activeElevationData?.quantityEngine.legCount ?? 0)
     : 0;
@@ -375,32 +378,37 @@ export default function FrameConfigurationPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-[1fr_1fr_300px] gap-5">
+          <div className="space-y-5">
 
-            {/* Frame options */}
-            <div className="col-span-2 space-y-4">
-              <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Frame Configuration</h2>
-                    <p className="mt-1 text-xs text-zinc-600">Select the frame makeup that fits your site</p>
-                  </div>
-                  <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+            {/* Frame options — full width, stacked below metrics */}
+            <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Frame Configuration</h2>
+                  <p className="mt-1 text-xs text-zinc-600">Select the frame makeup that fits your site</p>
                 </div>
+                <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+              </div>
 
-                {configurations.length === 0 && (
-                  <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-400">
-                    ⚠ No valid configuration found. Check wall height and screw jack settings in Backend.
-                  </div>
-                )}
+              {configurations.length === 0 && (
+                <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-400">
+                  ⚠ No valid configuration found. Check wall height and screw jack settings in Backend.
+                </div>
+              )}
 
-                <div className="space-y-3">
-                  {configurations.map(config => (
+              <div className="grid grid-cols-3 gap-3">
+                {allOptions.map(option => {
+                  const config = configurations.find(c => c.option === option);
+                  const isSelected = selectedOption === option;
+                  return (
                     <button
-                      key={config.option}
-                      onClick={() => setSelectedOption(config.option)}
+                      key={option}
+                      onClick={() => config && setSelectedOption(option)}
+                      disabled={!config}
                       className={`w-full rounded-2xl border p-4 text-left transition ${
-                        selectedOption === config.option
+                        !config
+                          ? "border-zinc-800 bg-zinc-950/40 cursor-not-allowed opacity-50"
+                          : isSelected
                           ? "border-orange-500/50 bg-orange-500/5 shadow-[0_0_20px_rgba(249,115,22,0.10)]"
                           : "border-zinc-800 bg-black hover:border-zinc-700"
                       }`}
@@ -408,39 +416,48 @@ export default function FrameConfigurationPage() {
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                           <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded-md ${
-                            selectedOption === config.option ? "bg-orange-500 text-black" : "bg-zinc-800 text-zinc-400"
-                          }`}>
-                            {config.option}
-                          </span>
-                          <span className="text-xs font-bold text-zinc-200">{config.label}</span>
-                          {config.recommended && (
+                            isSelected && config ? "bg-orange-500 text-black" : "bg-zinc-800 text-zinc-400"
+                          }`}>{option}</span>
+                          <span className="text-xs font-bold text-zinc-200">{optionLabels[option]}</span>
+                          {config?.recommended && (
                             <span className="text-[9px] font-bold uppercase tracking-wider text-orange-400 border border-orange-500/30 rounded px-1.5 py-0.5">
                               Recommended
                             </span>
                           )}
                         </div>
-                        <span className="font-mono text-sm font-bold text-orange-300">{config.levels.length} jumps</span>
+                        {config && <span className="font-mono text-sm font-bold text-orange-300">{config.levels.length} jumps</span>}
                       </div>
-
-                      <p className="font-mono text-[11px] text-zinc-400 mb-3">{config.frameSummary}</p>
-
-                      <div className="grid grid-cols-4 gap-2">
-                        <MiniStat label="Reach" value={formatFt(config.totalHeightFt)} />
-                        <MiniStat label="Screw Jack" value={`${config.screwJackExtensionIn}"`} accent={config.screwJackExtensionIn > screwJackMaxIn} />
-                        <MiniStat label={"6'-4\" Frames"} value={String(config.tallCount)} />
-                        <MiniStat label="Short Frames" value={String(config.fiveCount + config.threeCount)} muted={config.fiveCount + config.threeCount === 0} />
-                      </div>
+                      {config ? (
+                        <>
+                          <p className="font-mono text-[11px] text-zinc-400 mb-3">{config.frameSummary}</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <MiniStat label="Reach" value={formatFt(config.totalHeightFt)} />
+                            <MiniStat label="Screw Jack" value={`${config.screwJackExtensionIn}"`} accent={config.screwJackExtensionIn > screwJackMaxIn} />
+                            <MiniStat label={"6'-4\" Frames"} value={String(config.tallCount)} />
+                            <MiniStat label="Short Frames" value={String(config.fiveCount + config.threeCount)} muted={config.fiveCount + config.threeCount === 0} />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex flex-col items-start gap-1 mt-2">
+                          <p className="text-[10px] text-zinc-600 font-mono">Not Available</p>
+                          <p className="text-[9px] text-zinc-700 leading-4">No valid configuration for this wall height</p>
+                        </div>
+                      )}
                     </button>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
+            </div>
 
-              {/* Top distance override */}
+            {/* Configuration Adjustments + Level Detail + Inventory — 3 columns */}
+            <div className="grid grid-cols-3 gap-5">
+
+              {/* Configuration Adjustments */}
               <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-5">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Top Distance Override</h2>
-                    <p className="mt-1 text-xs text-zinc-600">Set exact distance from top deck to wall top — overrides worker reach default</p>
+                    <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">Configuration Adjustments</h2>
+                    <p className="mt-1 text-xs text-zinc-600">Override avg. laborer reach to set exact top distance</p>
                   </div>
                   <button
                     onClick={() => setUseCustomTopDistance(c => !c)}
@@ -465,30 +482,24 @@ export default function FrameConfigurationPage() {
                     <p className="mt-1 text-[10px] text-zinc-600">Frame configuration recalculates automatically.</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-2">
                     <InfoChip label="Wall Height" value={formatFt(wallHeightFt)} />
-                    <InfoChip label="Worker Reach" value={formatFt(workerReachFt)} />
-                    <InfoChip label="Net Frame Height" value={formatFt(Math.max(0, effectiveWallHeightFt - workerReachFt))} />
+                    <InfoChip label="Avg. Laborer Reach" value={formatFt(workerReachFt)} />
+                    <InfoChip label="Avg. Frame Height" value={formatFt(Math.max(0, effectiveWallHeightFt - workerReachFt))} />
                   </div>
                 )}
               </div>
-            </div>
 
-            {/* Right column — level detail + inventory */}
-            <div className="space-y-4">
-
-              {/* Selected config detail */}
+              {/* Level Detail */}
               {activeConfig && (
                 <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
                   <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400 mb-3">Level Detail</h2>
                   <div className="space-y-1.5">
-                    {/* Screw jack */}
                     <div className="flex items-center gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-3 py-2">
                       <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 flex-shrink-0" />
                       <span className="text-[10px] font-bold text-yellow-300">Screw Jack</span>
                       <span className="ml-auto font-mono text-[10px] text-yellow-400">{activeConfig.screwJackExtensionIn}"</span>
                     </div>
-                    {/* Levels bottom to top */}
                     {activeConfig.levels.map((level, i) => (
                       <div key={i} className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${level.isTall ? "border-orange-500/15 bg-orange-500/5" : "border-zinc-800 bg-zinc-950/70"}`}>
                         <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${level.isTall ? "bg-orange-400" : "bg-zinc-500"}`} />
@@ -496,10 +507,9 @@ export default function FrameConfigurationPage() {
                         <span className="ml-auto text-[9px] text-zinc-600">L{i + 1}</span>
                       </div>
                     ))}
-                    {/* Reach zone */}
                     <div className="flex items-center gap-2 rounded-lg border border-zinc-700/30 bg-zinc-900/30 px-3 py-2 border-dashed">
                       <div className="w-1.5 h-1.5 rounded-full bg-zinc-500 flex-shrink-0" />
-                      <span className="text-[10px] text-zinc-500">Worker Reach +{formatFt(workerReachFt)}</span>
+                      <span className="text-[10px] text-zinc-500">Avg. Laborer Reach +{formatFt(workerReachFt)}</span>
                     </div>
                   </div>
                   <div className="mt-3 pt-3 border-t border-zinc-800 space-y-1.5">
@@ -511,25 +521,37 @@ export default function FrameConfigurationPage() {
                 </div>
               )}
 
-              {/* Inventory View */}
+              {/* Inventory View — highlight frames in use */}
               <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
                 <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400 mb-3">Inventory View</h2>
                 <p className="text-[10px] text-zinc-600 mb-3">{scaffoldWidthLabel} width family</p>
                 <div className="space-y-1.5">
-                  {frameFamily.map(frame => (
-                    <div key={frame.code} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-[10px] font-bold text-orange-300">{frame.code}</span>
-                        {frame.isTall && <span className="text-[8px] font-bold text-orange-400 border border-orange-500/20 rounded px-1">TALL</span>}
-                        {frame.isMason && <span className="text-[8px] font-bold text-zinc-500 border border-zinc-700 rounded px-1">MASON</span>}
+                  {frameFamily.map(frame => {
+                    // Highlight frames actually used in the active config
+                    const usedInConfig = activeConfig?.levels.some(l =>
+                      Math.abs(l.heightFt - frame.heightFt) < 0.1
+                    ) ?? false;
+                    return (
+                      <div key={frame.code} className={`flex items-center justify-between rounded-lg border px-3 py-2 transition ${
+                        usedInConfig
+                          ? "border-orange-500/40 bg-orange-500/8 shadow-[0_0_8px_rgba(249,115,22,0.08)]"
+                          : "border-zinc-800 bg-black"
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          <span className={`font-mono text-[10px] font-bold ${usedInConfig ? "text-orange-300" : "text-zinc-500"}`}>{frame.code}</span>
+                          {usedInConfig && <span className="text-[8px] font-bold text-orange-400 border border-orange-500/30 rounded px-1">IN USE</span>}
+                          {frame.isTall && !usedInConfig && <span className="text-[8px] font-bold text-orange-400 border border-orange-500/20 rounded px-1">TALL</span>}
+                          {frame.isMason && <span className="text-[8px] font-bold text-zinc-500 border border-zinc-700 rounded px-1">MASON</span>}
+                        </div>
+                        <span className={`text-[9px] ${usedInConfig ? "text-orange-300" : "text-zinc-500"}`}>{formatFt(frame.heightFt)} × {frame.widthLabel}</span>
                       </div>
-                      <span className="text-[9px] text-zinc-500">{formatFt(frame.heightFt)} × {frame.widthLabel}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
             </div>
+
           </div>
 
           {/* Navigation */}

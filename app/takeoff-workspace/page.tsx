@@ -108,6 +108,31 @@ function parseFeetInches(input: string): number | null {
     .replace(/\s+/g, "")
     .replace(/[–—]/g, "-");
 
+  // Handle fractional inches like 6-1/2" or 3-1/4" (no feet, just inches with fraction)
+  // Pattern: digits-digits/digits"  e.g. 6-1/2" or 3-1/4"
+  const inchFractionOnly = normalized.match(/^(\d+(?:\.\d+)?)-(\d+)\/(\d+)"?$/);
+  if (inchFractionOnly) {
+    const wholeIn = Number(inchFractionOnly[1]);
+    const num = Number(inchFractionOnly[2]);
+    const den = Number(inchFractionOnly[3]);
+    if (!Number.isNaN(wholeIn) && !Number.isNaN(num) && den !== 0) {
+      return (wholeIn + num / den) / 12;
+    }
+  }
+
+  // Handle feet + fractional inches: e.g. 6'-1/2" or 10'-3-1/4"
+  const feetWithFractionalInch = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?)-(\d+)\/(\d+))?(?:")?$/);
+  if (feetWithFractionalInch) {
+    const feet = Number(feetWithFractionalInch[1]);
+    const wholeIn = Number(feetWithFractionalInch[2] || 0);
+    const num = Number(feetWithFractionalInch[3] || 0);
+    const den = Number(feetWithFractionalInch[4] || 1);
+    if (!Number.isNaN(feet)) {
+      return feet + (wholeIn + (den !== 0 ? num / den : 0)) / 12;
+    }
+  }
+
+  // Standard: feet'inches" e.g. 10'-6" or 10'6"
   const footMarkMatch = normalized.match(
     /^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/,
   );
@@ -118,6 +143,7 @@ function parseFeetInches(input: string): number | null {
     return feet + inches / 12;
   }
 
+  // Dash format: 10-6" = 10ft 6in
   const dashMatch = normalized.match(/^(-?\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)"?$/);
   if (dashMatch) {
     const feet = Number(dashMatch[1]);
@@ -126,6 +152,7 @@ function parseFeetInches(input: string): number | null {
     return feet + inches / 12;
   }
 
+  // Plain number (feet decimal)
   const plain = Number(normalized.replace(/"/g, ""));
   return Number.isNaN(plain) ? null : plain;
 }
@@ -1536,12 +1563,24 @@ function TakeoffHub({
                           <input
                             type="checkbox"
                             checked={duplicateElevationHeights[item.elevation]}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const checked = event.target.checked;
                               setDuplicateElevationHeights((current) => ({
                                 ...current,
-                                [item.elevation]: event.target.checked,
-                              }))
-                            }
+                                [item.elevation]: checked,
+                              }));
+                              // Immediately populate opposite elevation when checked
+                              if (checked) {
+                                const opposite = getOppositeElevation(item.elevation);
+                                if (opposite) {
+                                  updateElevationHeight(opposite, {
+                                    overallHeightInput: item.overallHeightInput,
+                                    belowGradeEnabled: item.belowGradeEnabled,
+                                    belowGradeInput: item.belowGradeInput,
+                                  });
+                                }
+                              }
+                            }}
                             className="accent-orange-500"
                           />
                           Duplicate to {getOppositeElevation(item.elevation)}
@@ -1611,12 +1650,24 @@ function TakeoffHub({
                         Close
                       </button>
                       {/* Store — works with direct input OR after PDF pick */}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); hasPendingOverall ? storePick() : storeManualOverallHeight(item.elevation); }}
-                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${hasPendingOverall ? "bg-yellow-400 text-black hover:bg-yellow-300" : "border border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"}`}
-                      >
-                        Store
-                      </button>
+                      {(() => {
+                        const heightVal = parseFeetInches(item.overallHeightInput);
+                        const isHeightStored = heightVal !== null && heightVal > 0 && !hasPendingOverall;
+                        return (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); hasPendingOverall ? storePick() : storeManualOverallHeight(item.elevation); }}
+                            className={`rounded-lg px-2 py-1 text-[10px] font-semibold transition ${
+                              hasPendingOverall
+                                ? "bg-yellow-400 text-black hover:bg-yellow-300"
+                                : isHeightStored
+                                ? "border border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                                : "border border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
+                            }`}
+                          >
+                            {isHeightStored ? "✓ Stored" : "Store"}
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
