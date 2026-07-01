@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   KorbanButton,
   KorbanHeader,
@@ -28,21 +28,31 @@ const projectInfo = {
 
 type PlanPoint = { x: number; y: number };
 
-// Fallback placeholder outline — shown when no real takeoff data exists
+// ── Demo building outline — Mare Island Apartments ────────────────────────────
+// Clean rectangular apartment block with a courtyard recess on the east side.
+// Perimeter ≈ 625 LF at this SVG scale. Used when no real overlay is stored.
+// North wall 180', East walls 45' each, South wall 180', West wall 90', notch 90'x45'
 const currentLevelOutline: PlanPoint[] = [
-  { x: 250, y: 150 }, { x: 835, y: 150 }, { x: 835, y: 230 },
-  { x: 770, y: 230 }, { x: 770, y: 300 }, { x: 910, y: 300 },
-  { x: 910, y: 505 }, { x: 805, y: 505 }, { x: 805, y: 575 },
-  { x: 350, y: 575 }, { x: 350, y: 520 }, { x: 215, y: 520 },
-  { x: 215, y: 345 }, { x: 165, y: 345 }, { x: 165, y: 230 },
-  { x: 250, y: 230 },
+  // NW corner → NE corner (North wall, 180')
+  { x: 160, y: 120 }, { x: 880, y: 120 },
+  // NE corner → notch start (East upper, 45')
+  { x: 880, y: 300 },
+  // Notch — courtyard recess (90' wide × 45' deep into building)
+  { x: 700, y: 300 }, { x: 700, y: 480 }, { x: 880, y: 480 },
+  // SE corner (East lower, 45')
+  { x: 880, y: 600 },
+  // SE → SW corner (South wall, 180')
+  { x: 160, y: 600 },
+  // SW → NW corner (West wall, 90')
+  { x: 160, y: 120 },
 ];
 
 const runSummary = [
-  { label: "North Run", lf: "180'-0\"", bays: 18, legs: 19 },
-  { label: "East Return", lf: "68'-0\"", bays: 7, legs: 8 },
-  { label: "South Run", lf: "162'-0\"", bays: 17, legs: 18 },
-  { label: "West Run", lf: "72'-0\"", bays: 8, legs: 9 },
+  { label: "North Run",    lf: "180'-0\"", bays: 18, legs: 19 },
+  { label: "East Return",  lf: "135'-0\"", bays: 13, legs: 14 },
+  { label: "South Run",    lf: "180'-0\"", bays: 18, legs: 19 },
+  { label: "West Run",     lf: "90'-0\"",  bays: 9,  legs: 10 },
+  { label: "Courtyard",    lf: "40'-0\"",  bays: 4,  legs: 5  },
 ];
 
 const scaffoldMenuLinks: KorbanMenuLink[] = [
@@ -119,11 +129,9 @@ function isClockwiseSVG(points: PlanPoint[]): boolean {
   return signedArea(points) < 0;
 }
 
-// Outward normal using polygon winding order.
-// In SVG coords (Y increases downward):
-//   If polygon is CW (signedArea > 0):  outward = LEFT of travel direction
-//   If polygon is CCW (signedArea < 0): outward = RIGHT of travel direction
-// This is mathematically guaranteed correct for any simple polygon.
+// Outward normal — winding-based with per-segment correction.
+// Uses pointInPolygon to verify the candidate normal points outward.
+// If it points inward, flips to the opposite normal.
 function computeOutwardNormal(
   a: PlanPoint,
   b: PlanPoint,
@@ -134,18 +142,39 @@ function computeOutwardNormal(
   const len = Math.sqrt(dx * dx + dy * dy);
   if (len === 0) return { x: 0, y: -1 };
 
-  // Right of travel direction (standard CCW outward in math coords)
-  const rightNormal = { x:  dy / len, y: -dx / len };
-  // Left of travel direction
-  const leftNormal  = { x: -dy / len, y:  dx / len };
+  const n1 = { x:  dy / len, y: -dx / len }; // right of travel
+  const n2 = { x: -dy / len, y:  dx / len }; // left of travel
 
-  if (polygon.length < 3) return rightNormal;
+  if (polygon.length < 3) return n1;
 
+  // Winding-based initial guess
   const area = signedArea(polygon);
-  // SVG Y-down: CW polygon has area > 0, CCW has area < 0
-  // CW polygon → outward is LEFT of travel
-  // CCW polygon → outward is RIGHT of travel
-  return area > 0 ? rightNormal : leftNormal;
+  const candidate = area > 0 ? n2 : n1;
+  const opposite  = area > 0 ? n1 : n2;
+
+  // Per-segment correction: test midpoint offset in candidate direction
+  // If it lands inside the polygon, the candidate is inward — flip it
+  const mx = (a.x + b.x) / 2;
+  const my = (a.y + b.y) / 2;
+  const testDist = Math.max(len * 0.05, 2);
+  const testPt = { x: mx + candidate.x * testDist, y: my + candidate.y * testDist };
+
+  if (pointInPolygon(testPt, polygon)) return opposite;
+  return candidate;
+}
+
+// Point-in-polygon test — used to reject ticks that land inside the building
+function pointInPolygon(point: PlanPoint, polygon: PlanPoint[]): boolean {
+  let inside = false;
+  const n = polygon.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect = ((yi > point.y) !== (yj > point.y))
+      && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
 }
 
 function getFrameTallForPoint(
@@ -157,10 +186,10 @@ function getFrameTallForPoint(
   defaultFrameTall: number,
 ): number {
   if (!allPoints.length || !elevationHeights.length) return defaultFrameTall;
-  const minX = Math.min(...allPoints.map(p => p.x));
-  const maxX = Math.max(...allPoints.map(p => p.x));
-  const minY = Math.min(...allPoints.map(p => p.y));
-  const maxY = Math.max(...allPoints.map(p => p.y));
+  const minX = allPoints.reduce((m, p) => p.x < m ? p.x : m, Infinity);
+  const maxX = allPoints.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
+  const minY = allPoints.reduce((m, p) => p.y < m ? p.y : m, Infinity);
+  const maxY = allPoints.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
   const dN = Math.abs(point.y - minY), dS = Math.abs(point.y - maxY);
   const dW = Math.abs(point.x - minX), dE = Math.abs(point.x - maxX);
   const minD = Math.min(dN, dS, dW, dE);
@@ -233,7 +262,9 @@ function detectInsideCorners(polygon: PlanPoint[]): boolean[] {
     const cross = d1x * d2y - d1y * d2x;
     // For CW polygon in SVG (area > 0): re-entrant = cross < 0 (turns right)
     // For CCW polygon in SVG (area < 0): re-entrant = cross > 0 (turns left)
-    return isCW ? cross > 0 : cross < 0;
+    // CW polygon in SVG: re-entrant corner turns left = cross product < 0
+    // CCW polygon in SVG: re-entrant corner turns right = cross product > 0
+    return isCW ? cross < 0 : cross > 0;
   });
 }
 
@@ -252,6 +283,8 @@ function computeSegmentLegs(
   const rawDy = end.y - start.y;
   const segLengthPx = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
   if (!isFiniteNumber(segLengthPx) || segLengthPx <= 0) return [];
+  if (!isFiniteNumber(pageUnitsPerFoot) || pageUnitsPerFoot <= 0) return [];
+  if (!isFiniteNumber(bayLengthFt) || bayLengthFt <= 0) return [];
 
   const puf = pageUnitsPerFoot;
 
@@ -296,32 +329,36 @@ function computeSegmentLegs(
   const legs: LegResult[] = [];
 
   // ── START TICK placement ──────────────────────────────────────────────────
-  // Case A: Normal outside corner OR inside corner gap >= 3'
+  // Case A: Normal outside corner
   //   → place start tick scaffoldWidth+1' BEFORE the start corner
-  //   → first bay tick is startTick + 10' (so 10' from start tick, never >10' bay)
+  //   → first bay tick is startTick + 10'
   //
-  // Case B: Inside corner with gap < 3' (tight notch)
-  //   → skip start tick entirely
-  //   → begin run at dist=0 (the corner) with 1' clearance, then 10' bays
+  // Case B: Inside corner (re-entrant / notch)
+  //   → NO start tick before corner (would land inside building)
+  //   → place first leg AT the corner point (dist=0), 1' outward offset
+  //   → continue with 10' bays from there
 
-  const startCornerTightNotch = startCornerIsInside && (cornerOffPx / puf < 3);
   let runCursorPx: number;
 
-  if (startCornerTightNotch) {
-    // Case B: tight inside corner — no start tick, begin bays from corner
-    runCursorPx = 0;
+  if (startCornerIsInside) {
+    // Case B: inside corner — first leg at corner, then 10' bays
+    legs.push(makeLeg(0, false, true, false));
+    runCursorPx = bayPx;
   } else {
-    // Case A: place start tick before corner, first bay is 10' from start tick
+    // Case A: outside corner — start tick before corner, first bay = startTick + 10'
     legs.push(makeLeg(-cornerOffPx, false, true, false));
-    runCursorPx = -cornerOffPx + bayPx; // FIX 2: first bay = startTick + 10'
+    runCursorPx = -cornerOffPx + bayPx;
   }
 
   // ── BAY TICKS — 10' from start tick, stopping at runEndPx ────────────────
   // No bay ever exceeds 10'. The 4' corner offset is included in coverage.
+  if (bayPx <= 0) return []; // guard against infinite loop
   let cursor = runCursorPx;
-  while (cursor < runEndPx - puf * 0.1) {
+  let safetyLimit = 0;
+  while (cursor < runEndPx - puf * 0.1 && safetyLimit < 500) {
     if (cursor >= 0) legs.push(makeLeg(cursor)); // only draw if on segment
     cursor += bayPx;
+    safetyLimit++;
   }
 
   // ── END TICK — try standard bay lengths from last placed tick ─────────────
@@ -329,11 +366,12 @@ function computeSegmentLegs(
   // If < 5' remaining, absorb into last full bay — no bastard bay
   const bayLegs = legs.filter(l => !l.isStartLeg);
   const lastAlongDist = bayLegs.length > 0
-    ? Math.max(...bayLegs.map(l => {
+    ? bayLegs.reduce((max, l) => {
         const wbx = l.wallPoint.x - normal.x * wallGapPx;
         const wby = l.wallPoint.y - normal.y * wallGapPx;
-        return (wbx - start.x) * along.x + (wby - start.y) * along.y;
-      }))
+        const dist = (wbx - start.x) * along.x + (wby - start.y) * along.y;
+        return dist > max ? dist : max;
+      }, -Infinity)
     : runCursorPx;
 
   const remainingFt = (runEndPx - lastAlongDist) / puf;
@@ -365,9 +403,17 @@ export default function SetScaffoldPage() {
   const [turnaroundBays, setTurnaroundBays] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showScaffold, setShowScaffold] = useState(true);
+  const [editMode, setEditMode] = useState(false);
+  const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
+  const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
+  const [overriddenFrameCounts, setOverriddenFrameCounts] = useState<Record<string, number>>({});
+  const [draggedLegKey, setDraggedLegKey] = useState<string | null>(null);
+  const [legOffsets, setLegOffsets] = useState<Record<string, { dx: number; dy: number }>>({});
+  const svgRef = useRef<SVGSVGElement>(null);
   const [viewerZoom, setViewerZoom] = useState(1);
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
   const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
+  const [mounted, setMounted] = useState(false);
 
   const frameHeight = 6 + 4 / 12;
   const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
@@ -376,7 +422,8 @@ export default function SetScaffoldPage() {
   // pageUnitsPerFoot — from scale calibration in Takeoff Workspace
   // If not set, Set Scaffold is locked (scale required before proceeding)
   const pageUnitsPerFoot = activeElevationData?.scale?.pageUnitsPerFoot ?? null;
-  const scaleIsSet = pageUnitsPerFoot != null && pageUnitsPerFoot > 0;
+  const isAerialTrace = activeElevationData?.overlayGeometry?.fullOverlayRows?.some(r => r.overlayType === "Aerial") ?? false;
+  const scaleIsSet = (pageUnitsPerFoot != null && pageUnitsPerFoot > 0) || isAerialTrace;
 
   // ── Raw PDF coordinate approach ──────────────────────────────────────────
   // Instead of rescaling points to fit a fixed 1200×720 SVG, keep points in
@@ -393,10 +440,10 @@ export default function SetScaffoldPage() {
   const svgViewBox = useMemo(() => {
     const pts = rawPrimaryPoints.filter(isFinitePoint);
     if (pts.length < 2) return { x: 0, y: 0, w: 1200, h: 720 };
-    const minX = Math.min(...pts.map(p => p.x));
-    const maxX = Math.max(...pts.map(p => p.x));
-    const minY = Math.min(...pts.map(p => p.y));
-    const maxY = Math.max(...pts.map(p => p.y));
+    const minX = pts.reduce((m, p) => p.x < m ? p.x : m, Infinity);
+    const maxX = pts.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
+    const minY = pts.reduce((m, p) => p.y < m ? p.y : m, Infinity);
+    const maxY = pts.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
     const pad = pageUnitsPerFoot ? pageUnitsPerFoot * 8 : 80; // 8ft padding around building
     return {
       x: minX - pad,
@@ -440,7 +487,7 @@ export default function SetScaffoldPage() {
   // svgPageUnitsPerFoot = pdfPUF directly since we're in PDF coordinate space
   // svgScale is 1.0 — no rescaling applied
   const svgScale = 1;
-  const svgPageUnitsPerFoot = pageUnitsPerFoot;
+  const svgPageUnitsPerFoot = pageUnitsPerFoot ?? (isAerialTrace ? 4 : null);
 
   const storedElevationHeights = useMemo(() => {
     return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
@@ -460,8 +507,9 @@ export default function SetScaffoldPage() {
   // ── Compute all legs via Rule Set v3.0 ────────────────────────────────────
   // Uses real pageUnitsPerFoot if available, otherwise falls back to SVG-unit estimation
   const allSegmentLegs = useMemo(() => {
-    if (!scaleIsSet || !pageUnitsPerFoot || !scaffoldOutline.length) return [];
-    const puf = pageUnitsPerFoot;
+    if (!scaleIsSet || !scaffoldOutline.length) return [];
+    const puf = pageUnitsPerFoot ?? (isAerialTrace ? 4 : null);
+    if (!puf) return [];
     const insideCorners = detectInsideCorners(scaffoldOutline);
     const results: { segIndex: number; legs: LegResult[] }[] = [];
 
@@ -476,8 +524,9 @@ export default function SetScaffoldPage() {
 
     // ── Cross-segment deduplication ──────────────────────────────────────────
     // At each corner, check the end tick of segment[i] against the start tick
-    // of segment[i+1]. If they are within 8' of each other, remove the end
-    // tick of segment[i] — keep the start tick of the new run.
+    // of segment[i+1].
+    // Gap ≤ 8' → remove end tick, gap is acceptable
+    // Gap > 8' at outside corner → add a leg at the corner point
     const maxGapPx = 8 * puf;
     const n = scaffoldOutline.length;
 
@@ -486,31 +535,56 @@ export default function SetScaffoldPage() {
       const next = results[(i + 1) % n];
       if (!curr || !next) continue;
 
-      // End tick of current segment
-      const endTick = curr.legs.filter(l => !l.isStartLeg && !l.isTurnaroundMirror).slice(-1)[0];
-      // Start tick of next segment
+      const cornerPt  = scaffoldOutline[(i + 1) % n];
+      const cornerIsInside = insideCorners[(i + 1) % n];
+
+      // End tick of current segment (last non-start, non-mirror leg)
+      const endTick  = curr.legs.filter(l => !l.isStartLeg && !l.isTurnaroundMirror).slice(-1)[0];
+      // Start tick of next segment (the leg placed at or before the next corner)
       const startTick = next.legs.find(l => l.isStartLeg);
 
-      if (!endTick || !startTick) continue;
+      // Reference points for distance
+      const endPt   = endTick   ? endTick.wallPoint   : cornerPt;
+      const startPt = startTick ? startTick.wallPoint  : cornerPt;
 
-      const dist = Math.sqrt(
-        (endTick.wallPoint.x - startTick.wallPoint.x) ** 2 +
-        (endTick.wallPoint.y - startTick.wallPoint.y) ** 2
-      );
+      const dist = Math.sqrt((endPt.x - startPt.x) ** 2 + (endPt.y - startPt.y) ** 2);
 
       if (dist <= maxGapPx) {
-        // Remove end tick from current segment — gap is acceptable
-        curr.legs = curr.legs.filter(l => l !== endTick);
+        // Gap acceptable — remove end tick to avoid crowding
+        if (endTick) curr.legs = curr.legs.filter(l => l !== endTick);
+
+      } else if (!cornerIsInside) {
+        // Gap too large at outside corner — always add a leg at the corner point
+        // Use the outward normal of the CURRENT segment at the corner
+        const currStart = scaffoldOutline[i];
+        const currEnd   = scaffoldOutline[(i + 1) % n];
+        const normalAtCorner = computeOutwardNormal(currStart, currEnd, scaffoldOutline);
+        const wallGapPx  = 1 * puf;
+        const tickLenPx  = scaffoldWidthFt * puf;
+        const labelOffPx = wallGapPx + tickLenPx + puf * 0.6;
+
+        const cornerLeg: LegResult = {
+          wallPoint:  { x: cornerPt.x + normalAtCorner.x * wallGapPx,              y: cornerPt.y + normalAtCorner.y * wallGapPx },
+          tickTip:    { x: cornerPt.x + normalAtCorner.x * (wallGapPx + tickLenPx), y: cornerPt.y + normalAtCorner.y * (wallGapPx + tickLenPx) },
+          labelPoint: { x: cornerPt.x + normalAtCorner.x * labelOffPx,              y: cornerPt.y + normalAtCorner.y * labelOffPx },
+          isTurnaroundMirror: false,
+          isStartLeg: false,
+          isEndLeg: true,
+        };
+
+        // Only add if it doesn't land inside the building
+        if (!pointInPolygon(cornerLeg.tickTip, scaffoldOutline)) {
+          curr.legs.push(cornerLeg);
+        }
       }
     }
 
     return results;
-  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot]);
+  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot, isAerialTrace]);
 
   // ── Quantities derived from actual rendered legs (Rule Q3) ────────────────
   const totals = useMemo(() => {
     if (!scaleIsSet) {
-      // Fall back to formula-based when scale not set
       const bayCount = activeElevationData?.quantityEngine.bayCount ?? runSummary.reduce((s, r) => s + r.bays, 0);
       const legCount = activeElevationData?.quantityEngine.legCount ?? runSummary.reduce((s, r) => s + r.legs, 0);
       const frames = legCount * frameHeightCount;
@@ -519,24 +593,35 @@ export default function SetScaffoldPage() {
       return { bays: bayCount, legs: legCount, frames, planks, braces };
     }
 
-    // Count actual rendered legs (excluding turnaround mirror legs for frame count)
-    const structuralLegs = allSegmentLegs.flatMap(s => s.legs.filter(l => !l.isTurnaroundMirror));
-    const allLegs = allSegmentLegs.flatMap(s => s.legs);
-    const legCount = allLegs.length;
-
-    // Bay count = structural legs - 1 per segment (each segment: legs - 1 = bays)
+    // Count actual rendered legs — excluding deleted and turnaround mirrors
+    let legCount = 0;
     let bayCount = 0;
+    let totalFrames = 0;
+
     for (const seg of allSegmentLegs) {
-      const structLegsInSeg = seg.legs.filter(l => !l.isTurnaroundMirror).length;
-      if (structLegsInSeg > 1) bayCount += structLegsInSeg - 1;
+      const structLegs = seg.legs.filter(l => !l.isTurnaroundMirror);
+      const activeLegIndices: number[] = [];
+      structLegs.forEach((_, i) => {
+        const key = `${seg.segIndex}-${i}`;
+        if (!deletedLegKeys.has(key)) activeLegIndices.push(i);
+      });
+
+      const activeCount = activeLegIndices.length;
+      legCount += activeCount;
+      if (activeCount > 1) bayCount += activeCount - 1;
+
+      // Frame count per leg — use override if set, else default frameHeightCount
+      activeLegIndices.forEach(i => {
+        const key = `${seg.segIndex}-${i}`;
+        totalFrames += overriddenFrameCounts[key] ?? frameHeightCount;
+      });
     }
 
-    const frames = legCount * frameHeightCount;
-    const planks = bayCount * plankCountPerBay * frameHeightCount;
+    const planks = bayCount * plankCountPerBay;
     const braces = Math.max(0, bayCount - scaffoldOutline.length);
 
-    return { bays: bayCount, legs: legCount, frames, planks, braces };
-  }, [allSegmentLegs, frameHeightCount, plankCountPerBay, scaleIsSet, activeElevationData, scaffoldOutline.length]);
+    return { bays: bayCount, legs: legCount, frames: totalFrames, planks, braces };
+  }, [allSegmentLegs, frameHeightCount, plankCountPerBay, scaleIsSet, activeElevationData, scaffoldOutline.length, deletedLegKeys, overriddenFrameCounts]);
 
   useEffect(() => {
     function loadActiveElevation() {
@@ -546,6 +631,7 @@ export default function SetScaffoldPage() {
       setActiveProjectName(project.projectName || projectInfo.projectName);
       setScaffoldWidth(formatScaffoldWidth(elevation.scaffoldInput.scaffoldWidth));
       setStandardBayLength(`${elevation.scaffoldInput.standardBayLength}'`);
+      setMounted(true);
     }
     loadActiveElevation();
     window.addEventListener("focus", loadActiveElevation);
@@ -607,8 +693,8 @@ export default function SetScaffoldPage() {
         {/* Canvas */}
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black flex flex-col">
 
-          {/* Scale lock overlay */}
-          {!scaleIsSet && (
+          {/* Scale lock overlay — only shown after mount to avoid hydration mismatch */}
+          {mounted && !scaleIsSet && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
               <div className="rounded-[2rem] border border-yellow-500/40 bg-yellow-500/10 p-10 text-center shadow-2xl">
                 <div className="mb-4 text-4xl">⚠</div>
@@ -639,6 +725,11 @@ export default function SetScaffoldPage() {
 
           {/* Zoom controls — top right */}
           <div className="absolute right-5 top-5 z-20 flex items-center gap-1.5">
+            {scaleIsSet && scaffoldOutline.length >= 3 && (
+              <span className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 font-mono text-[9px] text-zinc-500">
+                {signedArea(scaffoldOutline) > 0 ? "CW" : "CCW"} {signedArea(scaffoldOutline).toFixed(0)}
+              </span>
+            )}
             <button
               onClick={() => setViewerZoom(z => Math.min(3, z + 0.15))}
               className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-black/80 text-zinc-400 hover:text-zinc-200 hover:border-orange-500/30 text-sm font-bold"
@@ -683,8 +774,27 @@ export default function SetScaffoldPage() {
               </div>
 
               <svg
+                ref={svgRef}
                 viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1/viewerZoom)) / 2} ${svgViewBox.y + (svgViewBox.h * (1 - 1/viewerZoom)) / 2} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
                 className="h-full w-full"
+                onMouseMove={e => {
+                  if (!draggedLegKey || !svgRef.current) return;
+                  const rect = svgRef.current.getBoundingClientRect();
+                  const vb = svgRef.current.viewBox.baseVal;
+                  const scaleX = vb.width / rect.width;
+                  const scaleY = vb.height / rect.height;
+                  const dx = (e.movementX * scaleX);
+                  const dy = (e.movementY * scaleY);
+                  setLegOffsets(prev => ({
+                    ...prev,
+                    [draggedLegKey]: {
+                      dx: (prev[draggedLegKey]?.dx ?? 0) + dx,
+                      dy: (prev[draggedLegKey]?.dy ?? 0) + dy,
+                    }
+                  }));
+                }}
+                onMouseUp={() => setDraggedLegKey(null)}
+                onMouseLeave={() => setDraggedLegKey(null)}
               >
                 <GridAxisLabels viewBox={svgViewBox} pageUnitsPerFoot={pageUnitsPerFoot ?? 18} />
                 <CompassLabels viewBox={svgViewBox} />
@@ -694,8 +804,24 @@ export default function SetScaffoldPage() {
                     <StoredTakeoffOverlay rows={rawOverlayRows} referencePoints={rawReferencePoints} />
                   ) : (
                     <g>
-                      <path d="M250 150 L835 150 L835 230 L770 230 L770 300 L910 300 L910 505 L805 505 L805 575 L350 575 L350 520 L215 520 L215 345 L165 345 L165 230 L250 230 Z" fill="transparent" stroke="#2563eb" strokeWidth="0.7" strokeLinejoin="miter" />
-                      <path d="M280 180 L790 180 L790 250 L735 250 L735 322 L872 322 L872 475 L775 475 L775 540 L385 540 L385 490 L250 490 L250 318 L198 318 L198 258 L280 258 Z" fill="transparent" stroke="#22c55e" strokeWidth="0.6" strokeLinejoin="miter" opacity="0.9" />
+                      {/* Mare Island Apartments — clean demo footprint */}
+                      <path
+                        d="M160 120 L880 120 L880 300 L700 300 L700 480 L880 480 L880 600 L160 600 Z"
+                        fill="rgba(37,99,235,0.06)" stroke="#2563eb" strokeWidth="1.2" strokeLinejoin="miter"
+                      />
+                      <path
+                        d="M172 132 L868 132 L868 312 L712 312 L712 468 L868 468 L868 588 L172 588 Z"
+                        fill="transparent" stroke="#22c55e" strokeWidth="0.8" strokeLinejoin="miter" opacity="0.8"
+                      />
+                      {/* Reference point marker */}
+                      <circle cx="160" cy="120" r="5" fill="#f97316" opacity="0.8" />
+                      <line x1="150" y1="120" x2="180" y2="120" stroke="#f97316" strokeWidth="0.8" opacity="0.6" />
+                      <line x1="160" y1="110" x2="160" y2="130" stroke="#f97316" strokeWidth="0.8" opacity="0.6" />
+                      <text x="175" y="112" fill="#f97316" fontSize="9" fontFamily="monospace" opacity="0.7">REF A-1</text>
+                      {/* Dimension labels */}
+                      <text x="510" y="108" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">180'-0"</text>
+                      <text x="148" y="365" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">90'</text>
+                      <text x="510" y="614" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">180'-0"</text>
                     </g>
                   )
                 )}
@@ -712,18 +838,77 @@ export default function SetScaffoldPage() {
                       polygon={scaffoldOutline}
                       svgPageUnitsPerFoot={pageUnitsPerFoot ?? 8}
                       scaffoldWidthFt={scaffoldWidthFt}
+                      editMode={editMode}
+                      selectedLegKey={selectedLegKey}
+                      deletedLegKeys={deletedLegKeys}
+                      overriddenFrameCounts={overriddenFrameCounts}
+                      legOffsets={legOffsets}
+                      onLegClick={(key) => editMode && setSelectedLegKey(k => k === key ? null : key)}
+                      onLegDragStart={(key) => { if (editMode) { setDraggedLegKey(key); setSelectedLegKey(key); } }}
                     />
                   </g>
                 )}
+
+                {/* Edit mode — delete & frame count controls */}
+                {editMode && selectedLegKey && (() => {
+                  const [si, li] = selectedLegKey.split("-").map(Number);
+                  const seg = allSegmentLegs.find(s => s.segIndex === si);
+                  const legs = seg?.legs.filter(l => !l.isTurnaroundMirror) ?? [];
+                  const leg = legs[li];
+                  if (!leg) return null;
+                  const cx = leg.tickTip.x;
+                  const cy = leg.tickTip.y - 18;
+                  const currentFrames = overriddenFrameCounts[selectedLegKey] ?? frameHeightCount;
+                  return (
+                    <g>
+                      <rect x={cx - 54} y={cy - 14} width={108} height={28} rx={6}
+                        fill="#18181b" stroke="#f97316" strokeWidth="1" opacity="0.97" />
+                      <text x={cx - 48} y={cy + 5} fontSize="8" fill="#f97316" fontFamily="monospace" fontWeight="bold">
+                        Frames: {currentFrames}
+                      </text>
+                      {/* − button */}
+                      <rect x={cx + 14} y={cy - 10} width={16} height={16} rx={3} fill="#f97316"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => setOverriddenFrameCounts(p => ({ ...p, [selectedLegKey]: Math.max(1, (p[selectedLegKey] ?? frameHeightCount) - 1) }))} />
+                      <text x={cx + 22} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>−</text>
+                      {/* + button */}
+                      <rect x={cx + 32} y={cy - 10} width={16} height={16} rx={3} fill="#f97316"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => setOverriddenFrameCounts(p => ({ ...p, [selectedLegKey]: (p[selectedLegKey] ?? frameHeightCount) + 1 }))} />
+                      <text x={cx + 40} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>+</text>
+                      {/* Delete tick */}
+                      <rect x={cx - 54} y={cy + 16} width={108} height={16} rx={4} fill="#ef4444" opacity="0.85"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => {
+                          setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; });
+                          setSelectedLegKey(null);
+                        }} />
+                      <text x={cx} y={cy + 28} fontSize="7.5" fill="white" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>
+                        DELETE TICK
+                      </text>
+                    </g>
+                  );
+                })()}
+
               </svg>
             </div>
           </div>
 
-          {/* Bottom action bar — centered below viewer */}
+          {/* Bottom action bar */}
           <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-3 border-t border-zinc-900 bg-[#080604] px-6 py-2.5">
-            <ViewerTool label="Regenerate" />
-            <ViewerTool label="Edit Bay" />
-            <ViewerTool label="Save Layout" primary />
+            <KorbanButton variant="ghost" className="px-3 py-2 text-[10px]" onClick={() => setEditMode(false)}>
+              Regenerate
+            </KorbanButton>
+            <KorbanButton
+              variant={editMode ? "primary" : "ghost"}
+              className="px-3 py-2 text-[10px]"
+              onClick={() => setEditMode(m => !m)}
+            >
+              {editMode ? "✓ Editing" : "Edit Bay"}
+            </KorbanButton>
+            <KorbanButton variant="primary" className="px-3 py-2 text-[10px]" onClick={() => setEditMode(false)}>
+              Save Layout
+            </KorbanButton>
           </div>
         </section>
 
@@ -865,107 +1050,97 @@ export default function SetScaffoldPage() {
   );
 }
 
-// ── ScaffoldRunTicks — renders pre-computed leg results ───────────────────────
 function ScaffoldRunTicks({
-  segmentLegs,
-  points,
-  elevationHeights,
-  frameHeight,
-  workerReachHeight,
-  frameTall,
-  polygon,
-  svgPageUnitsPerFoot,
-  scaffoldWidthFt,
+  segmentLegs, points, elevationHeights, frameHeight, workerReachHeight,
+  frameTall, polygon, svgPageUnitsPerFoot, scaffoldWidthFt,
+  editMode = false, selectedLegKey = null, deletedLegKeys = new Set(),
+  overriddenFrameCounts = {}, legOffsets = {}, onLegClick, onLegDragStart,
 }: {
   segmentLegs: { segIndex: number; legs: LegResult[] }[];
   points: PlanPoint[];
   elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>;
-  frameHeight: number;
-  workerReachHeight: number;
-  frameTall: number;
-  polygon: PlanPoint[];
-  svgPageUnitsPerFoot: number;
-  scaffoldWidthFt: number;
+  frameHeight: number; workerReachHeight: number; frameTall: number;
+  polygon: PlanPoint[]; svgPageUnitsPerFoot: number; scaffoldWidthFt: number;
+  editMode?: boolean; selectedLegKey?: string | null;
+  deletedLegKeys?: Set<string>; overriddenFrameCounts?: Record<string, number>;
+  legOffsets?: Record<string, { dx: number; dy: number }>;
+  onLegClick?: (key: string) => void;
+  onLegDragStart?: (key: string) => void;
 }) {
   function getLocalFrameTall(point: PlanPoint): number {
     if (elevationHeights.length === 0) return frameTall;
     return getFrameTallForPoint(point, points, elevationHeights, frameHeight, workerReachHeight, frameTall);
   }
-
   return (
     <g fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
       {segmentLegs.map(({ segIndex, legs }) => {
         if (legs.length === 0) return null;
-
         const segStart = points[segIndex];
         const segEnd = points[(segIndex + 1) % points.length];
         if (!segStart || !segEnd) return null;
-
         const normal = computeOutwardNormal(segStart, segEnd, polygon);
-        const dx = segEnd.x - segStart.x;
-        const dy = segEnd.y - segStart.y;
+        const dx = segEnd.x - segStart.x; const dy = segEnd.y - segStart.y;
         const len = Math.sqrt(dx * dx + dy * dy);
-        const wallGapPx    = 1 * svgPageUnitsPerFoot;
+        const wallGapPx = 1 * svgPageUnitsPerFoot;
         const tickLengthPx = scaffoldWidthFt * svgPageUnitsPerFoot;
-
         const structuralLegs = legs.filter(l => !l.isTurnaroundMirror);
-
         return (
           <g key={`seg-${segIndex}`}>
-
-            {/* Diagonal braces — from base of one tick to tip of next, 60% centered */}
+            {/* Diagonal braces */}
             {structuralLegs.filter(l => !l.isStartLeg).slice(0, -1).map((leg, i) => {
               const bayLegs = structuralLegs.filter(l => !l.isStartLeg);
-              const next = bayLegs[i + 1];
-              if (!next) return null;
-              const cx = (leg.wallPoint.x + next.wallPoint.x) / 2;
-              const cy = (leg.wallPoint.y + next.wallPoint.y) / 2;
-              const bayPx = Math.sqrt(
-                (next.wallPoint.x - leg.wallPoint.x) ** 2 +
-                (next.wallPoint.y - leg.wallPoint.y) ** 2
-              );
-              const braceLen = bayPx * 0.6;
-              const halfBrace = braceLen / 2;
+              const next = bayLegs[i + 1]; if (!next) return null;
+              const legKey = `${segIndex}-${i}`;
+              const nextKey = `${segIndex}-${i+1}`;
+              const off1 = legOffsets[legKey] ?? { dx: 0, dy: 0 };
+              const off2 = legOffsets[nextKey] ?? { dx: 0, dy: 0 };
+              const cx = (leg.wallPoint.x + off1.dx + next.wallPoint.x + off2.dx) / 2;
+              const cy = (leg.wallPoint.y + off1.dy + next.wallPoint.y + off2.dy) / 2;
+              const bayPx = Math.sqrt((next.wallPoint.x - leg.wallPoint.x) ** 2 + (next.wallPoint.y - leg.wallPoint.y) ** 2);
+              const halfBrace = bayPx * 0.3;
               const along = len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
-              // Brace: from near wall on one side to near tip on other side
-              // x1 side = back along wall, close to wall face
-              // x2 side = forward along wall, close to tick tip
               return (
-                <line
-                  key={`brace-${segIndex}-${i}`}
+                <line key={`brace-${segIndex}-${i}`}
                   x1={cx - along.x * halfBrace + normal.x * wallGapPx * 0.5}
                   y1={cy - along.y * halfBrace + normal.y * wallGapPx * 0.5}
                   x2={cx + along.x * halfBrace + normal.x * (wallGapPx + tickLengthPx) * 0.9}
                   y2={cy + along.y * halfBrace + normal.y * (wallGapPx + tickLengthPx) * 0.9}
-                  strokeWidth="0.7"
-                  opacity="0.55"
-                />
+                  strokeWidth="0.7" opacity="0.55" />
               );
             })}
-
-            {/* Tick lines — from wall face outward, perpendicular, scaffoldWidth long */}
-            {structuralLegs.map((leg, i) => {
-              const localFrameTall = getLocalFrameTall(leg.wallPoint);
+            {/* Tick lines */}
+            {structuralLegs.filter(leg => !pointInPolygon(leg.tickTip, polygon)).map((leg, i) => {
+              const legKey = `${segIndex}-${i}`;
+              if (deletedLegKeys.has(legKey)) return null;
               if (!isFiniteNumber(leg.wallPoint.x) || !isFiniteNumber(leg.tickTip.x)) return null;
+              const isSelected = selectedLegKey === legKey;
+              const localFrameTall = overriddenFrameCounts[legKey] ?? getLocalFrameTall(leg.wallPoint);
+              const off = legOffsets[legKey] ?? { dx: 0, dy: 0 };
+              const wp = { x: leg.wallPoint.x + off.dx, y: leg.wallPoint.y + off.dy };
+              const tp = { x: leg.tickTip.x + off.dx,  y: leg.tickTip.y + off.dy };
+              const lp = { x: leg.labelPoint.x + off.dx, y: leg.labelPoint.y + off.dy };
               return (
-                <g key={`leg-${segIndex}-${i}`}>
-                  <line
-                    x1={leg.wallPoint.x}
-                    y1={leg.wallPoint.y}
-                    x2={leg.tickTip.x}
-                    y2={leg.tickTip.y}
-                    strokeWidth="1.8"
-                  />
-                  <text
-                    x={leg.labelPoint.x}
-                    y={leg.labelPoint.y}
-                    fontSize={svgPageUnitsPerFoot * 0.5}
-                    fontFamily="monospace"
-                    fontWeight="600"
-                    opacity="0.85"
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                  >
+                <g key={`leg-${segIndex}-${i}`}
+                  style={{ cursor: editMode ? (isSelected ? "grab" : "pointer") : "default" }}
+                  onClick={() => onLegClick?.(legKey)}
+                  onMouseDown={e => { if (editMode) { e.preventDefault(); onLegDragStart?.(legKey); } }}>
+                  {editMode && (
+                    <circle
+                      cx={(wp.x + tp.x) / 2} cy={(wp.y + tp.y) / 2}
+                      r={tickLengthPx * 0.55}
+                      fill={isSelected ? "rgba(249,115,22,0.18)" : "rgba(249,115,22,0.04)"}
+                      stroke={isSelected ? "#f97316" : "rgba(249,115,22,0.25)"}
+                      strokeWidth={isSelected ? "1.5" : "0.7"}
+                      strokeDasharray={isSelected ? "none" : "3,2"}
+                    />
+                  )}
+                  <line x1={wp.x} y1={wp.y} x2={tp.x} y2={tp.y}
+                    strokeWidth={isSelected ? "2.5" : "1.8"}
+                    stroke={isSelected ? "#f97316" : "#f8fafc"} />
+                  <text x={lp.x} y={lp.y}
+                    fontSize={svgPageUnitsPerFoot * 0.5} fontFamily="monospace"
+                    fontWeight="600" opacity="0.85" textAnchor="middle"
+                    dominantBaseline="middle" fill={isSelected ? "#f97316" : "#f8fafc"}>
                     {localFrameTall}
                   </text>
                 </g>
@@ -996,10 +1171,10 @@ function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
 function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } {
   const validPoints = points.filter(isFinitePoint);
   if (validPoints.length < 2) return { points: [], svgScale: 1 };
-  const minX = Math.min(...validPoints.map(p => p.x));
-  const maxX = Math.max(...validPoints.map(p => p.x));
-  const minY = Math.min(...validPoints.map(p => p.y));
-  const maxY = Math.max(...validPoints.map(p => p.y));
+  const minX = validPoints.reduce((m, p) => p.x < m ? p.x : m, Infinity);
+  const maxX = validPoints.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
+  const minY = validPoints.reduce((m, p) => p.y < m ? p.y : m, Infinity);
+  const maxY = validPoints.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
   const gW = Math.max(1, maxX - minX); const gH = Math.max(1, maxY - minY);
   const svgScale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
   const dW = gW * svgScale; const dH = gH * svgScale;

@@ -885,7 +885,7 @@ function InventoryTicker({ frameCount, plankCount, crossBraceCount, guardrailCou
             })}
           </div>
         </div>
-        <a href="/inventory" className="shrink-0 rounded-full border border-zinc-800 bg-black px-3 py-1 text-[10px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">Inventory Manager</a>
+        <a href="/inventory/load-list" className="shrink-0 rounded-full border border-zinc-800 bg-black px-3 py-1 text-[10px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">Load List</a>
       </div>
       <style jsx>{`
         .inventory-ticker-track { animation: inventory-scroll 45s linear infinite; }
