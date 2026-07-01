@@ -186,10 +186,10 @@ function getFrameTallForPoint(
   defaultFrameTall: number,
 ): number {
   if (!allPoints.length || !elevationHeights.length) return defaultFrameTall;
-  const minX = allPoints.reduce((m, p) => p.x < m ? p.x : m, Infinity);
-  const maxX = allPoints.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
-  const minY = allPoints.reduce((m, p) => p.y < m ? p.y : m, Infinity);
-  const maxY = allPoints.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
+  const minX = Math.min(...allPoints.map(p => p.x));
+  const maxX = Math.max(...allPoints.map(p => p.x));
+  const minY = Math.min(...allPoints.map(p => p.y));
+  const maxY = Math.max(...allPoints.map(p => p.y));
   const dN = Math.abs(point.y - minY), dS = Math.abs(point.y - maxY);
   const dW = Math.abs(point.x - minX), dE = Math.abs(point.x - maxX);
   const minD = Math.min(dN, dS, dW, dE);
@@ -283,8 +283,6 @@ function computeSegmentLegs(
   const rawDy = end.y - start.y;
   const segLengthPx = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
   if (!isFiniteNumber(segLengthPx) || segLengthPx <= 0) return [];
-  if (!isFiniteNumber(pageUnitsPerFoot) || pageUnitsPerFoot <= 0) return [];
-  if (!isFiniteNumber(bayLengthFt) || bayLengthFt <= 0) return [];
 
   const puf = pageUnitsPerFoot;
 
@@ -352,13 +350,10 @@ function computeSegmentLegs(
 
   // ── BAY TICKS — 10' from start tick, stopping at runEndPx ────────────────
   // No bay ever exceeds 10'. The 4' corner offset is included in coverage.
-  if (bayPx <= 0) return []; // guard against infinite loop
   let cursor = runCursorPx;
-  let safetyLimit = 0;
-  while (cursor < runEndPx - puf * 0.1 && safetyLimit < 500) {
+  while (cursor < runEndPx - puf * 0.1) {
     if (cursor >= 0) legs.push(makeLeg(cursor)); // only draw if on segment
     cursor += bayPx;
-    safetyLimit++;
   }
 
   // ── END TICK — try standard bay lengths from last placed tick ─────────────
@@ -366,12 +361,11 @@ function computeSegmentLegs(
   // If < 5' remaining, absorb into last full bay — no bastard bay
   const bayLegs = legs.filter(l => !l.isStartLeg);
   const lastAlongDist = bayLegs.length > 0
-    ? bayLegs.reduce((max, l) => {
+    ? Math.max(...bayLegs.map(l => {
         const wbx = l.wallPoint.x - normal.x * wallGapPx;
         const wby = l.wallPoint.y - normal.y * wallGapPx;
-        const dist = (wbx - start.x) * along.x + (wby - start.y) * along.y;
-        return dist > max ? dist : max;
-      }, -Infinity)
+        return (wbx - start.x) * along.x + (wby - start.y) * along.y;
+      }))
     : runCursorPx;
 
   const remainingFt = (runEndPx - lastAlongDist) / puf;
@@ -413,7 +407,6 @@ export default function SetScaffoldPage() {
   const [viewerZoom, setViewerZoom] = useState(1);
   const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
   const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
-  const [mounted, setMounted] = useState(false);
 
   const frameHeight = 6 + 4 / 12;
   const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
@@ -422,8 +415,7 @@ export default function SetScaffoldPage() {
   // pageUnitsPerFoot — from scale calibration in Takeoff Workspace
   // If not set, Set Scaffold is locked (scale required before proceeding)
   const pageUnitsPerFoot = activeElevationData?.scale?.pageUnitsPerFoot ?? null;
-  const isAerialTrace = activeElevationData?.overlayGeometry?.fullOverlayRows?.some(r => r.overlayType === "Aerial") ?? false;
-  const scaleIsSet = (pageUnitsPerFoot != null && pageUnitsPerFoot > 0) || isAerialTrace;
+  const scaleIsSet = pageUnitsPerFoot != null && pageUnitsPerFoot > 0;
 
   // ── Raw PDF coordinate approach ──────────────────────────────────────────
   // Instead of rescaling points to fit a fixed 1200×720 SVG, keep points in
@@ -440,10 +432,10 @@ export default function SetScaffoldPage() {
   const svgViewBox = useMemo(() => {
     const pts = rawPrimaryPoints.filter(isFinitePoint);
     if (pts.length < 2) return { x: 0, y: 0, w: 1200, h: 720 };
-    const minX = pts.reduce((m, p) => p.x < m ? p.x : m, Infinity);
-    const maxX = pts.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
-    const minY = pts.reduce((m, p) => p.y < m ? p.y : m, Infinity);
-    const maxY = pts.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
+    const minX = Math.min(...pts.map(p => p.x));
+    const maxX = Math.max(...pts.map(p => p.x));
+    const minY = Math.min(...pts.map(p => p.y));
+    const maxY = Math.max(...pts.map(p => p.y));
     const pad = pageUnitsPerFoot ? pageUnitsPerFoot * 8 : 80; // 8ft padding around building
     return {
       x: minX - pad,
@@ -487,7 +479,7 @@ export default function SetScaffoldPage() {
   // svgPageUnitsPerFoot = pdfPUF directly since we're in PDF coordinate space
   // svgScale is 1.0 — no rescaling applied
   const svgScale = 1;
-  const svgPageUnitsPerFoot = pageUnitsPerFoot ?? (isAerialTrace ? 4 : null);
+  const svgPageUnitsPerFoot = pageUnitsPerFoot;
 
   const storedElevationHeights = useMemo(() => {
     return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
@@ -507,9 +499,8 @@ export default function SetScaffoldPage() {
   // ── Compute all legs via Rule Set v3.0 ────────────────────────────────────
   // Uses real pageUnitsPerFoot if available, otherwise falls back to SVG-unit estimation
   const allSegmentLegs = useMemo(() => {
-    if (!scaleIsSet || !scaffoldOutline.length) return [];
-    const puf = pageUnitsPerFoot ?? (isAerialTrace ? 4 : null);
-    if (!puf) return [];
+    if (!scaleIsSet || !pageUnitsPerFoot || !scaffoldOutline.length) return [];
+    const puf = pageUnitsPerFoot;
     const insideCorners = detectInsideCorners(scaffoldOutline);
     const results: { segIndex: number; legs: LegResult[] }[] = [];
 
@@ -580,7 +571,7 @@ export default function SetScaffoldPage() {
     }
 
     return results;
-  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot, isAerialTrace]);
+  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot]);
 
   // ── Quantities derived from actual rendered legs (Rule Q3) ────────────────
   const totals = useMemo(() => {
@@ -631,7 +622,6 @@ export default function SetScaffoldPage() {
       setActiveProjectName(project.projectName || projectInfo.projectName);
       setScaffoldWidth(formatScaffoldWidth(elevation.scaffoldInput.scaffoldWidth));
       setStandardBayLength(`${elevation.scaffoldInput.standardBayLength}'`);
-      setMounted(true);
     }
     loadActiveElevation();
     window.addEventListener("focus", loadActiveElevation);
@@ -693,8 +683,8 @@ export default function SetScaffoldPage() {
         {/* Canvas */}
         <section className="relative overflow-hidden border-r border-orange-500/20 bg-black flex flex-col">
 
-          {/* Scale lock overlay — only shown after mount to avoid hydration mismatch */}
-          {mounted && !scaleIsSet && (
+          {/* Scale lock overlay */}
+          {!scaleIsSet && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
               <div className="rounded-[2rem] border border-yellow-500/40 bg-yellow-500/10 p-10 text-center shadow-2xl">
                 <div className="mb-4 text-4xl">⚠</div>
@@ -1171,10 +1161,10 @@ function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
 function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } {
   const validPoints = points.filter(isFinitePoint);
   if (validPoints.length < 2) return { points: [], svgScale: 1 };
-  const minX = validPoints.reduce((m, p) => p.x < m ? p.x : m, Infinity);
-  const maxX = validPoints.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
-  const minY = validPoints.reduce((m, p) => p.y < m ? p.y : m, Infinity);
-  const maxY = validPoints.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
+  const minX = Math.min(...validPoints.map(p => p.x));
+  const maxX = Math.max(...validPoints.map(p => p.x));
+  const minY = Math.min(...validPoints.map(p => p.y));
+  const maxY = Math.max(...validPoints.map(p => p.y));
   const gW = Math.max(1, maxX - minX); const gH = Math.max(1, maxY - minY);
   const svgScale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
   const dW = gW * svgScale; const dH = gH * svgScale;
