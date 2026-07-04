@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
 import {
   KorbanButton,
   KorbanHeader,
@@ -17,1343 +18,664 @@ import {
 } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+type PlanPoint = { x: number; y: number };
 type ScaffoldWidth = "3'" | "3'-6\"" | "5'";
 type PlankType = "Wood" | "Aluminum" | "Steel";
-
-const projectInfo = {
-  projectName: "Mare Island Apartments",
-  jobNumber: "KRB-260614-001",
-  reference: "Main Level Reference Point A-1",
+type LegResult = {
+  wallPoint: PlanPoint; tickTip: PlanPoint; labelPoint: PlanPoint;
+  isTurnaroundMirror: boolean; isStartLeg: boolean; isEndLeg: boolean;
 };
 
-type PlanPoint = { x: number; y: number };
-
-// ── Demo building outline — Mare Island Apartments ────────────────────────────
-// Clean rectangular apartment block with a courtyard recess on the east side.
-// Perimeter ≈ 625 LF at this SVG scale. Used when no real overlay is stored.
-// North wall 180', East walls 45' each, South wall 180', West wall 90', notch 90'x45'
-const currentLevelOutline: PlanPoint[] = [
-  // NW corner → NE corner (North wall, 180')
-  { x: 160, y: 120 }, { x: 880, y: 120 },
-  // NE corner → notch start (East upper, 45')
-  { x: 880, y: 300 },
-  // Notch — courtyard recess (90' wide × 45' deep into building)
-  { x: 700, y: 300 }, { x: 700, y: 480 }, { x: 880, y: 480 },
-  // SE corner (East lower, 45')
-  { x: 880, y: 600 },
-  // SE → SW corner (South wall, 180')
-  { x: 160, y: 600 },
-  // SW → NW corner (West wall, 90')
-  { x: 160, y: 120 },
-];
-
-const runSummary = [
-  { label: "North Run",    lf: "180'-0\"", bays: 18, legs: 19 },
-  { label: "East Return",  lf: "135'-0\"", bays: 13, legs: 14 },
-  { label: "South Run",    lf: "180'-0\"", bays: 18, legs: 19 },
-  { label: "West Run",     lf: "90'-0\"",  bays: 9,  legs: 10 },
-  { label: "Courtyard",    lf: "40'-0\"",  bays: 4,  legs: 5  },
-];
+const projectInfo = { projectName: "Mare Island Apartments", jobNumber: "KRB-260614-001", reference: "Main Level Reference Point A-1" };
 
 const scaffoldMenuLinks: KorbanMenuLink[] = [
-  { href: "/project-plan-desk", label: "Project Plan Desk" },
-  { href: "/takeoff-workspace", label: "Takeoff Workspace" },
-  { href: "/estimate-review", label: "Estimate Review" },
-  { href: "/backend", label: "Backend" },
-  { href: "/settings", label: "Settings" },
+  { href: "/project-plan-desk",          label: "Project Plan Desk" },
+  { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
+  { href: "/frame-configuration",        label: "Frame Config" },
+  { href: "/estimate-review",            label: "Estimate Review" },
 ];
 
-// ── Utility ──────────────────────────────────────────────────────────────────
-
-function parseFeetValue(value: string): number {
-  if (!value) return 0;
-  // Handle feet-inches format: "3'-6\"" → 3.5, "5'" → 5, "10'" → 10
-  const feetInchMatch = value.match(/^(\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?)(?:")?)?$/);
-  if (feetInchMatch) {
-    const feet = Number(feetInchMatch[1]);
-    const inches = Number(feetInchMatch[2] || 0);
-    return feet + inches / 12;
-  }
-  // Plain number fallback
-  const plain = Number(value.replace(/[^0-9.]/g, ""));
-  return Number.isFinite(plain) ? plain : 0;
-}
-
-function formatScaffoldWidth(value: number): ScaffoldWidth {
-  if (value >= 5) return "5'";
-  if (value >= 3.5) return "3'-6\"";
-  return "3'";
-}
-
-function parseFeetInches(input: string): number | null {
-  const value = input.trim();
-  if (!value || value === "--" || value === "0'") return null;
-  const normalized = value.toLowerCase()
-    .replace(/feet|foot|ft/g, "'").replace(/inches|inch|in/g, '"')
-    .replace(/\s+/g, "").replace(/[–—]/g, "-");
-  const m = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/);
-  if (m) {
-    const feet = Number(m[1]); const inches = Number(m[2] || 0);
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
-  const plain = Number(normalized.replace(/"/g, ""));
-  return Number.isNaN(plain) || plain === 0 ? null : plain;
-}
-
+// ── Utility ───────────────────────────────────────────────────────────────────
+function parseFeetValue(v: string): number { const n = parseFloat(v.replace(/[^0-9.]/g, "")); return isFinite(n) ? n : 0; }
 function isFiniteNumber(v: number) { return Number.isFinite(v); }
 function isFinitePoint(p: PlanPoint) { return isFiniteNumber(p.x) && isFiniteNumber(p.y); }
-
-function segLen(a: PlanPoint, b: PlanPoint) {
-  const dx = b.x - a.x; const dy = b.y - a.y;
-  return Math.sqrt(dx * dx + dy * dy);
+function signedArea(pts: PlanPoint[]): number { let a = 0; for (let i=0;i<pts.length;i++){const j=(i+1)%pts.length;a+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;} return a/2; }
+function pointInPolygon(pt: PlanPoint, poly: PlanPoint[]): boolean { let inside=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){const xi=poly[i].x,yi=poly[i].y,xj=poly[j].x,yj=poly[j].y;if(((yi>pt.y)!==(yj>pt.y))&&(pt.x<(xj-xi)*(pt.y-yi)/(yj-yi)+xi))inside=!inside;} return inside; }
+function computeOutwardNormal(a: PlanPoint, b: PlanPoint, poly: PlanPoint[]): PlanPoint {
+  const dx=b.x-a.x,dy=b.y-a.y,len=Math.sqrt(dx*dx+dy*dy); if(!len) return {x:0,y:-1};
+  const n1={x:dy/len,y:-dx/len},n2={x:-dy/len,y:dx/len};
+  const area=signedArea(poly); const candidate=area>0?n2:n1,opp=area>0?n1:n2;
+  const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,td=Math.max(len*0.05,2);
+  return pointInPolygon({x:mx+candidate.x*td,y:my+candidate.y*td},poly)?opp:candidate;
 }
-
-// Compute signed area of polygon (positive = CCW in standard math, negative = CW)
-// In SVG coords (Y down), positive = CW visually, negative = CCW visually
-function signedArea(points: PlanPoint[]): number {
-  let area = 0;
-  const n = points.length;
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    area += points[i].x * points[j].y;
-    area -= points[j].x * points[i].y;
-  }
-  return area / 2;
-}
-
-// Returns true if polygon is wound clockwise in SVG space (Y-down)
-// Note: in SVG coords (Y increases downward), signedArea > 0 means CCW visually,
-// signedArea < 0 means CW visually — opposite of standard math convention
-function isClockwiseSVG(points: PlanPoint[]): boolean {
-  return signedArea(points) < 0;
-}
-
-// Outward normal — winding-based with per-segment correction.
-// Uses pointInPolygon to verify the candidate normal points outward.
-// If it points inward, flips to the opposite normal.
-function computeOutwardNormal(
-  a: PlanPoint,
-  b: PlanPoint,
-  polygon: PlanPoint[],
-): PlanPoint {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (len === 0) return { x: 0, y: -1 };
-
-  const n1 = { x:  dy / len, y: -dx / len }; // right of travel
-  const n2 = { x: -dy / len, y:  dx / len }; // left of travel
-
-  if (polygon.length < 3) return n1;
-
-  // Winding-based initial guess
-  const area = signedArea(polygon);
-  const candidate = area > 0 ? n2 : n1;
-  const opposite  = area > 0 ? n1 : n2;
-
-  // Per-segment correction: test midpoint offset in candidate direction
-  // If it lands inside the polygon, the candidate is inward — flip it
-  const mx = (a.x + b.x) / 2;
-  const my = (a.y + b.y) / 2;
-  const testDist = Math.max(len * 0.05, 2);
-  const testPt = { x: mx + candidate.x * testDist, y: my + candidate.y * testDist };
-
-  if (pointInPolygon(testPt, polygon)) return opposite;
-  return candidate;
-}
-
-// Point-in-polygon test — used to reject ticks that land inside the building
-function pointInPolygon(point: PlanPoint, polygon: PlanPoint[]): boolean {
-  let inside = false;
-  const n = polygon.length;
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = polygon[i].x, yi = polygon[i].y;
-    const xj = polygon[j].x, yj = polygon[j].y;
-    const intersect = ((yi > point.y) !== (yj > point.y))
-      && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function getFrameTallForPoint(
-  point: PlanPoint,
-  allPoints: PlanPoint[],
-  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>,
-  frameHeight: number,
-  workerReachHeight: number,
-  defaultFrameTall: number,
-): number {
-  if (!allPoints.length || !elevationHeights.length) return defaultFrameTall;
-  const minX = Math.min(...allPoints.map(p => p.x));
-  const maxX = Math.max(...allPoints.map(p => p.x));
-  const minY = Math.min(...allPoints.map(p => p.y));
-  const maxY = Math.max(...allPoints.map(p => p.y));
-  const dN = Math.abs(point.y - minY), dS = Math.abs(point.y - maxY);
-  const dW = Math.abs(point.x - minX), dE = Math.abs(point.x - maxX);
-  const minD = Math.min(dN, dS, dW, dE);
-  let elevName = "North";
-  if (minD === dS) elevName = "South";
-  else if (minD === dE) elevName = "East";
-  else if (minD === dW) elevName = "West";
-  const elev = elevationHeights.find(e => e.elevation === elevName);
-  if (!elev) return defaultFrameTall;
-  const base = parseFeetInches(elev.overallHeightInput) ?? 0;
-  const below = elev.belowGradeEnabled ? parseFeetInches(elev.belowGradeInput) ?? 0 : 0;
-  const wallHeight = base + below;
-  if (wallHeight <= 0) return defaultFrameTall;
-  return Math.ceil((wallHeight - workerReachHeight) / frameHeight);
-}
-
-// ── Scaffold Run Algorithm — Rule Set v4.0 ───────────────────────────────────
-
-type LegResult = {
-  wallPoint: PlanPoint;
-  tickTip: PlanPoint;
-  labelPoint: PlanPoint;
-  isTurnaroundMirror: boolean;
-  isStartLeg: boolean;
-  isEndLeg: boolean;
-};
-
-const STANDARD_BAY_LENGTHS_FT = [10, 8, 7, 5];
-const CROSS_PLANK_MAX_FT = 8; // wing walls ≤ 8' get cross-planked, no independent run
-const ANGLE_SNAP_THRESHOLD_DEG = 5; // snap to 90° if within this many degrees
-
-// Snap a direction vector to nearest 90° if close enough
-function snapNormal(normal: PlanPoint): PlanPoint {
-  const angle = Math.atan2(normal.y, normal.x);
-  const snapAngles = [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI];
-  let closest = snapAngles[0];
-  let minDiff = Math.abs(angle - snapAngles[0]);
-  for (const a of snapAngles) {
-    const diff = Math.abs(angle - a);
-    if (diff < minDiff) { minDiff = diff; closest = a; }
-  }
-  const thresholdRad = (ANGLE_SNAP_THRESHOLD_DEG * Math.PI) / 180;
-  if (minDiff < thresholdRad) {
-    return { x: Math.round(Math.cos(closest)), y: Math.round(Math.sin(closest)) };
-  }
-  return normal;
-}
-
-// Snap along direction to nearest 90°
-function snapAlong(along: PlanPoint): PlanPoint {
-  return snapNormal(along);
-}
-
-// Detect inside corners (re-entrant) using cross product
-// Returns array of booleans — true = inside corner (re-entrant) at that vertex
-function detectInsideCorners(polygon: PlanPoint[]): boolean[] {
-  const n = polygon.length;
-  const area = signedArea(polygon);
-  const isCW = area > 0; // CW in SVG Y-down space
-
-  return polygon.map((_, i) => {
-    const prev = polygon[(i - 1 + n) % n];
-    const curr = polygon[i];
-    const next = polygon[(i + 1) % n];
-    const d1x = curr.x - prev.x;
-    const d1y = curr.y - prev.y;
-    const d2x = next.x - curr.x;
-    const d2y = next.y - curr.y;
-    // Cross product z-component
-    const cross = d1x * d2y - d1y * d2x;
-    // For CW polygon in SVG (area > 0): re-entrant = cross < 0 (turns right)
-    // For CCW polygon in SVG (area < 0): re-entrant = cross > 0 (turns left)
-    // CW polygon in SVG: re-entrant corner turns left = cross product < 0
-    // CCW polygon in SVG: re-entrant corner turns right = cross product > 0
-    return isCW ? cross < 0 : cross > 0;
-  });
-}
-
-function computeSegmentLegs(
-  start: PlanPoint,
-  end: PlanPoint,
-  segIndex: number,
-  scaffoldWidthFt: number,
-  bayLengthFt: number,
-  pageUnitsPerFoot: number,
-  turnaroundOn: boolean,
-  polygon: PlanPoint[],
-  insideCorners: boolean[],
-): LegResult[] {
-  const rawDx = end.x - start.x;
-  const rawDy = end.y - start.y;
-  const segLengthPx = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
-  if (!isFiniteNumber(segLengthPx) || segLengthPx <= 0) return [];
-
-  const puf = pageUnitsPerFoot;
-
-  // Snap along direction to avoid skewed ticks on nearly-axis-aligned walls
-  const rawAlong = { x: rawDx / segLengthPx, y: rawDy / segLengthPx };
-  const along = snapAlong(rawAlong);
-
-  const rawNormal = computeOutwardNormal(start, end, polygon.length >= 3 ? polygon : [start, end]);
-  const normal = snapNormal(rawNormal);
-
-  const bayPx        = bayLengthFt * puf;
-  const wallGapPx    = 1 * puf;               // 1' gap from wall face to start of tick
-  const tickLengthPx = scaffoldWidthFt * puf; // tick = scaffold width long
-  const labelOffPx   = wallGapPx + tickLengthPx + puf * 0.6;
-  const cornerOffPx  = (scaffoldWidthFt + 1) * puf; // 4' for 3' scaffold
-
-  // Check if end corners are inside corners — if so, stop run 1' before
-  const n = polygon.length;
-  const startCornerIsInside = insideCorners[segIndex];
-  const endCornerIsInside   = insideCorners[(segIndex + 1) % n];
-
-  // Effective run end — stop 1' (wallGapPx) before inside end corner
-  const runEndPx = endCornerIsInside
-    ? segLengthPx - wallGapPx
-    : segLengthPx;
-
-  // Wing wall cross-plank check — skip short walls entirely
-  const segLengthFt = segLengthPx / puf;
-  if (segLengthFt <= CROSS_PLANK_MAX_FT) return [];
-
-  function makeLeg(distAlongWall: number, isMirror = false, isStart = false, isEnd = false): LegResult {
-    const wp = {
-      x: start.x + along.x * distAlongWall,
-      y: start.y + along.y * distAlongWall,
-    };
-    const tickStart = { x: wp.x + normal.x * wallGapPx,                  y: wp.y + normal.y * wallGapPx };
-    const tickTip   = { x: wp.x + normal.x * (wallGapPx + tickLengthPx), y: wp.y + normal.y * (wallGapPx + tickLengthPx) };
-    const lp        = { x: wp.x + normal.x * labelOffPx,                 y: wp.y + normal.y * labelOffPx };
-    return { wallPoint: tickStart, tickTip, labelPoint: lp, isTurnaroundMirror: isMirror, isStartLeg: isStart, isEndLeg: isEnd };
-  }
-
-  const legs: LegResult[] = [];
-
-  // ── START TICK placement ──────────────────────────────────────────────────
-  // Case A: Normal outside corner
-  //   → place start tick scaffoldWidth+1' BEFORE the start corner
-  //   → first bay tick is startTick + 10'
-  //
-  // Case B: Inside corner (re-entrant / notch)
-  //   → NO start tick before corner (would land inside building)
-  //   → place first leg AT the corner point (dist=0), 1' outward offset
-  //   → continue with 10' bays from there
-
-  let runCursorPx: number;
-
-  if (startCornerIsInside) {
-    // Case B: inside corner — first leg at corner, then 10' bays
-    legs.push(makeLeg(0, false, true, false));
-    runCursorPx = bayPx;
-  } else {
-    // Case A: outside corner — start tick before corner, first bay = startTick + 10'
-    legs.push(makeLeg(-cornerOffPx, false, true, false));
-    runCursorPx = -cornerOffPx + bayPx;
-  }
-
-  // ── BAY TICKS — 10' from start tick, stopping at runEndPx ────────────────
-  // No bay ever exceeds 10'. The 4' corner offset is included in coverage.
-  let cursor = runCursorPx;
-  while (cursor < runEndPx - puf * 0.1) {
-    if (cursor >= 0) legs.push(makeLeg(cursor)); // only draw if on segment
-    cursor += bayPx;
-  }
-
-  // ── END TICK — try standard bay lengths from last placed tick ─────────────
-  // Only place if remaining distance >= 5' (smallest standard bay)
-  // If < 5' remaining, absorb into last full bay — no bastard bay
-  const bayLegs = legs.filter(l => !l.isStartLeg);
-  const lastAlongDist = bayLegs.length > 0
-    ? Math.max(...bayLegs.map(l => {
-        const wbx = l.wallPoint.x - normal.x * wallGapPx;
-        const wby = l.wallPoint.y - normal.y * wallGapPx;
-        return (wbx - start.x) * along.x + (wby - start.y) * along.y;
-      }))
-    : runCursorPx;
-
-  const remainingFt = (runEndPx - lastAlongDist) / puf;
-
-  if (remainingFt >= 5) {
-    let endDist = runEndPx;
-    for (const bayFt of STANDARD_BAY_LENGTHS_FT) {
-      const candidate = lastAlongDist + bayFt * puf;
-      if (candidate <= runEndPx + puf * 0.1) {
-        endDist = Math.min(candidate, runEndPx);
-        break;
-      }
-    }
-    if ((endDist - lastAlongDist) / puf >= 5) {
-      legs.push(makeLeg(endDist, false, false, true));
-    }
-  }
-
-  return legs.filter(l => isFinitePoint(l.tickTip) && isFinitePoint(l.wallPoint));
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function SetScaffoldPage() {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [scaffoldWidth, setScaffoldWidth] = useState<ScaffoldWidth>("3'");
-  const [plankType, setPlankType] = useState<PlankType>("Wood");
-  const [standardBayLength, setStandardBayLength] = useState("10'");
-  const [turnaroundBays, setTurnaroundBays] = useState(true);
-  const [showOverlay, setShowOverlay] = useState(true);
-  const [showScaffold, setShowScaffold] = useState(true);
-  const [editMode, setEditMode] = useState(false);
-  const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
-  const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
-  const [overriddenFrameCounts, setOverriddenFrameCounts] = useState<Record<string, number>>({});
-  const [draggedLegKey, setDraggedLegKey] = useState<string | null>(null);
-  const [legOffsets, setLegOffsets] = useState<Record<string, { dx: number; dy: number }>>({});
-  const svgRef = useRef<SVGSVGElement>(null);
-  const [viewerZoom, setViewerZoom] = useState(1);
-  const [activeElevationData, setActiveElevationData] = useState<ProjectElevation | null>(null);
-  const [activeProjectName, setActiveProjectName] = useState(projectInfo.projectName);
-
-  const frameHeight = 6 + 4 / 12;
-  const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
-  const frameHeightCount = activeElevationData?.quantityEngine.frameTall ?? 7;
-
-  // pageUnitsPerFoot — from scale calibration in Takeoff Workspace
-  // If not set, Set Scaffold is locked (scale required before proceeding)
-  const pageUnitsPerFoot = activeElevationData?.scale?.pageUnitsPerFoot ?? null;
-  const scaleIsSet = pageUnitsPerFoot != null && pageUnitsPerFoot > 0;
-
-  // ── Raw PDF coordinate approach ──────────────────────────────────────────
-  // Instead of rescaling points to fit a fixed 1200×720 SVG, keep points in
-  // their original PDF coordinate space. Set the SVG viewBox to match the
-  // bounding box of the raw points (with padding). This means:
-  //   svgPUF = pdfPUF exactly — no conversion, no scaling errors.
-
-  const rawPrimaryPoints = useMemo(
-    () => getPrimaryGeometryPoints(activeElevationData),
-    [activeElevationData],
-  );
-
-  // Compute bounding box of raw points for the SVG viewBox
-  const svgViewBox = useMemo(() => {
-    const pts = rawPrimaryPoints.filter(isFinitePoint);
-    if (pts.length < 2) return { x: 0, y: 0, w: 1200, h: 720 };
-    const minX = Math.min(...pts.map(p => p.x));
-    const maxX = Math.max(...pts.map(p => p.x));
-    const minY = Math.min(...pts.map(p => p.y));
-    const maxY = Math.max(...pts.map(p => p.y));
-    const pad = pageUnitsPerFoot ? pageUnitsPerFoot * 8 : 80; // 8ft padding around building
-    return {
-      x: minX - pad,
-      y: minY - pad,
-      w: (maxX - minX) + pad * 2,
-      h: (maxY - minY) + pad * 2,
-    };
-  }, [rawPrimaryPoints, pageUnitsPerFoot]);
-
-  // Raw overlay rows — points in PDF coordinate space, no rescaling
-  const rawOverlayRows = useMemo(() => {
-    const geometry = activeElevationData?.overlayGeometry;
-    if (!geometry) return [];
-    const allRows = geometry.fullOverlayRows.filter(row => row.points.length >= 2);
-    if (allRows.length === 0) return [];
-    return allRows.map((row, index) => ({
-      id: row.id ?? index,
-      level: row.level,
-      isKeyFloor: Boolean(row.isKeyFloor),
-      closed: Boolean(row.closed),
-      color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
-      points: row.points.filter(isFinitePoint),
-    })).filter(row => row.points.length >= 2);
-  }, [activeElevationData]);
-
-  // Raw reference points
-  const rawReferencePoints = useMemo(() => {
-    return activeElevationData?.overlayGeometry?.referencePoints?.filter(isFinitePoint) ?? [];
-  }, [activeElevationData]);
-
-  // The scaffold outline in raw PDF coordinates
-  const rawScaffoldOutline = useMemo(() => {
-    const pts = rawPrimaryPoints.filter(isFinitePoint);
-    return pts.length >= 3 ? pts : null;
-  }, [rawPrimaryPoints]);
-
-  // Use raw points if available, fall back to the scaled version for the fallback shape
-  const scaffoldOutline = rawScaffoldOutline ?? currentLevelOutline;
-  const isUsingFallbackGeometry = !rawScaffoldOutline;
-
-  // svgPageUnitsPerFoot = pdfPUF directly since we're in PDF coordinate space
-  // svgScale is 1.0 — no rescaling applied
-  const svgScale = 1;
-  const svgPageUnitsPerFoot = pageUnitsPerFoot;
-
-  const storedElevationHeights = useMemo(() => {
-    return activeElevationData?.overlayGeometry?.elevationHeights ?? [];
-  }, [activeElevationData]);
-
-  // Scaffold width in feet
-  const scaffoldWidthFt = useMemo(() => parseFeetValue(scaffoldWidth), [scaffoldWidth]);
-  const bayLengthFt = useMemo(() => parseFeetValue(standardBayLength) || 10, [standardBayLength]);
-
-  // Plank per level by width
-  const plankCountPerBay = useMemo(() => {
-    if (scaffoldWidth === "5'") return 6;
-    if (scaffoldWidth === "3'-6\"") return 4;
-    return 3;
-  }, [scaffoldWidth]);
-
-  // ── Compute all legs via Rule Set v3.0 ────────────────────────────────────
-  // Uses real pageUnitsPerFoot if available, otherwise falls back to SVG-unit estimation
-  const allSegmentLegs = useMemo(() => {
-    if (!scaleIsSet || !pageUnitsPerFoot || !scaffoldOutline.length) return [];
-    const puf = pageUnitsPerFoot;
-    const insideCorners = detectInsideCorners(scaffoldOutline);
-    const results: { segIndex: number; legs: LegResult[] }[] = [];
-
-    for (let i = 0; i < scaffoldOutline.length; i++) {
-      const start = scaffoldOutline[i];
-      const end = scaffoldOutline[(i + 1) % scaffoldOutline.length];
-      const legs = computeSegmentLegs(
-        start, end, i, scaffoldWidthFt, bayLengthFt, puf, turnaroundBays, scaffoldOutline, insideCorners
-      );
-      results.push({ segIndex: i, legs });
-    }
-
-    // ── Cross-segment deduplication ──────────────────────────────────────────
-    // At each corner, check the end tick of segment[i] against the start tick
-    // of segment[i+1].
-    // Gap ≤ 8' → remove end tick, gap is acceptable
-    // Gap > 8' at outside corner → add a leg at the corner point
-    const maxGapPx = 8 * puf;
-    const n = scaffoldOutline.length;
-
-    for (let i = 0; i < n; i++) {
-      const curr = results[i];
-      const next = results[(i + 1) % n];
-      if (!curr || !next) continue;
-
-      const cornerPt  = scaffoldOutline[(i + 1) % n];
-      const cornerIsInside = insideCorners[(i + 1) % n];
-
-      // End tick of current segment (last non-start, non-mirror leg)
-      const endTick  = curr.legs.filter(l => !l.isStartLeg && !l.isTurnaroundMirror).slice(-1)[0];
-      // Start tick of next segment (the leg placed at or before the next corner)
-      const startTick = next.legs.find(l => l.isStartLeg);
-
-      // Reference points for distance
-      const endPt   = endTick   ? endTick.wallPoint   : cornerPt;
-      const startPt = startTick ? startTick.wallPoint  : cornerPt;
-
-      const dist = Math.sqrt((endPt.x - startPt.x) ** 2 + (endPt.y - startPt.y) ** 2);
-
-      if (dist <= maxGapPx) {
-        // Gap acceptable — remove end tick to avoid crowding
-        if (endTick) curr.legs = curr.legs.filter(l => l !== endTick);
-
-      } else if (!cornerIsInside) {
-        // Gap too large at outside corner — always add a leg at the corner point
-        // Use the outward normal of the CURRENT segment at the corner
-        const currStart = scaffoldOutline[i];
-        const currEnd   = scaffoldOutline[(i + 1) % n];
-        const normalAtCorner = computeOutwardNormal(currStart, currEnd, scaffoldOutline);
-        const wallGapPx  = 1 * puf;
-        const tickLenPx  = scaffoldWidthFt * puf;
-        const labelOffPx = wallGapPx + tickLenPx + puf * 0.6;
-
-        const cornerLeg: LegResult = {
-          wallPoint:  { x: cornerPt.x + normalAtCorner.x * wallGapPx,              y: cornerPt.y + normalAtCorner.y * wallGapPx },
-          tickTip:    { x: cornerPt.x + normalAtCorner.x * (wallGapPx + tickLenPx), y: cornerPt.y + normalAtCorner.y * (wallGapPx + tickLenPx) },
-          labelPoint: { x: cornerPt.x + normalAtCorner.x * labelOffPx,              y: cornerPt.y + normalAtCorner.y * labelOffPx },
-          isTurnaroundMirror: false,
-          isStartLeg: false,
-          isEndLeg: true,
-        };
-
-        // Only add if it doesn't land inside the building
-        if (!pointInPolygon(cornerLeg.tickTip, scaffoldOutline)) {
-          curr.legs.push(cornerLeg);
-        }
-      }
-    }
-
-    return results;
-  }, [scaffoldOutline, scaffoldWidthFt, bayLengthFt, turnaroundBays, scaleIsSet, pageUnitsPerFoot]);
-
-  // ── Quantities derived from actual rendered legs (Rule Q3) ────────────────
-  const totals = useMemo(() => {
-    if (!scaleIsSet) {
-      const bayCount = activeElevationData?.quantityEngine.bayCount ?? runSummary.reduce((s, r) => s + r.bays, 0);
-      const legCount = activeElevationData?.quantityEngine.legCount ?? runSummary.reduce((s, r) => s + r.legs, 0);
-      const frames = legCount * frameHeightCount;
-      const planks = bayCount * plankCountPerBay * frameHeightCount;
-      const braces = activeElevationData?.quantityEngine.crossBraceCount ?? Math.max(0, bayCount - 5);
-      return { bays: bayCount, legs: legCount, frames, planks, braces };
-    }
-
-    // Count actual rendered legs — excluding deleted and turnaround mirrors
-    let legCount = 0;
-    let bayCount = 0;
-    let totalFrames = 0;
-
-    for (const seg of allSegmentLegs) {
-      const structLegs = seg.legs.filter(l => !l.isTurnaroundMirror);
-      const activeLegIndices: number[] = [];
-      structLegs.forEach((_, i) => {
-        const key = `${seg.segIndex}-${i}`;
-        if (!deletedLegKeys.has(key)) activeLegIndices.push(i);
-      });
-
-      const activeCount = activeLegIndices.length;
-      legCount += activeCount;
-      if (activeCount > 1) bayCount += activeCount - 1;
-
-      // Frame count per leg — use override if set, else default frameHeightCount
-      activeLegIndices.forEach(i => {
-        const key = `${seg.segIndex}-${i}`;
-        totalFrames += overriddenFrameCounts[key] ?? frameHeightCount;
-      });
-    }
-
-    const planks = bayCount * plankCountPerBay;
-    const braces = Math.max(0, bayCount - scaffoldOutline.length);
-
-    return { bays: bayCount, legs: legCount, frames: totalFrames, planks, braces };
-  }, [allSegmentLegs, frameHeightCount, plankCountPerBay, scaleIsSet, activeElevationData, scaffoldOutline.length, deletedLegKeys, overriddenFrameCounts]);
-
-  useEffect(() => {
-    function loadActiveElevation() {
-      const elevation = getActiveElevation();
-      const project = getActiveProject();
-      setActiveElevationData(elevation);
-      setActiveProjectName(project.projectName || projectInfo.projectName);
-      setScaffoldWidth(formatScaffoldWidth(elevation.scaffoldInput.scaffoldWidth));
-      setStandardBayLength(`${elevation.scaffoldInput.standardBayLength}'`);
-    }
-    loadActiveElevation();
-    window.addEventListener("focus", loadActiveElevation);
-    window.addEventListener("pageshow", loadActiveElevation);
-    return () => {
-      window.removeEventListener("focus", loadActiveElevation);
-      window.removeEventListener("pageshow", loadActiveElevation);
-    };
-  }, []);
-
-  function saveScaffoldInput(updates: Partial<ScaffoldInput>) {
-    const current = activeElevationData ?? getActiveElevation();
-    const scaffoldInput = { ...current.scaffoldInput, ...updates };
-    const quantityEngine = calculateQuantityEngine({
-      linearFeet: current.linearFeet,
-      wallHeight: current.wallHeight,
-      ...scaffoldInput,
-      workerReachHeight: getBackendSettings().scaffold.workerReachHeight,
-    });
-    const nextElevation = {
-      ...current, scaffoldInput, quantityEngine,
-      sectionView: { ...current.sectionView, wallOffset: scaffoldInput.wallOffset },
-    };
-    setActiveElevationData(nextElevation);
-    saveActiveElevation(nextElevation);
-  }
-
-  function updateScaffoldWidth(value: ScaffoldWidth) {
-    setScaffoldWidth(value);
-    saveScaffoldInput({ scaffoldWidth: parseFeetValue(value) });
-  }
-
-  function updateStandardBayLength(value: string) {
-    setStandardBayLength(value);
-    saveScaffoldInput({ standardBayLength: parseFeetValue(value) || 10 });
-  }
-
-  return (
-    <main className="min-h-screen bg-korban-base text-white">
-      <KorbanHeader
-        title="Set Scaffold"
-        subtitle="Combined overlay to scaffold bay layout"
-        menuLinks={scaffoldMenuLinks}
-        menuOpen={menuOpen}
-        onMenuToggle={() => setMenuOpen(c => !c)}
-        actionsClassName="gap-4"
-        actions={
-          <>
-            <KorbanHeaderMeta label="Project" value={activeProjectName} />
-            <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
-            <KorbanHeaderMeta label="Reference" value={projectInfo.reference} />
-            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
-            <KorbanButton as="a" href="/frame-configuration" variant="primary">Save & Continue</KorbanButton>
-          </>
-        }
-      />
-
-      <section className="grid h-[calc(100vh-125px)] grid-cols-[minmax(0,1fr)_340px]">
-        {/* Canvas */}
-        <section className="relative overflow-hidden border-r border-orange-500/20 bg-black flex flex-col">
-
-          {/* Scale lock overlay */}
-          {!scaleIsSet && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
-              <div className="rounded-[2rem] border border-yellow-500/40 bg-yellow-500/10 p-10 text-center shadow-2xl">
-                <div className="mb-4 text-4xl">⚠</div>
-                <p className="text-sm font-bold uppercase tracking-[0.2em] text-yellow-300">Scale Not Set</p>
-                <p className="mt-3 max-w-xs text-xs leading-5 text-zinc-400">
-                  Scale must be calibrated in Takeoff Workspace before scaffold layout can be generated.
-                </p>
-                <a href="/takeoff-workspace" className="mt-6 inline-block rounded-xl bg-yellow-400 px-6 py-3 text-xs font-bold text-black hover:bg-yellow-300">
-                  Go to Takeoff Workspace →
-                </a>
-              </div>
-            </div>
-          )}
-
-          {/* HUD — status pills + zoom controls */}
-          <div className="absolute left-6 top-5 z-20 flex flex-wrap items-center gap-3">
-            <StatusPill label="Overlay" active={showOverlay} onClick={() => setShowOverlay(c => !c)} />
-            <StatusPill label="Scaffold" active={showScaffold} onClick={() => setShowScaffold(c => !c)} />
-            <StatusPill label="Frame Tall" value={String(frameHeightCount)} />
-            <StatusPill label="Turnaround" active={turnaroundBays} onClick={() => setTurnaroundBays(c => !c)} value={turnaroundBays ? "ON" : "OFF"} />
-            <StatusPill label="Scale" active={scaleIsSet} value={scaleIsSet ? "Calibrated" : "Not Set"} />
-            {isUsingFallbackGeometry && (
-              <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs font-bold text-yellow-300">
-                ⚠ Placeholder shape
-              </div>
-            )}
-          </div>
-
-          {/* Zoom controls — top right */}
-          <div className="absolute right-5 top-5 z-20 flex items-center gap-1.5">
-            {scaleIsSet && scaffoldOutline.length >= 3 && (
-              <span className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 font-mono text-[9px] text-zinc-500">
-                {signedArea(scaffoldOutline) > 0 ? "CW" : "CCW"} {signedArea(scaffoldOutline).toFixed(0)}
-              </span>
-            )}
-            <button
-              onClick={() => setViewerZoom(z => Math.min(3, z + 0.15))}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-black/80 text-zinc-400 hover:text-zinc-200 hover:border-orange-500/30 text-sm font-bold"
-            >+</button>
-            <span className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 font-mono text-[10px] text-zinc-400">
-              {Math.round(viewerZoom * 100)}%
-            </span>
-            <button
-              onClick={() => setViewerZoom(z => Math.max(0.3, z - 0.15))}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-black/80 text-zinc-400 hover:text-zinc-200 hover:border-orange-500/30 text-sm font-bold"
-            >−</button>
-            <button
-              onClick={() => setViewerZoom(1)}
-              className="rounded-xl border border-zinc-800 bg-black/80 px-2.5 py-1.5 text-[10px] text-zinc-500 hover:text-zinc-300"
-            >Fit</button>
-          </div>
-
-          {/* Background grid */}
-          <div className="absolute inset-0 opacity-[0.10] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:36px_36px]" />
-
-          {/* SVG viewer — fills available height above bottom bar */}
-          <div className="absolute inset-0 bottom-12 overflow-hidden">
-            <div className="relative h-full w-full rounded-[2rem]">
-
-              {/* Project name — vertical text on left edge */}
-              <div className="absolute left-2 top-1/2 z-20 -translate-y-1/2 -rotate-90 whitespace-nowrap">
-                <span className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-700">
-                  {activeProjectName}
-                </span>
-              </div>
-
-              {/* Overlay legend — small, bottom-left of viewer */}
-              <div className="absolute bottom-3 left-8 z-20 flex items-center gap-3 rounded-xl border border-zinc-900 bg-black/70 px-3 py-1.5 backdrop-blur">
-                <div className="flex items-center gap-1.5">
-                  <div className="h-px w-5 bg-[#2563eb]" />
-                  <span className="text-[9px] text-zinc-600">Current</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <div className="h-px w-5 bg-[#22c55e]" />
-                  <span className="text-[9px] text-zinc-600">Below</span>
-                </div>
-              </div>
-
-              <svg
-                ref={svgRef}
-                viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1/viewerZoom)) / 2} ${svgViewBox.y + (svgViewBox.h * (1 - 1/viewerZoom)) / 2} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
-                className="h-full w-full"
-                onMouseMove={e => {
-                  if (!draggedLegKey || !svgRef.current) return;
-                  const rect = svgRef.current.getBoundingClientRect();
-                  const vb = svgRef.current.viewBox.baseVal;
-                  const scaleX = vb.width / rect.width;
-                  const scaleY = vb.height / rect.height;
-                  const dx = (e.movementX * scaleX);
-                  const dy = (e.movementY * scaleY);
-                  setLegOffsets(prev => ({
-                    ...prev,
-                    [draggedLegKey]: {
-                      dx: (prev[draggedLegKey]?.dx ?? 0) + dx,
-                      dy: (prev[draggedLegKey]?.dy ?? 0) + dy,
-                    }
-                  }));
-                }}
-                onMouseUp={() => setDraggedLegKey(null)}
-                onMouseLeave={() => setDraggedLegKey(null)}
-              >
-                <GridAxisLabels viewBox={svgViewBox} pageUnitsPerFoot={pageUnitsPerFoot ?? 18} />
-                <CompassLabels viewBox={svgViewBox} />
-
-                {showOverlay && (
-                  rawOverlayRows.length ? (
-                    <StoredTakeoffOverlay rows={rawOverlayRows} referencePoints={rawReferencePoints} />
-                  ) : (
-                    <g>
-                      {/* Mare Island Apartments — clean demo footprint */}
-                      <path
-                        d="M160 120 L880 120 L880 300 L700 300 L700 480 L880 480 L880 600 L160 600 Z"
-                        fill="rgba(37,99,235,0.06)" stroke="#2563eb" strokeWidth="1.2" strokeLinejoin="miter"
-                      />
-                      <path
-                        d="M172 132 L868 132 L868 312 L712 312 L712 468 L868 468 L868 588 L172 588 Z"
-                        fill="transparent" stroke="#22c55e" strokeWidth="0.8" strokeLinejoin="miter" opacity="0.8"
-                      />
-                      {/* Reference point marker */}
-                      <circle cx="160" cy="120" r="5" fill="#f97316" opacity="0.8" />
-                      <line x1="150" y1="120" x2="180" y2="120" stroke="#f97316" strokeWidth="0.8" opacity="0.6" />
-                      <line x1="160" y1="110" x2="160" y2="130" stroke="#f97316" strokeWidth="0.8" opacity="0.6" />
-                      <text x="175" y="112" fill="#f97316" fontSize="9" fontFamily="monospace" opacity="0.7">REF A-1</text>
-                      {/* Dimension labels */}
-                      <text x="510" y="108" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">180'-0"</text>
-                      <text x="148" y="365" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">90'</text>
-                      <text x="510" y="614" fill="#2563eb" fontSize="8" fontFamily="monospace" textAnchor="middle" opacity="0.7">180'-0"</text>
-                    </g>
-                  )
-                )}
-
-                {showScaffold && scaleIsSet && (
-                  <g className="scaffold-plan">
-                    <ScaffoldRunTicks
-                      segmentLegs={allSegmentLegs}
-                      points={scaffoldOutline}
-                      elevationHeights={storedElevationHeights}
-                      frameHeight={frameHeight}
-                      workerReachHeight={workerReachHeight}
-                      frameTall={frameHeightCount}
-                      polygon={scaffoldOutline}
-                      svgPageUnitsPerFoot={pageUnitsPerFoot ?? 8}
-                      scaffoldWidthFt={scaffoldWidthFt}
-                      editMode={editMode}
-                      selectedLegKey={selectedLegKey}
-                      deletedLegKeys={deletedLegKeys}
-                      overriddenFrameCounts={overriddenFrameCounts}
-                      legOffsets={legOffsets}
-                      onLegClick={(key) => editMode && setSelectedLegKey(k => k === key ? null : key)}
-                      onLegDragStart={(key) => { if (editMode) { setDraggedLegKey(key); setSelectedLegKey(key); } }}
-                    />
-                  </g>
-                )}
-
-                {/* Edit mode — delete & frame count controls */}
-                {editMode && selectedLegKey && (() => {
-                  const [si, li] = selectedLegKey.split("-").map(Number);
-                  const seg = allSegmentLegs.find(s => s.segIndex === si);
-                  const legs = seg?.legs.filter(l => !l.isTurnaroundMirror) ?? [];
-                  const leg = legs[li];
-                  if (!leg) return null;
-                  const cx = leg.tickTip.x;
-                  const cy = leg.tickTip.y - 18;
-                  const currentFrames = overriddenFrameCounts[selectedLegKey] ?? frameHeightCount;
-                  return (
-                    <g>
-                      <rect x={cx - 54} y={cy - 14} width={108} height={28} rx={6}
-                        fill="#18181b" stroke="#f97316" strokeWidth="1" opacity="0.97" />
-                      <text x={cx - 48} y={cy + 5} fontSize="8" fill="#f97316" fontFamily="monospace" fontWeight="bold">
-                        Frames: {currentFrames}
-                      </text>
-                      {/* − button */}
-                      <rect x={cx + 14} y={cy - 10} width={16} height={16} rx={3} fill="#f97316"
-                        style={{ cursor: "pointer" }}
-                        onClick={() => setOverriddenFrameCounts(p => ({ ...p, [selectedLegKey]: Math.max(1, (p[selectedLegKey] ?? frameHeightCount) - 1) }))} />
-                      <text x={cx + 22} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>−</text>
-                      {/* + button */}
-                      <rect x={cx + 32} y={cy - 10} width={16} height={16} rx={3} fill="#f97316"
-                        style={{ cursor: "pointer" }}
-                        onClick={() => setOverriddenFrameCounts(p => ({ ...p, [selectedLegKey]: (p[selectedLegKey] ?? frameHeightCount) + 1 }))} />
-                      <text x={cx + 40} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>+</text>
-                      {/* Delete tick */}
-                      <rect x={cx - 54} y={cy + 16} width={108} height={16} rx={4} fill="#ef4444" opacity="0.85"
-                        style={{ cursor: "pointer" }}
-                        onClick={() => {
-                          setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; });
-                          setSelectedLegKey(null);
-                        }} />
-                      <text x={cx} y={cy + 28} fontSize="7.5" fill="white" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>
-                        DELETE TICK
-                      </text>
-                    </g>
-                  );
-                })()}
-
-              </svg>
-            </div>
-          </div>
-
-          {/* Bottom action bar */}
-          <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-3 border-t border-zinc-900 bg-[#080604] px-6 py-2.5">
-            <KorbanButton variant="ghost" className="px-3 py-2 text-[10px]" onClick={() => setEditMode(false)}>
-              Regenerate
-            </KorbanButton>
-            <KorbanButton
-              variant={editMode ? "primary" : "ghost"}
-              className="px-3 py-2 text-[10px]"
-              onClick={() => setEditMode(m => !m)}
-            >
-              {editMode ? "✓ Editing" : "Edit Bay"}
-            </KorbanButton>
-            <KorbanButton variant="primary" className="px-3 py-2 text-[10px]" onClick={() => setEditMode(false)}>
-              Save Layout
-            </KorbanButton>
-          </div>
-        </section>
-
-        {/* Sidebar */}
-        <aside className="overflow-y-auto bg-[#080604] p-4">
-          <Panel title="Backend Takeoff Info" subtitle="Current scaffold defaults">
-            <ControlLabel label="Frame Width">
-              <select value={scaffoldWidth} onChange={e => updateScaffoldWidth(e.target.value as ScaffoldWidth)} className="control-input">
-                <option>3'</option>
-                <option>3'-6"</option>
-                <option>5'</option>
-              </select>
-            </ControlLabel>
-            <ControlLabel label="Plank Count / Width">
-              <input className="control-input" readOnly value={plankCountPerBay} />
-            </ControlLabel>
-            <ControlLabel label="Plank Type">
-              <select value={plankType} onChange={e => setPlankType(e.target.value as PlankType)} className="control-input">
-                <option>Wood</option>
-                <option>Aluminum</option>
-                <option>Steel</option>
-              </select>
-            </ControlLabel>
-            <ControlLabel label="Standard Bay Length">
-              <input value={standardBayLength} onChange={e => updateStandardBayLength(e.target.value)} className="control-input" />
-            </ControlLabel>
-            <button
-              onClick={() => setTurnaroundBays(c => !c)}
-              className={`mt-3 flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left ${
-                turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 bg-black text-zinc-500"
-              }`}
-            >
-              <div>
-                <span className="text-xs font-bold">Turnaround Bays</span>
-                <p className="mt-0.5 text-[10px] text-zinc-600">
-                  {turnaroundBays ? "ON — double legs at all offset corners" : "OFF — single leg at offset corners"}
-                </p>
-              </div>
-              <span className="font-mono text-xs font-bold">{turnaroundBays ? "ON" : "OFF"}</span>
-            </button>
-            <ControlLabel label="Frame Height Count">
-              <input className="control-input" readOnly value={frameHeightCount} />
-            </ControlLabel>
-            <ControlLabel label="Scale">
-              <input
-                className="control-input"
-                readOnly
-                value={(() => {
-                  if (!scaleIsSet) return "Not calibrated — set in Takeoff Workspace";
-                  const puf = pageUnitsPerFoot!;
-                  const inchesPerFoot = puf / 72;
-                  if (Math.abs(inchesPerFoot - 0.125) < 0.02) return "1/8\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.25) < 0.02) return "1/4\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.1875) < 0.02) return "3/16\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.0625) < 0.02) return "1/16\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.5) < 0.02) return "1/2\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.375) < 0.02) return "3/8\" = 1'";
-                  if (Math.abs(inchesPerFoot - 0.0833) < 0.015) return "1\" = 12'";
-                  const ratio = Math.round(12 / inchesPerFoot);
-                  return `1\" = ${ratio}'`;
-                })()}
-                style={{ color: scaleIsSet ? undefined : "#ef4444" }}
-              />
-            </ControlLabel>
-          </Panel>
-
-          <Panel title="Scaffold Quantities" subtitle="Derived from rendered scaffold legs">
-            <div className="mb-4 grid grid-cols-2 gap-2">
-              <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-3 shadow-[0_0_18px_rgba(249,115,22,0.08)]">
-                <p className="text-[10px] uppercase tracking-widest text-zinc-500">Total Frames</p>
-                <p className="mt-1 font-mono text-lg font-bold text-orange-300">{totals.frames.toLocaleString()}</p>
-              </div>
-              <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-3 shadow-[0_0_18px_rgba(249,115,22,0.08)]">
-                <p className="text-[10px] uppercase tracking-widest text-zinc-500">Total Planks</p>
-                <p className="mt-1 font-mono text-lg font-bold text-orange-300">{totals.planks.toLocaleString()}</p>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <QuantityRow label="Total Lineal Ft" value={`${(activeElevationData?.linearFeet ?? 482).toLocaleString()} LF`} />
-              <QuantityRow label="Standard Bays" value={totals.bays.toLocaleString()} />
-              <QuantityRow label="Total Legs" value={totals.legs.toLocaleString()} />
-              <QuantityRow label="Frames Tall" value={String(frameHeightCount)} />
-              <QuantityRow label="Cross Braces" value={totals.braces.toLocaleString()} />
-              <QuantityRow label="Plank Type" value={plankType} />
-              <QuantityRow label="Planks / Level" value={String(plankCountPerBay)} />
-            </div>
-            <div className="mt-4 space-y-2">
-              {activeElevationData ? (
-                <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-bold text-zinc-300">{activeElevationData.elevationName} Run</p>
-                    <p className="font-mono text-xs text-orange-300">{activeElevationData.linearFeet.toLocaleString()} LF</p>
-                  </div>
-                  <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                    {totals.bays} Bays · {totals.legs} Legs
-                  </p>
-                </div>
-              ) : (
-                runSummary.map(run => (
-                  <div key={run.label} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-bold text-zinc-300">{run.label}</p>
-                      <p className="font-mono text-xs text-orange-300">{run.lf}</p>
-                    </div>
-                    <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-                      {run.bays} Bays · {run.legs} Legs
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-          </Panel>
-
-          <Panel title="Next Step" subtitle="Move scaffold layout into section design">
-            <div className="grid gap-2">
-              <a href="/project-plan-desk" className="next-link">Return To Project Plan Desk</a>
-              <a href="/frame-configuration" className="next-link-primary">Save & Continue</a>
-            </div>
-          </Panel>
-        </aside>
-      </section>
-
-      <style jsx global>{`
-        .control-input {
-          width: 100%; border-radius: 0.9rem; border: 1px solid rgb(39 39 42);
-          background: #000; padding: 0.75rem 0.9rem;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size: 0.8rem; font-weight: 800; color: rgb(253 186 116); outline: none;
-        }
-        .control-input:focus { border-color: rgba(249, 115, 22, 0.55); }
-        .next-link, .next-link-primary {
-          display: block; border-radius: 0.9rem; padding: 0.9rem 1rem;
-          text-align: center; font-size: 0.8rem; font-weight: 800;
-        }
-        .next-link { border: 1px solid rgb(39 39 42); background: #000; color: rgb(212 212 216); }
-        .next-link-primary { background: rgb(249 115 22); color: #000; }
-      `}</style>
-    </main>
-  );
-}
-
-function ScaffoldRunTicks({
-  segmentLegs, points, elevationHeights, frameHeight, workerReachHeight,
-  frameTall, polygon, svgPageUnitsPerFoot, scaffoldWidthFt,
-  editMode = false, selectedLegKey = null, deletedLegKeys = new Set(),
-  overriddenFrameCounts = {}, legOffsets = {}, onLegClick, onLegDragStart,
-}: {
-  segmentLegs: { segIndex: number; legs: LegResult[] }[];
-  points: PlanPoint[];
-  elevationHeights: Array<{ elevation: string; overallHeightInput: string; belowGradeEnabled: boolean; belowGradeInput: string }>;
-  frameHeight: number; workerReachHeight: number; frameTall: number;
-  polygon: PlanPoint[]; svgPageUnitsPerFoot: number; scaffoldWidthFt: number;
-  editMode?: boolean; selectedLegKey?: string | null;
-  deletedLegKeys?: Set<string>; overriddenFrameCounts?: Record<string, number>;
-  legOffsets?: Record<string, { dx: number; dy: number }>;
-  onLegClick?: (key: string) => void;
-  onLegDragStart?: (key: string) => void;
-}) {
-  function getLocalFrameTall(point: PlanPoint): number {
-    if (elevationHeights.length === 0) return frameTall;
-    return getFrameTallForPoint(point, points, elevationHeights, frameHeight, workerReachHeight, frameTall);
-  }
-  return (
-    <g fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
-      {segmentLegs.map(({ segIndex, legs }) => {
-        if (legs.length === 0) return null;
-        const segStart = points[segIndex];
-        const segEnd = points[(segIndex + 1) % points.length];
-        if (!segStart || !segEnd) return null;
-        const normal = computeOutwardNormal(segStart, segEnd, polygon);
-        const dx = segEnd.x - segStart.x; const dy = segEnd.y - segStart.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        const wallGapPx = 1 * svgPageUnitsPerFoot;
-        const tickLengthPx = scaffoldWidthFt * svgPageUnitsPerFoot;
-        const structuralLegs = legs.filter(l => !l.isTurnaroundMirror);
-        return (
-          <g key={`seg-${segIndex}`}>
-            {/* Diagonal braces */}
-            {structuralLegs.filter(l => !l.isStartLeg).slice(0, -1).map((leg, i) => {
-              const bayLegs = structuralLegs.filter(l => !l.isStartLeg);
-              const next = bayLegs[i + 1]; if (!next) return null;
-              const legKey = `${segIndex}-${i}`;
-              const nextKey = `${segIndex}-${i+1}`;
-              const off1 = legOffsets[legKey] ?? { dx: 0, dy: 0 };
-              const off2 = legOffsets[nextKey] ?? { dx: 0, dy: 0 };
-              const cx = (leg.wallPoint.x + off1.dx + next.wallPoint.x + off2.dx) / 2;
-              const cy = (leg.wallPoint.y + off1.dy + next.wallPoint.y + off2.dy) / 2;
-              const bayPx = Math.sqrt((next.wallPoint.x - leg.wallPoint.x) ** 2 + (next.wallPoint.y - leg.wallPoint.y) ** 2);
-              const halfBrace = bayPx * 0.3;
-              const along = len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
-              return (
-                <line key={`brace-${segIndex}-${i}`}
-                  x1={cx - along.x * halfBrace + normal.x * wallGapPx * 0.5}
-                  y1={cy - along.y * halfBrace + normal.y * wallGapPx * 0.5}
-                  x2={cx + along.x * halfBrace + normal.x * (wallGapPx + tickLengthPx) * 0.9}
-                  y2={cy + along.y * halfBrace + normal.y * (wallGapPx + tickLengthPx) * 0.9}
-                  strokeWidth="0.7" opacity="0.55" />
-              );
-            })}
-            {/* Tick lines */}
-            {structuralLegs.filter(leg => !pointInPolygon(leg.tickTip, polygon)).map((leg, i) => {
-              const legKey = `${segIndex}-${i}`;
-              if (deletedLegKeys.has(legKey)) return null;
-              if (!isFiniteNumber(leg.wallPoint.x) || !isFiniteNumber(leg.tickTip.x)) return null;
-              const isSelected = selectedLegKey === legKey;
-              const localFrameTall = overriddenFrameCounts[legKey] ?? getLocalFrameTall(leg.wallPoint);
-              const off = legOffsets[legKey] ?? { dx: 0, dy: 0 };
-              const wp = { x: leg.wallPoint.x + off.dx, y: leg.wallPoint.y + off.dy };
-              const tp = { x: leg.tickTip.x + off.dx,  y: leg.tickTip.y + off.dy };
-              const lp = { x: leg.labelPoint.x + off.dx, y: leg.labelPoint.y + off.dy };
-              return (
-                <g key={`leg-${segIndex}-${i}`}
-                  style={{ cursor: editMode ? (isSelected ? "grab" : "pointer") : "default" }}
-                  onClick={() => onLegClick?.(legKey)}
-                  onMouseDown={e => { if (editMode) { e.preventDefault(); onLegDragStart?.(legKey); } }}>
-                  {editMode && (
-                    <circle
-                      cx={(wp.x + tp.x) / 2} cy={(wp.y + tp.y) / 2}
-                      r={tickLengthPx * 0.55}
-                      fill={isSelected ? "rgba(249,115,22,0.18)" : "rgba(249,115,22,0.04)"}
-                      stroke={isSelected ? "#f97316" : "rgba(249,115,22,0.25)"}
-                      strokeWidth={isSelected ? "1.5" : "0.7"}
-                      strokeDasharray={isSelected ? "none" : "3,2"}
-                    />
-                  )}
-                  <line x1={wp.x} y1={wp.y} x2={tp.x} y2={tp.y}
-                    strokeWidth={isSelected ? "2.5" : "1.8"}
-                    stroke={isSelected ? "#f97316" : "#f8fafc"} />
-                  <text x={lp.x} y={lp.y}
-                    fontSize={svgPageUnitsPerFoot * 0.5} fontFamily="monospace"
-                    fontWeight="600" opacity="0.85" textAnchor="middle"
-                    dominantBaseline="middle" fill={isSelected ? "#f97316" : "#f8fafc"}>
-                    {localFrameTall}
-                  </text>
-                </g>
-              );
-            })}
-          </g>
-        );
-      })}
-    </g>
-  );
-}
-
-// ── Geometry helpers (unchanged) ─────────────────────────────────────────────
-
-function getPrimaryGeometryPoints(elevation: ProjectElevation | null) {
-  const geometry = elevation?.overlayGeometry;
-  if (!geometry) return [];
-  const keyFullOverlay = geometry.fullOverlayRows.find(row => row.isKeyFloor && row.points.length >= 3);
-  const firstFullOverlay = geometry.fullOverlayRows.find(row => row.points.length >= 3);
-  if (geometry.tracedPerimeter.length >= 3) return geometry.tracedPerimeter;
-  if (geometry.overlayPoints.length >= 3) return geometry.overlayPoints;
-  if (keyFullOverlay) return keyFullOverlay.points;
-  if (firstFullOverlay) return firstFullOverlay.points;
-  if (geometry.elevationPoints.length >= 3) return geometry.elevationPoints;
+function getPrimaryGeometryPoints(elev: ProjectElevation|null): PlanPoint[] {
+  const g=elev?.overlayGeometry; if(!g) return [];
+  if(g.tracedPerimeter.length>=3) return g.tracedPerimeter;
+  if(g.overlayPoints.length>=3) return g.overlayPoints;
+  const kf=g.fullOverlayRows.find(r=>r.isKeyFloor&&r.points.length>=3);
+  if(kf) return kf.points;
+  const ff=g.fullOverlayRows.find(r=>r.points.length>=3);
+  if(ff) return ff.points;
   return [];
 }
 
-function mapGeometryPoints(points: PlanPoint[], width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } {
-  const validPoints = points.filter(isFinitePoint);
-  if (validPoints.length < 2) return { points: [], svgScale: 1 };
-  const minX = Math.min(...validPoints.map(p => p.x));
-  const maxX = Math.max(...validPoints.map(p => p.x));
-  const minY = Math.min(...validPoints.map(p => p.y));
-  const maxY = Math.max(...validPoints.map(p => p.y));
-  const gW = Math.max(1, maxX - minX); const gH = Math.max(1, maxY - minY);
-  const svgScale = Math.min((width - padding * 2) / gW, (height - padding * 2) / gH);
-  const dW = gW * svgScale; const dH = gH * svgScale;
-  const oX = padding + (width - padding * 2 - dW) / 2;
-  const oY = padding + (height - padding * 2 - dH) / 2;
-  return {
-    points: validPoints.map(p => ({ x: oX + (p.x - minX) * svgScale, y: oY + (p.y - minY) * svgScale })),
-    svgScale,
-  };
+const FALLBACK_OUTLINE: PlanPoint[] = [
+  {x:160,y:120},{x:880,y:120},{x:880,y:300},{x:700,y:300},
+  {x:700,y:480},{x:880,y:480},{x:880,y:600},{x:160,y:600},
+];
+
+function computeLegs(outline: PlanPoint[], widthFt: number, bayFt: number, puf: number): {segIndex:number;legs:LegResult[]}[] {
+  const results: {segIndex:number;legs:LegResult[]}[] = [];
+  for (let i=0;i<outline.length;i++) {
+    const start=outline[i], end=outline[(i+1)%outline.length];
+    const dx=end.x-start.x, dy=end.y-start.y;
+    const segLen=Math.sqrt(dx*dx+dy*dy); if(segLen<=0||puf<=0||bayFt<=0) {results.push({segIndex:i,legs:[]});continue;}
+    const along={x:dx/segLen,y:dy/segLen};
+    const normal=computeOutwardNormal(start,end,outline);
+    const bayPx=bayFt*puf, wallGap=1*puf, tickLen=widthFt*puf, labelOff=wallGap+tickLen+puf*0.6;
+    const cornerOff=(widthFt+1)*puf;
+    const legs:LegResult[]=[]; let cursor=-cornerOff, limit=0;
+    legs.push(makeLeg(start,along,normal,cursor,wallGap,tickLen,labelOff,false,true,false));
+    cursor+=bayPx;
+    while(cursor<segLen-puf*0.1&&limit<500){if(cursor>=0)legs.push(makeLeg(start,along,normal,cursor,wallGap,tickLen,labelOff,false,false,false));cursor+=bayPx;limit++;}
+    results.push({segIndex:i,legs:legs.filter(l=>isFinitePoint(l.tickTip)&&!pointInPolygon(l.tickTip,outline))});
+  }
+  return results;
+}
+function makeLeg(start:PlanPoint,along:PlanPoint,normal:PlanPoint,dist:number,wg:number,tl:number,lo:number,mirror:boolean,isStart:boolean,isEnd:boolean):LegResult {
+  const wp={x:start.x+along.x*dist+normal.x*wg,y:start.y+along.y*dist+normal.y*wg};
+  const tp={x:start.x+along.x*dist+normal.x*(wg+tl),y:start.y+along.y*dist+normal.y*(wg+tl)};
+  const lp={x:start.x+along.x*dist+normal.x*lo,y:start.y+along.y*dist+normal.y*lo};
+  return {wallPoint:wp,tickTip:tp,labelPoint:lp,isTurnaroundMirror:mirror,isStartLeg:isStart,isEndLeg:isEnd};
 }
 
-function getScaledPrimaryOutline(elevation: ProjectElevation | null, width: number, height: number, padding: number): { points: PlanPoint[]; svgScale: number } | null {
-  const points = getPrimaryGeometryPoints(elevation);
-  const { points: mapped, svgScale } = mapGeometryPoints(points, width, height, padding);
-  return mapped.length >= 3 ? { points: mapped, svgScale } : null;
-}
+// ── Three.js Scaffold Model ───────────────────────────────────────────────────
+function ScaffoldModel3D({ bayCount, legCount, frameTall, scaffoldWidthFt }: { bayCount:number;legCount:number;frameTall:number;scaffoldWidthFt:number }) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer|null>(null);
+  const frameRef = useRef<number>(0);
+  const [rotating, setRotating] = useState(true);
+  const [snapshot, setSnapshot] = useState<string|null>(null);
 
-function getScaledOverlayRows(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
-  const geometry = elevation?.overlayGeometry;
-  const basePoints = getPrimaryGeometryPoints(elevation);
-  if (!geometry || basePoints.length < 2) return [];
-  const allRows = geometry.fullOverlayRows.filter(row => row.points.length >= 2);
-  const fallbackRows = allRows.length
-    ? allRows
-    : [{ id: 0, isKeyFloor: true, level: geometry.levelName, points: basePoints, closed: basePoints.length >= 3, color: "#2563eb" }];
-  const allPoints = fallbackRows.flatMap(row => row.points);
-  return fallbackRows.map((row, index) => ({
-    id: row.id ?? index, level: row.level, isKeyFloor: Boolean(row.isKeyFloor),
-    closed: Boolean(row.closed), color: row.color || (index === 0 ? "#2563eb" : "#22c55e"),
-    points: mapGeometryPoints(allPoints.length >= 2 ? row.points : basePoints, width, height, padding).points,
-  })).filter(row => row.points.length >= 2);
-}
+  useEffect(() => {
+    if (!mountRef.current) return;
+    const W = mountRef.current.clientWidth, H = mountRef.current.clientHeight;
 
-function getScaledReferencePoints(elevation: ProjectElevation | null, width: number, height: number, padding: number) {
-  const geometry = elevation?.overlayGeometry;
-  if (!geometry || geometry.referencePoints.length < 1) return [];
-  const basePoints = getPrimaryGeometryPoints(elevation);
-  const allPoints = [...basePoints, ...geometry.referencePoints];
-  const mappedAllPoints = mapGeometryPoints(allPoints, width, height, padding).points;
-  return mappedAllPoints.slice(basePoints.length);
-}
+    // Scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x080604);
+    scene.fog = new THREE.Fog(0x080604, 30, 80);
 
-function pointsToSvgPath(points: PlanPoint[], closed: boolean) {
-  if (points.length < 2) return "";
-  const [first, ...rest] = points;
-  return `M${first.x} ${first.y} ${rest.map(p => `L${p.x} ${p.y}`).join(" ")}${closed && points.length >= 3 ? " Z" : ""}`;
-}
+    // Camera
+    const camera = new THREE.PerspectiveCamera(45, W/H, 0.1, 200);
+    camera.position.set(20, 12, 20);
+    camera.lookAt(0, 4, 0);
 
-function StoredTakeoffOverlay({ rows, referencePoints }: {
-  rows: Array<{ id: number; level: string; isKeyFloor: boolean; closed: boolean; color: string; points: PlanPoint[] }>;
-  referencePoints: PlanPoint[];
-}) {
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(W, H);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    mountRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    // Lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambient);
+    const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
+    sun.position.set(15, 25, 10);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    scene.add(sun);
+    const fill = new THREE.DirectionalLight(0x8080ff, 0.3);
+    fill.position.set(-10, 5, -5);
+    scene.add(fill);
+    const orange = new THREE.PointLight(0xf97316, 0.6, 40);
+    orange.position.set(0, 8, 8);
+    scene.add(orange);
+
+    // Materials
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, metalness: 0.8, roughness: 0.3 });
+    const plankMat = new THREE.MeshStandardMaterial({ color: 0x8b6914, roughness: 0.9, metalness: 0.0 });
+    const braceMat = new THREE.MeshStandardMaterial({ color: 0xa0a0a0, metalness: 0.7, roughness: 0.4 });
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 1.0 });
+
+    // Dimensions
+    const BAY_W   = 2.0;   // bay width in scene units
+    const BAY_H   = 1.9;   // frame height
+    const SCAF_W  = scaffoldWidthFt * 0.5; // scaffold depth
+    const bays = Math.min(bayCount, 12);   // cap for performance
+    const jumps = Math.min(frameTall, 8);
+    const totalW = bays * BAY_W;
+
+    // Ground
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(totalW+10, 20), groundMat);
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Build scaffold
+    const group = new THREE.Group();
+
+    for (let j=0; j<=bays; j++) {
+      const x = j * BAY_W - totalW/2;
+      for (let k=0; k<jumps; k++) {
+        const y = k * BAY_H;
+        // Frame legs — two vertical tubes
+        const legGeo = new THREE.CylinderGeometry(0.04, 0.04, BAY_H, 6);
+        const leg1 = new THREE.Mesh(legGeo, frameMat); leg1.position.set(x, y+BAY_H/2, 0); leg1.castShadow=true; group.add(leg1);
+        const leg2 = new THREE.Mesh(legGeo, frameMat); leg2.position.set(x, y+BAY_H/2, SCAF_W); leg2.castShadow=true; group.add(leg2);
+        // Frame horizontal crossbar
+        const crossGeo = new THREE.CylinderGeometry(0.03, 0.03, SCAF_W, 6);
+        const cross = new THREE.Mesh(crossGeo, frameMat);
+        cross.rotation.x = Math.PI/2;
+        cross.position.set(x, y+BAY_H*0.65, SCAF_W/2);
+        cross.castShadow=true; group.add(cross);
+        // Screw jack at base
+        if (k===0) {
+          const jackGeo = new THREE.CylinderGeometry(0.05, 0.06, 0.3, 6);
+          const jack1 = new THREE.Mesh(jackGeo, frameMat); jack1.position.set(x, 0.15, 0); group.add(jack1);
+          const jack2 = new THREE.Mesh(jackGeo, frameMat); jack2.position.set(x, 0.15, SCAF_W); group.add(jack2);
+        }
+      }
+      // Cross braces between bays
+      if (j < bays) {
+        const x2 = (j+1) * BAY_W - totalW/2;
+        for (let k=0; k<jumps; k++) {
+          const y = k * BAY_H;
+          const braceLen = Math.sqrt(BAY_W**2 + BAY_H**2);
+          const braceGeo = new THREE.CylinderGeometry(0.025, 0.025, braceLen, 5);
+          const angle = Math.atan2(BAY_H, BAY_W);
+          // Front brace
+          const fb = new THREE.Mesh(braceGeo, braceMat);
+          fb.rotation.z = angle; fb.position.set((x+x2)/2, y+BAY_H/2, 0); group.add(fb);
+          // Back brace (reverse diagonal)
+          const bb = new THREE.Mesh(braceGeo, braceMat);
+          bb.rotation.z = -angle; bb.position.set((x+x2)/2, y+BAY_H/2, SCAF_W); group.add(bb);
+        }
+        // Planks on each level
+        for (let k=0; k<jumps; k++) {
+          const y = k * BAY_H;
+          const plankW = BAY_W - 0.1;
+          const plankGeo = new THREE.BoxGeometry(plankW, 0.04, SCAF_W * 0.9);
+          for (let p=0; p<3; p++) {
+            const plank = new THREE.Mesh(plankGeo, plankMat);
+            plank.position.set((x+x2)/2, y+BAY_H+0.02, SCAF_W*0.1 + p*(SCAF_W*0.8/2));
+            plank.castShadow=true; plank.receiveShadow=true; group.add(plank);
+          }
+          // Guardrail post
+          const grPostGeo = new THREE.CylinderGeometry(0.025, 0.025, 1.0, 5);
+          const grPost = new THREE.Mesh(grPostGeo, frameMat);
+          grPost.position.set((x+x2)/2, y+BAY_H+0.5, SCAF_W+0.05); group.add(grPost);
+          // Guardrail tube
+          const grGeo = new THREE.CylinderGeometry(0.02, 0.02, BAY_W, 5);
+          const gr = new THREE.Mesh(grGeo, frameMat);
+          gr.rotation.z = Math.PI/2; gr.position.set((x+x2)/2, y+BAY_H+0.9, SCAF_W+0.05); group.add(gr);
+        }
+        // Stair tower at start
+        if (j===0) {
+          const stairGeo = new THREE.BoxGeometry(0.8, jumps*BAY_H, 0.8);
+          const stairMat = new THREE.MeshStandardMaterial({ color:0x888888, metalness:0.6, roughness:0.4, transparent:true, opacity:0.7 });
+          const stair = new THREE.Mesh(stairGeo, stairMat);
+          stair.position.set(x-0.6, jumps*BAY_H/2, SCAF_W/2); group.add(stair);
+        }
+      }
+    }
+
+    scene.add(group);
+
+    // Grid helper
+    const grid = new THREE.GridHelper(40, 20, 0x1a1a1a, 0x1a1a1a);
+    grid.position.y = 0.01; scene.add(grid);
+
+    // Animate
+    let angle = 0;
+    let isRotating = rotating;
+    const radius = Math.max(totalW * 0.8, 18);
+
+    function animate() {
+      frameRef.current = requestAnimationFrame(animate);
+      if (isRotating) {
+        angle += 0.005;
+        camera.position.set(Math.sin(angle)*radius, radius*0.5, Math.cos(angle)*radius);
+        camera.lookAt(0, jumps*BAY_H*0.4, 0);
+      }
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Expose rotation toggle
+    (mountRef.current as any).__setRotating = (v: boolean) => { isRotating = v; };
+    (mountRef.current as any).__snapshot = () => renderer.domElement.toDataURL("image/png");
+
+    return () => {
+      cancelAnimationFrame(frameRef.current);
+      renderer.dispose();
+      if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
+      rendererRef.current = null;
+    };
+  }, [bayCount, frameTall, scaffoldWidthFt]);
+
+  useEffect(() => {
+    if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
+  }, [rotating]);
+
+  function takeSnapshot() {
+    const url = (mountRef.current as any).__snapshot?.();
+    if (url) setSnapshot(url);
+  }
+
   return (
-    <g>
-      {rows.map((row, index) => (
-        <g key={`${row.id}-${index}`}>
-          <path d={pointsToSvgPath(row.points, row.closed)} fill="transparent"
-            stroke={row.isKeyFloor ? "#2563eb" : row.color}
-            strokeWidth={row.isKeyFloor ? "0.9" : "0.6"} strokeLinejoin="miter"
-            opacity={row.isKeyFloor ? 1 : 0.9}
-          />
-          {row.points.map((point, pi) => (
-            <circle key={`${row.id}-pt-${pi}`} cx={point.x} cy={point.y} r="2"
-              fill={row.isKeyFloor ? "#60a5fa" : "#22c55e"} opacity="0.75" />
-          ))}
-        </g>
-      ))}
-      {referencePoints.map((point, i) => (
-        <g key={`ref-${i}`}>
-          <line x1={point.x - 5} y1={point.y} x2={point.x + 5} y2={point.y} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
-          <line x1={point.x} y1={point.y - 5} x2={point.x} y2={point.y + 5} stroke="#f97316" strokeWidth="0.7" opacity="0.8" />
-        </g>
-      ))}
-    </g>
-  );
-}
-
-function CompassLabels({ viewBox }: { viewBox: { x: number; y: number; w: number; h: number } }) {
-  const style = { fontSize: String(viewBox.w * 0.012), fontFamily: "monospace", fontWeight: "700", fill: "#f97316", opacity: "0.55" };
-  const cx = viewBox.x + viewBox.w / 2;
-  const cy = viewBox.y + viewBox.h / 2;
-  const pad = viewBox.w * 0.025;
-  return (
-    <g>
-      <text x={cx} y={viewBox.y + pad} textAnchor="middle" {...style}>N</text>
-      <text x={cx} y={viewBox.y + viewBox.h - pad * 0.3} textAnchor="middle" {...style}>S</text>
-      <text x={viewBox.x + pad * 0.5} y={cy} textAnchor="middle" {...style}>W</text>
-      <text x={viewBox.x + viewBox.w - pad * 0.5} y={cy} textAnchor="middle" {...style}>E</text>
-    </g>
-  );
-}
-
-function GridAxisLabels({ viewBox, pageUnitsPerFoot }: { viewBox: { x: number; y: number; w: number; h: number }; pageUnitsPerFoot: number }) {
-  // Draw tick marks every 5' along the edges of the viewBox
-  const fiveFootPx = pageUnitsPerFoot * 5;
-  const fontSize = Math.max(6, Math.min(11, viewBox.w * 0.009));
-
-  // How many 5' increments fit across the building
-  const xCount = Math.ceil(viewBox.w / fiveFootPx) + 1;
-  const yCount = Math.ceil(viewBox.h / fiveFootPx) + 1;
-
-  // Start labels from the building's real-world 0,0 origin (viewBox.x)
-  const xLabels = Array.from({ length: Math.min(xCount, 30) }, (_, i) => i);
-  const yLabels = Array.from({ length: Math.min(yCount, 20) }, (_, i) => i);
-
-  const tickLen = viewBox.w * 0.008;
-  const labelOffX = viewBox.x + viewBox.w * 0.015;
-  const labelOffY = viewBox.y + viewBox.h * 0.04;
-
-  return (
-    <g opacity="0.4">
-      {xLabels.map((i) => {
-        const x = viewBox.x + i * fiveFootPx;
-        if (x > viewBox.x + viewBox.w) return null;
-        return (
-          <g key={`x-${i}`}>
-            <text x={x} y={viewBox.y + tickLen * 2.5} fill="#a1a1aa" fontSize={fontSize} fontFamily="monospace" textAnchor="middle">
-              {i * 5}'
-            </text>
-            <line x1={x} y1={viewBox.y + tickLen} x2={x} y2={viewBox.y + tickLen * 2} stroke="#a1a1aa" strokeWidth={viewBox.w * 0.0005} />
-          </g>
-        );
-      })}
-      {yLabels.map((i) => {
-        const y = viewBox.y + i * fiveFootPx;
-        if (y > viewBox.y + viewBox.h) return null;
-        return (
-          <g key={`y-${i}`}>
-            <text x={viewBox.x + tickLen * 2.5} y={y} fill="#a1a1aa" fontSize={fontSize} fontFamily="monospace" textAnchor="middle" dominantBaseline="middle">
-              {i * 5}'
-            </text>
-            <line x1={viewBox.x + tickLen} y1={y} x2={viewBox.x + tickLen * 2} y2={y} stroke="#a1a1aa" strokeWidth={viewBox.w * 0.0005} />
-          </g>
-        );
-      })}
-    </g>
-  );
-}
-
-function Panel({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-4 rounded-[1.6rem] border border-zinc-800 bg-korban-raised p-4 shadow-2xl last:mb-0">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-xs font-black uppercase tracking-[0.24em] text-orange-400">{title}</h2>
-          {subtitle && <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>}
-        </div>
-        <span className="h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.55)]" />
+    <div className="flex flex-col h-full">
+      <div ref={mountRef} className="flex-1 relative overflow-hidden rounded-lg" />
+      <div className="flex items-center gap-2 px-2 py-2 bg-[#0b0b0b] border-t border-zinc-900">
+        <button onClick={() => setRotating(r => !r)}
+          className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${rotating ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
+          {rotating ? "⏸ Pause" : "▶ Rotate"}
+        </button>
+        <button onClick={takeSnapshot}
+          className="rounded-lg border border-zinc-700 px-2 py-1.5 text-[9px] font-bold text-zinc-400 hover:border-orange-500/30 hover:text-orange-300">
+          📷 Snap
+        </button>
+        {snapshot && (
+          <a href={snapshot} download="scaffold-view.png"
+            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[9px] font-bold text-emerald-300">
+            ⬇ Save
+          </a>
+        )}
       </div>
-      <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-function ControlLabel({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="mb-3 block last:mb-0">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-600">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function QuantityRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="font-mono text-xs font-bold text-zinc-200">{value}</span>
+      {/* Stats below 3D */}
+      <div className="grid grid-cols-2 gap-1 p-2 bg-[#0b0b0b]">
+        <StatCell label="Bays" value={bayCount} />
+        <StatCell label="Jumps" value={frameTall} />
+      </div>
     </div>
   );
 }
 
-function StatusPill({ label, value, active, onClick }: { label: string; value?: string; active?: boolean; onClick?: () => void }) {
+function StatCell({ label, value }: { label: string; value: number }) {
   return (
-    <button onClick={onClick} className={`rounded-2xl border px-4 py-2 text-xs font-bold ${
-      active === undefined ? "border-zinc-800 bg-black/80 text-zinc-300"
-        : active ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
-        : "border-zinc-800 bg-black/80 text-zinc-500"
-    }`}>
-      {label}
-      {value && <span className="ml-2 font-mono text-orange-300">{value}</span>}
-    </button>
+    <div className="rounded-lg border border-zinc-900 bg-black p-2 text-center">
+      <p className="text-[8px] uppercase tracking-wider text-zinc-600">{label}</p>
+      <p className="font-mono text-sm font-bold text-orange-300">{value}</p>
+    </div>
   );
 }
 
-function ViewerTool({ label, primary = false }: { label: string; primary?: boolean }) {
+// ── Section View mini viewer ──────────────────────────────────────────────────
+function SectionViewPanel({ frameMakeup, sectionType, wallOffset, frameCount, frameTall, scaffoldWidthFt, editMode }: {
+  frameMakeup:string; sectionType:string; wallOffset:number;
+  frameCount:number; frameTall:number; scaffoldWidthFt:number; editMode:boolean;
+}) {
+  const FRAME_H = 6.333, frameHPx = 18, widthPx = 30, totalH = frameTall * frameHPx;
   return (
-    <KorbanButton variant={primary ? "primary" : "ghost"} className="px-3 py-2 text-[10px]">
-      {label}
-    </KorbanButton>
+    <div className="flex flex-col h-full">
+      <div className="flex-1 flex items-center justify-center bg-zinc-950 p-3">
+        <svg width="100%" viewBox={`-20 -10 120 ${totalH + 60}`} className="max-h-full">
+          {/* Wall */}
+          <rect x="-15" y="-5" width="8" height={totalH + 10} fill="#27272a" stroke="#3f3f46" strokeWidth="0.5" />
+          <text x="-11" y={totalH/2} textAnchor="middle" fontSize="4" fill="#71717a" fontFamily="monospace" dominantBaseline="middle" transform={`rotate(-90,-11,${totalH/2})`}>WALL</text>
+          {/* Wall offset dimension */}
+          <line x1="-7" y1={totalH} x2={wallOffset*8} y2={totalH} stroke="#f97316" strokeWidth="0.5" strokeDasharray="2,2" />
+          <text x={(wallOffset*8-7)/2} y={totalH+7} textAnchor="middle" fontSize="3.5" fill="#f97316" fontFamily="monospace">{wallOffset}'</text>
+          {/* Scaffold frames per jump */}
+          {Array.from({length: frameTall}).map((_,i) => (
+            <g key={i}>
+              {/* Left leg */}
+              <rect x={wallOffset*8} y={i*frameHPx} width="2" height={frameHPx} fill="#9ca3af" stroke="#6b7280" strokeWidth="0.3" />
+              {/* Right leg */}
+              <rect x={wallOffset*8+widthPx-2} y={i*frameHPx} width="2" height={frameHPx} fill="#9ca3af" stroke="#6b7280" strokeWidth="0.3" />
+              {/* Crossbar */}
+              <rect x={wallOffset*8} y={i*frameHPx + frameHPx*0.6} width={widthPx} height="1.5" fill="#d1d5db" stroke="#6b7280" strokeWidth="0.2" />
+              {/* Planks on top of each jump */}
+              {[0,1,2].map(p => (
+                <rect key={p} x={wallOffset*8 + p*(widthPx/3.2)} y={i*frameHPx + frameHPx - 1.5}
+                  width={widthPx/3.5} height="1.5" fill="#92400e" stroke="#78350f" strokeWidth="0.2" />
+              ))}
+              {/* Jump height label */}
+              <text x={wallOffset*8+widthPx+3} y={i*frameHPx + frameHPx/2} fontSize="3" fill="#71717a" fontFamily="monospace" dominantBaseline="middle">
+                {FRAME_H.toFixed(2)}'
+              </text>
+            </g>
+          ))}
+          {/* Guardrail */}
+          <rect x={wallOffset*8+widthPx-1} y={-8} width="1.5" height="8" fill="#9ca3af" />
+          <rect x={wallOffset*8} y={-7} width={widthPx} height="1" fill="#9ca3af" />
+          {/* Base plates */}
+          <rect x={wallOffset*8-1} y={totalH} width="4" height="2" fill="#4b5563" />
+          <rect x={wallOffset*8+widthPx-3} y={totalH} width="4" height="2" fill="#4b5563" />
+          {/* Ground line */}
+          <line x1="-20" y1={totalH+2} x2="110" y2={totalH+2} stroke="#374151" strokeWidth="0.8" />
+          {/* Section cut line */}
+          <line x1="90" y1="-10" x2="90" y2={totalH+20} stroke="#f97316" strokeWidth="0.5" strokeDasharray="3,2" opacity="0.6" />
+          <text x="92" y="-5" fontSize="4" fill="#f97316" fontFamily="monospace" fontWeight="bold">{sectionType}</text>
+          {/* Width dimension */}
+          <line x1={wallOffset*8} y1={totalH+12} x2={wallOffset*8+widthPx} y2={totalH+12} stroke="#2563eb" strokeWidth="0.5" />
+          <text x={wallOffset*8+widthPx/2} y={totalH+18} textAnchor="middle" fontSize="3.5" fill="#2563eb" fontFamily="monospace">{scaffoldWidthFt}'</text>
+        </svg>
+      </div>
+      {/* Frame makeup */}
+      {frameMakeup && (
+        <div className="px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900">
+          <p className="text-[8px] uppercase tracking-wider text-zinc-600 mb-1">Frame Makeup</p>
+          <p className="text-[9px] font-mono text-orange-300 leading-relaxed">{frameMakeup}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+export default function SetScaffoldV2Page() {
+  const [scaffoldWidth,   setScaffoldWidth]   = useState<ScaffoldWidth>("3'");
+  const [plankType,       setPlankType]       = useState<PlankType>("Wood");
+  const [standardBayLen,  setStandardBayLen]  = useState("10'");
+  const [showOverlay,     setShowOverlay]     = useState(true);
+  const [showScaffold,    setShowScaffold]    = useState(true);
+  const [editMode,        setEditMode]        = useState(false);
+  const [selectedLegKey,  setSelectedLegKey]  = useState<string|null>(null);
+  const [deletedLegKeys,  setDeletedLegKeys]  = useState<Set<string>>(new Set());
+  const [overriddenFC,    setOverriddenFC]    = useState<Record<string,number>>({});
+  const [draggedLegKey,   setDraggedLegKey]   = useState<string|null>(null);
+  const [legOffsets,      setLegOffsets]      = useState<Record<string,{dx:number;dy:number}>>({});
+  const [viewerZoom,      setViewerZoom]      = useState(1);
+  const [elevation,       setElevation]       = useState<ProjectElevation|null>(null);
+  const [projectName,     setProjectName]     = useState(projectInfo.projectName);
+  const [mounted,         setMounted]         = useState(false);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const frameHeight      = 6 + 4/12;
+  const workerReachHeight = getBackendSettings().scaffold.workerReachHeight ?? 6;
+  const frameTall        = elevation?.quantityEngine.frameTall ?? 7;
+  const scaffoldWidthFt  = parseFeetValue(scaffoldWidth);
+  const bayLengthFt      = parseFeetValue(standardBayLen) || 10;
+  const plankCountPerBay = scaffoldWidth==="5'"?6:scaffoldWidth==="3'-6\""?4:3;
+
+  const isAerial = elevation?.overlayGeometry?.fullOverlayRows?.some(r=>(r as any).overlayType==="Aerial")??false;
+  const puf      = elevation?.scale?.pageUnitsPerFoot ?? (isAerial ? 4 : null);
+  const scaleOk  = (puf != null && puf > 0) || isAerial;
+  const effPuf   = puf ?? 4;
+
+  const rawPoints = useMemo(() => getPrimaryGeometryPoints(elevation), [elevation]);
+  const outline   = rawPoints.length >= 3 ? rawPoints : FALLBACK_OUTLINE;
+  const isFallback = rawPoints.length < 3;
+
+  const rawOverlayRows = useMemo(() => {
+    const g = elevation?.overlayGeometry; if (!g) return [];
+    return g.fullOverlayRows.filter(r=>r.points.length>=2).map((r,i)=>({
+      id:r.id??i, level:r.level, isKeyFloor:Boolean(r.isKeyFloor), closed:Boolean(r.closed),
+      color:r.color||(i===0?"#2563eb":"#22c55e"), points:r.points.filter(isFinitePoint),
+    })).filter(r=>r.points.length>=2);
+  }, [elevation]);
+
+  const rawRefPts = useMemo(()=>elevation?.overlayGeometry?.referencePoints?.filter(isFinitePoint)??[],[elevation]);
+
+  const svgViewBox = useMemo(()=>{
+    const pts=outline.filter(isFinitePoint); if(pts.length<2) return {x:0,y:0,w:1200,h:720};
+    const minX=pts.reduce((m,p)=>p.x<m?p.x:m,Infinity), maxX=pts.reduce((m,p)=>p.x>m?p.x:m,-Infinity);
+    const minY=pts.reduce((m,p)=>p.y<m?p.y:m,Infinity), maxY=pts.reduce((m,p)=>p.y>m?p.y:m,-Infinity);
+    const pad=effPuf*8; return {x:minX-pad,y:minY-pad,w:(maxX-minX)+pad*2,h:(maxY-minY)+pad*2};
+  },[outline,effPuf]);
+
+  const allSegmentLegs = useMemo(()=>{
+    if(!scaleOk||!outline.length||effPuf<=0||bayLengthFt<=0) return [];
+    return computeLegs(outline,scaffoldWidthFt,bayLengthFt,effPuf);
+  },[outline,scaffoldWidthFt,bayLengthFt,scaleOk,effPuf]);
+
+  const totals = useMemo(()=>{
+    let legs=0,bays=0,frames=0;
+    for(const seg of allSegmentLegs){
+      const sl=seg.legs.filter(l=>!l.isTurnaroundMirror);
+      const active=sl.filter((_,i)=>!deletedLegKeys.has(`${seg.segIndex}-${i}`));
+      legs+=active.length; if(active.length>1) bays+=active.length-1;
+      active.forEach((_,i)=>{const k=`${seg.segIndex}-${i}`;frames+=overriddenFC[k]??frameTall;});
+    }
+    return {legs,bays,frames,planks:bays*plankCountPerBay,braces:Math.max(0,bays-outline.length)};
+  },[allSegmentLegs,frameTall,plankCountPerBay,outline.length,deletedLegKeys,overriddenFC]);
+
+  useEffect(()=>{
+    function load(){
+      try{
+        const e=getActiveElevation(),p=getActiveProject();
+        setElevation(e); setProjectName(p.projectName||projectInfo.projectName);
+        setScaffoldWidth(e.scaffoldInput.scaffoldWidth>=5?"5'":e.scaffoldInput.scaffoldWidth>=3.5?"3'-6\"":"3'");
+        setStandardBayLen(`${e.scaffoldInput.standardBayLength}'`);
+      }catch{}
+      setMounted(true);
+    }
+    load();
+    window.addEventListener("focus",load); window.addEventListener("pageshow",load);
+    return()=>{window.removeEventListener("focus",load);window.removeEventListener("pageshow",load);};
+  },[]);
+
+  function saveInput(updates:Partial<ScaffoldInput>){
+    const cur=elevation??getActiveElevation();
+    const si={...cur.scaffoldInput,...updates};
+    const qe=calculateQuantityEngine({linearFeet:cur.linearFeet,wallHeight:cur.wallHeight,...si,workerReachHeight});
+    const next={...cur,scaffoldInput:si,quantityEngine:qe,sectionView:{...cur.sectionView,wallOffset:si.wallOffset}};
+    setElevation(next); saveActiveElevation(next);
+  }
+
+  return (
+    <main className="h-screen flex flex-col overflow-hidden bg-[#080604] text-white">
+      <KorbanHeader
+        title="Set Scaffold"
+        subtitle="Overlay · 3D Model · Section View"
+        menuLinks={scaffoldMenuLinks}
+        actionsAlwaysVisible
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={projectName} />
+            <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
+            <KorbanButton as="a" href="/takeoff-workspace-advanced" variant="ghost">← Takeoff</KorbanButton>
+            <KorbanButton as="a" href="/frame-configuration" variant="primary">Frame Config →</KorbanButton>
+          </>
+        }
+      />
+
+      {/* Three-panel layout */}
+      <div className="flex flex-1 overflow-hidden gap-0">
+
+        {/* ── Panel 1 — 75% — Floor Plan Overlay ──────────────────────── */}
+        <section className="flex flex-col border-r border-zinc-900" style={{width:"55%"}}>
+          <div className="flex items-center justify-between border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Floor Plan · Scaffold Layout</p>
+            <div className="flex items-center gap-1.5">
+              <button onClick={()=>setShowOverlay(c=>!c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay?"border-blue-500/40 bg-blue-500/10 text-blue-300":"border-zinc-800 text-zinc-600"}`}>Overlay</button>
+              <button onClick={()=>setShowScaffold(c=>!c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600"}`}>Scaffold</button>
+              <button onClick={()=>setEditMode(m=>!m)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode?"border-orange-500 bg-orange-500 text-black":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode?"✓ Edit":"Edit Bay"}</button>
+              <button onClick={()=>setViewerZoom(z=>Math.min(3,z+0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
+              <button onClick={()=>setViewerZoom(z=>Math.max(0.3,z-0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
+            </div>
+          </div>
+
+          {/* SVG canvas */}
+          <div className="flex-1 relative overflow-hidden bg-black">
+            {mounted && !scaleOk && (
+              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
+                <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 p-8 text-center">
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-yellow-300">⚠ Scale Not Set</p>
+                  <p className="mt-2 text-xs text-zinc-500 max-w-xs">Set scale in Takeoff Workspace before generating scaffold layout.</p>
+                  <a href="/takeoff-workspace-advanced" className="mt-4 inline-block rounded-xl bg-yellow-400 px-5 py-2 text-xs font-bold text-black">Go to Takeoff Workspace →</a>
+                </div>
+              </div>
+            )}
+            <div className="absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
+            <svg ref={svgRef} className="h-full w-full"
+              viewBox={`${svgViewBox.x+(svgViewBox.w*(1-1/viewerZoom))/2} ${svgViewBox.y+(svgViewBox.h*(1-1/viewerZoom))/2} ${svgViewBox.w/viewerZoom} ${svgViewBox.h/viewerZoom}`}
+              onMouseMove={e=>{
+                if(!draggedLegKey||!svgRef.current) return;
+                const rect=svgRef.current.getBoundingClientRect(), vb=svgRef.current.viewBox.baseVal;
+                const sx=vb.width/rect.width, sy=vb.height/rect.height;
+                setLegOffsets(p=>({...p,[draggedLegKey]:{dx:(p[draggedLegKey]?.dx??0)+e.movementX*sx,dy:(p[draggedLegKey]?.dy??0)+e.movementY*sy}}));
+              }}
+              onMouseUp={()=>setDraggedLegKey(null)} onMouseLeave={()=>setDraggedLegKey(null)}>
+
+              {/* Overlay */}
+              {showOverlay && (rawOverlayRows.length ? (
+                <g>
+                  {rawOverlayRows.map((r,i)=>(
+                    <g key={i}>
+                      <path d={`M${r.points[0]?.x} ${r.points[0]?.y} ${r.points.slice(1).map(p=>`L${p.x} ${p.y}`).join(" ")}${r.closed?" Z":""}`}
+                        fill="transparent" stroke={r.isKeyFloor?"#2563eb":r.color} strokeWidth={r.isKeyFloor?"0.9":"0.6"} />
+                    </g>
+                  ))}
+                  {rawRefPts.map((p,i)=>(
+                    <g key={i}>
+                      <line x1={p.x-5} y1={p.y} x2={p.x+5} y2={p.y} stroke="#f97316" strokeWidth="0.7" />
+                      <line x1={p.x} y1={p.y-5} x2={p.x} y2={p.y+5} stroke="#f97316" strokeWidth="0.7" />
+                    </g>
+                  ))}
+                </g>
+              ) : (
+                <g>
+                  <path d="M160 120 L880 120 L880 300 L700 300 L700 480 L880 480 L880 600 L160 600 Z"
+                    fill="rgba(37,99,235,0.06)" stroke="#2563eb" strokeWidth="1.2" />
+                  <path d="M172 132 L868 132 L868 312 L712 312 L712 468 L868 468 L868 588 L172 588 Z"
+                    fill="transparent" stroke="#22c55e" strokeWidth="0.8" opacity="0.8" />
+                </g>
+              ))}
+
+              {/* Scaffold ticks */}
+              {showScaffold && scaleOk && (
+                <g fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
+                  {allSegmentLegs.map(({segIndex,legs})=>{
+                    const segStart=outline[segIndex], segEnd=outline[(segIndex+1)%outline.length];
+                    if(!segStart||!segEnd) return null;
+                    const normal=computeOutwardNormal(segStart,segEnd,outline);
+                    const dx=segEnd.x-segStart.x, dy=segEnd.y-segStart.y, len=Math.sqrt(dx*dx+dy*dy);
+                    const wg=1*effPuf, tl=scaffoldWidthFt*effPuf;
+                    const sl=legs.filter(l=>!l.isTurnaroundMirror);
+                    return (
+                      <g key={`seg-${segIndex}`}>
+                        {sl.filter(l=>!l.isStartLeg).slice(0,-1).map((leg,i)=>{
+                          const next=sl.filter(l=>!l.isStartLeg)[i+1]; if(!next) return null;
+                          const o1=legOffsets[`${segIndex}-${i}`]??{dx:0,dy:0};
+                          const o2=legOffsets[`${segIndex}-${i+1}`]??{dx:0,dy:0};
+                          const cx=(leg.wallPoint.x+o1.dx+next.wallPoint.x+o2.dx)/2;
+                          const cy=(leg.wallPoint.y+o1.dy+next.wallPoint.y+o2.dy)/2;
+                          const bp=Math.sqrt((next.wallPoint.x-leg.wallPoint.x)**2+(next.wallPoint.y-leg.wallPoint.y)**2);
+                          const hb=bp*0.3, al=len>0?{x:dx/len,y:dy/len}:{x:1,y:0};
+                          return <line key={i} x1={cx-al.x*hb+normal.x*wg*0.5} y1={cy-al.y*hb+normal.y*wg*0.5} x2={cx+al.x*hb+normal.x*(wg+tl)*0.9} y2={cy+al.y*hb+normal.y*(wg+tl)*0.9} strokeWidth="0.7" opacity="0.55" />;
+                        })}
+                        {sl.filter(l=>!pointInPolygon(l.tickTip,outline)).map((leg,i)=>{
+                          const k=`${segIndex}-${i}`; if(deletedLegKeys.has(k)) return null;
+                          if(!isFiniteNumber(leg.wallPoint.x)) return null;
+                          const sel=selectedLegKey===k, fc=overriddenFC[k]??frameTall;
+                          const off=legOffsets[k]??{dx:0,dy:0};
+                          const wp={x:leg.wallPoint.x+off.dx,y:leg.wallPoint.y+off.dy};
+                          const tp={x:leg.tickTip.x+off.dx,y:leg.tickTip.y+off.dy};
+                          const lp={x:leg.labelPoint.x+off.dx,y:leg.labelPoint.y+off.dy};
+                          return (
+                            <g key={k} style={{cursor:editMode?(sel?"grab":"pointer"):"default"}}
+                              onClick={()=>{if(editMode)setSelectedLegKey(p=>p===k?null:k);}}
+                              onMouseDown={e=>{if(editMode){e.preventDefault();setDraggedLegKey(k);setSelectedLegKey(k);}}}>
+                              {editMode&&<circle cx={(wp.x+tp.x)/2} cy={(wp.y+tp.y)/2} r={tl*0.55} fill={sel?"rgba(249,115,22,0.18)":"rgba(249,115,22,0.04)"} stroke={sel?"#f97316":"rgba(249,115,22,0.25)"} strokeWidth={sel?"1.5":"0.7"} strokeDasharray={sel?"none":"3,2"} />}
+                              <line x1={wp.x} y1={wp.y} x2={tp.x} y2={tp.y} strokeWidth={sel?"2.5":"1.8"} stroke={sel?"#f97316":"#f8fafc"} />
+                              <text x={lp.x} y={lp.y} fontSize={effPuf*0.5} fontFamily="monospace" fontWeight="600" opacity="0.85" textAnchor="middle" dominantBaseline="middle" fill={sel?"#f97316":"#f8fafc"}>{fc}</text>
+                            </g>
+                          );
+                        })}
+                      </g>
+                    );
+                  })}
+                </g>
+              )}
+
+              {/* Edit popup */}
+              {editMode&&selectedLegKey&&(()=>{
+                const [si,li]=selectedLegKey.split("-").map(Number);
+                const seg=allSegmentLegs.find(s=>s.segIndex===si);
+                const legs=seg?.legs.filter(l=>!l.isTurnaroundMirror)??[];
+                const leg=legs[li]; if(!leg) return null;
+                const off=legOffsets[selectedLegKey]??{dx:0,dy:0};
+                const cx=leg.tickTip.x+off.dx, cy=leg.tickTip.y+off.dy-18;
+                const fc=overriddenFC[selectedLegKey]??frameTall;
+                return (
+                  <g>
+                    <rect x={cx-54} y={cy-14} width={108} height={28} rx={6} fill="#18181b" stroke="#f97316" strokeWidth="1" opacity="0.97"/>
+                    <text x={cx-48} y={cy+5} fontSize="8" fill="#f97316" fontFamily="monospace" fontWeight="bold">Frames: {fc}</text>
+                    <rect x={cx+14} y={cy-10} width={16} height={16} rx={3} fill="#f97316" style={{cursor:"pointer"}} onClick={()=>setOverriddenFC(p=>({...p,[selectedLegKey]:Math.max(1,(p[selectedLegKey]??frameTall)-1)}))}/>
+                    <text x={cx+22} y={cy+4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{pointerEvents:"none"}}>−</text>
+                    <rect x={cx+32} y={cy-10} width={16} height={16} rx={3} fill="#f97316" style={{cursor:"pointer"}} onClick={()=>setOverriddenFC(p=>({...p,[selectedLegKey]:(p[selectedLegKey]??frameTall)+1}))}/>
+                    <text x={cx+40} y={cy+4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{pointerEvents:"none"}}>+</text>
+                    <rect x={cx-54} y={cy+16} width={108} height={16} rx={4} fill="#ef4444" opacity="0.85" style={{cursor:"pointer"}}
+                      onClick={()=>{setDeletedLegKeys(p=>{const n=new Set(p);n.add(selectedLegKey);return n;});setSelectedLegKey(null);}}/>
+                    <text x={cx} y={cy+28} fontSize="7.5" fill="white" textAnchor="middle" fontWeight="bold" style={{pointerEvents:"none"}}>DELETE TICK</text>
+                  </g>
+                );
+              })()}
+            </svg>
+          </div>
+
+          {/* Quantities below panel 1 */}
+          <div className="border-t border-zinc-900 bg-[#0b0b0b] px-4 py-3 grid grid-cols-5 gap-3">
+            {[["Frames",totals.frames],["Planks",totals.planks],["Bays",totals.bays],["Legs",totals.legs],["Braces",totals.braces]].map(([l,v])=>(
+              <div key={l} className="text-center">
+                <p className="text-[9px] uppercase tracking-wider text-zinc-600">{l}</p>
+                <p className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ── Panel 2 — 20% — 3D Model ───────────────────────────────── */}
+        <section className="flex flex-col border-r border-zinc-900" style={{width:"25%"}}>
+          <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            {mounted && (
+              <ScaffoldModel3D
+                bayCount={totals.bays||63}
+                legCount={totals.legs||64}
+                frameTall={frameTall}
+                scaffoldWidthFt={scaffoldWidthFt}
+              />
+            )}
+          </div>
+        </section>
+
+        {/* ── Panel 3 — Section View + right sidebar ──────────────────── */}
+        <section className="flex flex-col" style={{width:"20%"}}>
+          <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <SectionViewPanel
+              frameMakeup={elevation?.sectionView?.frameMakeup??""}
+              sectionType={elevation?.sectionView?.sectionType??"A-A"}
+              wallOffset={elevation?.sectionView?.wallOffset??1}
+              frameCount={totals.frames}
+              frameTall={frameTall}
+              scaffoldWidthFt={scaffoldWidthFt}
+              editMode={editMode}
+            />
+          </div>
+          {/* Frame config quick inputs */}
+          <div className="border-t border-zinc-900 bg-[#0b0b0b] p-3 space-y-2">
+            <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-500">Scaffold Config</p>
+            <label className="block">
+              <span className="text-[9px] text-zinc-600">Width</span>
+              <select value={scaffoldWidth} onChange={e=>{setScaffoldWidth(e.target.value as ScaffoldWidth);saveInput({scaffoldWidth:parseFeetValue(e.target.value)});}}
+                className="w-full mt-0.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none">
+                <option>3'</option><option>3'-6"</option><option>5'</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[9px] text-zinc-600">Bay Length</span>
+              <input value={standardBayLen} onChange={e=>{setStandardBayLen(e.target.value);saveInput({standardBayLength:parseFeetValue(e.target.value)||10});}}
+                className="w-full mt-0.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none" />
+            </label>
+            <a href="/frame-configuration"
+              className="block w-full rounded-xl bg-orange-500 px-3 py-2 text-center text-xs font-bold text-black hover:bg-orange-400 mt-2">
+              Frame Config →
+            </a>
+          </div>
+        </section>
+      </div>
+    </main>
   );
 }
