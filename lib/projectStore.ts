@@ -84,6 +84,20 @@ export type StoredElevationBreakdownRow = {
   approxLinearFeet: number;
 };
 
+/**
+ * A single hand-placed frame or bracket added on top of the auto-drawn
+ * Section View, for cases where Korban didn't (or couldn't) correctly
+ * assess/apply scaffold against the traced wall outline. Adding one of
+ * these updates the live material counts automatically.
+ */
+export type SectionDraftingItem = {
+  id: string;
+  kind: "frame" | "bracket";
+  variant: string;
+  /** 0-indexed level this piece sits at (0 = ground level). */
+  level: number;
+};
+
 export type TakeoffOverlayGeometry = {
   elevationName: string;
   levelName: string;
@@ -115,6 +129,23 @@ export type ProjectElevation = {
     selectedRun: string;
     wallOffset: number;
     sectionType: string;
+    /**
+     * Traced wall outline points from the Takeoff Workspace's Section
+     * View tab, in raw page/image coordinates (same space as
+     * overlayGeometry points). Converted to feet at render time using
+     * scale.pageUnitsPerFoot. Empty until the estimator traces a wall.
+     */
+    wallOutline: StoredPoint[];
+    /**
+     * Which side of the traced wall outline the scaffold sits on.
+     * Chosen via the toggle that appears once a wall outline exists.
+     */
+    scaffoldSide: "left" | "right";
+    /**
+     * Hand-placed frames/brackets added on top of the auto-drawn
+     * section (see SectionDraftingItem). Feeds material counts.
+     */
+    draftingAdditions: SectionDraftingItem[];
   };
   /**
    * Optional manual elevation breakdown (see StoredElevationBreakdownRow).
@@ -268,6 +299,23 @@ function normalizeElevationBreakdown(value: unknown): StoredElevationBreakdownRo
     .filter((row): row is StoredElevationBreakdownRow => Boolean(row));
 }
 
+function normalizeSectionDraftingItem(value: unknown): SectionDraftingItem | null {
+  if (!isRecord(value)) return null;
+  const kind: "frame" | "bracket" = value.kind === "bracket" ? "bracket" : "frame";
+  return {
+    id: asString(value.id, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+    kind,
+    variant: asString(value.variant, kind === "frame" ? "Standard" : "24\""),
+    level: Math.max(0, Math.round(asNumber(value.level, 0))),
+  };
+}
+
+function normalizeSectionDraftingItems(value: unknown): SectionDraftingItem[] {
+  return asArray<unknown>(value)
+    .map(normalizeSectionDraftingItem)
+    .filter((row): row is SectionDraftingItem => Boolean(row));
+}
+
 function normalizeOverlayGeometry(
   value: unknown,
   fallbackElevationName: string,
@@ -372,6 +420,9 @@ function createDemoElevation(): ProjectElevation {
       selectedRun: "Run N-01",
       wallOffset: defaultScaffoldInput.wallOffset,
       sectionType: "A-A",
+      wallOutline: [],
+      scaffoldSide: "left",
+      draftingAdditions: [],
     },
     elevationBreakdown: [],
   };
@@ -450,6 +501,9 @@ function normalizeElevation(value: unknown): ProjectElevation {
       selectedRun: asString(sectionRecord.selectedRun, fallback.sectionView.selectedRun),
       wallOffset: asNumber(sectionRecord.wallOffset, scaffoldInput.wallOffset),
       sectionType: asString(sectionRecord.sectionType, fallback.sectionView.sectionType),
+      wallOutline: normalizePoints(sectionRecord.wallOutline),
+      scaffoldSide: sectionRecord.scaffoldSide === "right" ? "right" : "left",
+      draftingAdditions: normalizeSectionDraftingItems(sectionRecord.draftingAdditions),
     },
     elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
   };
@@ -634,6 +688,19 @@ export function saveElevationBreakdown(rows: StoredElevationBreakdownRow[]) {
   saveActiveElevation({
     ...current,
     elevationBreakdown: rows,
+  });
+}
+
+/**
+ * Saves a partial update to just the active elevation's sectionView
+ * block (e.g. scaffoldSide toggle, draftingAdditions) without touching
+ * linearFeet, quantityEngine, or overlay geometry.
+ */
+export function saveSectionView(updates: Partial<ProjectElevation["sectionView"]>) {
+  const current = getActiveElevation();
+  saveActiveElevation({
+    ...current,
+    sectionView: { ...current.sectionView, ...updates },
   });
 }
 
