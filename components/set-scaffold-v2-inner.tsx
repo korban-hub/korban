@@ -793,8 +793,8 @@ export default function SetScaffoldV2Inner() {
 
       <div className="flex flex-1 overflow-hidden">
 
-        {/* ── Panel 1 — Floor Plan (55%) ──────────────────────────────── */}
-        <section className="flex flex-col border-r border-zinc-900" style={{ width: "55%" }}>
+        {/* ── Panel 1 — Floor Plan (50%) ──────────────────────────────── */}
+        <section className="flex flex-col border-r border-zinc-900" style={{ width: "50%" }}>
           <div className="flex items-center justify-between border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Floor Plan · Scaffold Layout</p>
             <div className="flex items-center gap-1.5">
@@ -963,52 +963,56 @@ export default function SetScaffoldV2Inner() {
           </div>
         </section>
 
-        {/* ── Panel 2 — 3D Model (20%) ────────────────────────────────── */}
-        <section className="flex flex-col border-r border-zinc-900" style={{ width: "20%" }}>
-          <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
-          </div>
-          <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-            {mounted && (
-              <ScaffoldModel3D
-                outline={outline}
-                puf={effPuf}
-                bayFt={bayLengthFt}
-                widthFt={scaffoldWidthFt}
-                frameTall={frameTall}
-                scaffoldWidthFt={scaffoldWidthFt}
-              />
-            )}
-          </div>
-        </section>
+        {/* ── Right column (50%): Section View | Frame Config on top, 3D Model beneath, Inventory below that ── */}
+        <section className="flex flex-col overflow-hidden" style={{ width: "50%" }}>
 
-        {/* ── Panel 3 — Section View + Frame Config + Inventory (25%) ── */}
-        <section className="flex flex-col overflow-hidden" style={{ width: "25%" }}>
-          <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
-          </div>
-
-          {/* Section drawing */}
-          <div className="flex-shrink-0" style={{ height: "40%" }}>
-            <SectionViewPanel
-              wallOutline={sectionWallOutline}
-              wallOffset={wallOffset}
-              frameTall={frameTall}
-              scaffoldWidthFt={scaffoldWidthFt}
-              scaffoldSide={scaffoldSide}
-              draftingAdditions={draftingAdditions}
-              onDropPiece={handleDropDraftingPiece}
-              onRemovePiece={handleRemoveDraftingPiece}
-              onToggleSide={handleToggleScaffoldSide}
-              sectionType={sectionType}
-            />
+          {/* Top row — Section View (left half) | Frame Config (right half) */}
+          <div className="flex flex-shrink-0 border-b border-zinc-900" style={{ height: "42%" }}>
+            <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: "50%" }}>
+              <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
+              </div>
+              <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+                <SectionViewPanel
+                  wallOutline={sectionWallOutline}
+                  wallOffset={wallOffset}
+                  frameTall={frameTall}
+                  scaffoldWidthFt={scaffoldWidthFt}
+                  scaffoldSide={scaffoldSide}
+                  draftingAdditions={draftingAdditions}
+                  onDropPiece={handleDropDraftingPiece}
+                  onRemovePiece={handleRemoveDraftingPiece}
+                  onToggleSide={handleToggleScaffoldSide}
+                  sectionType={sectionType}
+                />
+              </div>
+            </div>
+            <div className="flex flex-col overflow-y-auto" style={{ width: "50%" }}>
+              <FrameConfigOptions frameTall={frameTall} scaffoldWidthFt={scaffoldWidthFt} />
+            </div>
           </div>
 
-          {/* Frame config options */}
-          <FrameConfigOptions frameTall={frameTall} scaffoldWidthFt={scaffoldWidthFt} />
+          {/* 3D Model — full width of this column, beneath the row above */}
+          <div className="flex flex-col border-b border-zinc-900 flex-shrink-0" style={{ height: "33%" }}>
+            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
+            </div>
+            <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+              {mounted && (
+                <ScaffoldModel3D
+                  outline={outline}
+                  puf={effPuf}
+                  bayFt={bayLengthFt}
+                  widthFt={scaffoldWidthFt}
+                  frameTall={frameTall}
+                  scaffoldWidthFt={scaffoldWidthFt}
+                />
+              )}
+            </div>
+          </div>
 
           {/* Inventory — live counts from project */}
-          <div className="flex-1 overflow-y-auto border-t border-zinc-900 min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0">
             <div className="px-3 pt-2 pb-1 flex items-center justify-between">
               <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Inventory · Load List</p>
               <a href="/inventory/load-list" className="text-[8px] text-orange-400 hover:text-orange-300">Full List →</a>
