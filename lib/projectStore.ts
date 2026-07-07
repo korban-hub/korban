@@ -24,6 +24,14 @@ export type QuantityEngineInput = {
    * to 6' when not provided.
    */
   workerReachHeight?: number;
+  /**
+   * Screw jack max travel in inches (physical range 0"-18"), used for
+   * final fine adjustment when stacking frames. Optional for backward
+   * compatibility; defaults to 18" (the full physical range) when not
+   * provided — callers can pass the backend's more conservative default
+   * (12") if they want a safety margin below the physical max.
+   */
+  screwJackMaxExtensionIn?: number;
 };
 
 export type QuantityEngineOutput = {
@@ -37,6 +45,20 @@ export type QuantityEngineOutput = {
   guardrailCount: number;
   basePlateCount: number;
   screwJackCount: number;
+  /** Realistic physical frame stack (6'-4"/5'/3' pieces) for the optimal option — see computeFrameMakeup. */
+  frameMakeup: FrameMakeupPiece[];
+  /** Screw jack extension used for final fine adjustment, in inches (0–18). */
+  screwJackExtensionIn: number;
+};
+
+export type FrameMakeupPiece = { size: number; label: string; qty: number };
+
+export type FrameMakeupResult = {
+  pieces: FrameMakeupPiece[];
+  /** Screw jack extension used for final fine adjustment, in inches (0–18). */
+  screwJackExtensionIn: number;
+  /** Total number of frame pieces stacked — this is what "frames tall" / level count means downstream. */
+  frameTall: number;
 };
 
 export type StoredPoint = { x: number; y: number };
@@ -356,6 +378,94 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+const FRAME_SIZES: { size: number; label: string }[] = [
+  { size: 6 + 4 / 12, label: "6'-4\"" },
+  { size: 5, label: "5'-0\"" },
+  { size: 3, label: "3'-0\"" },
+];
+
+/**
+ * Finds realistic physical frame stacks (combinations of 6'-4", 5', and
+ * 3' frames, fine-tuned by a screw jack with 0"-18" travel) that reach a
+ * given effective height. Returns up to `maxOptions` distinct valid
+ * combinations, ranked by fewest total pieces first (most practical to
+ * assemble), so callers can offer the optimal stack plus real
+ * alternates — never an invented frame size that doesn't exist in
+ * inventory. If a height is short enough that only one combination is
+ * physically sensible, fewer than `maxOptions` results come back; the
+ * caller should treat that as "no further recommendations" rather than
+ * padding with duplicates.
+ *
+ * This is a first-pass estimator, not a substitute for an engineer's
+ * judgment on unusual heights — it doesn't know site-specific assembly
+ * constraints, only arithmetic.
+ */
+export function findFrameMakeupOptions(
+  effectiveHeightFt: number,
+  screwJackMaxExtensionIn = 18,
+  maxOptions = 3,
+): FrameMakeupResult[] {
+  const jackMaxFt = Math.max(0, screwJackMaxExtensionIn) / 12;
+  const target = Math.max(0, effectiveHeightFt);
+  const [SIX, FIVE, THREE] = FRAME_SIZES.map((f) => f.size);
+
+  const maxSix = Math.ceil(target / SIX) + 1;
+  const maxFive = Math.ceil(target / FIVE) + 1;
+  const maxThree = Math.ceil(target / THREE) + 1;
+
+  type Candidate = { a: number; b: number; c: number; total: number; pieceCount: number; extra: number };
+  const candidates: Candidate[] = [];
+
+  for (let a = 0; a <= maxSix; a++) {
+    const aHeight = a * SIX;
+    if (aHeight > target + jackMaxFt) break;
+    for (let b = 0; b <= maxFive; b++) {
+      const baseHeight = aHeight + b * FIVE;
+      if (baseHeight > target + jackMaxFt) break;
+      for (let c = 0; c <= maxThree; c++) {
+        const total = baseHeight + c * THREE;
+        if (total > target + jackMaxFt) break;
+        if (total < target - jackMaxFt) continue;
+        const pieceCount = a + b + c;
+        if (pieceCount === 0) continue;
+        candidates.push({ a, b, c, total, pieceCount, extra: Math.abs(total - target) });
+      }
+    }
+  }
+
+  // Fewest pieces first (most practical to assemble); ties broken by
+  // whichever combination lands closest to the actual target height.
+  candidates.sort((x, y) => x.pieceCount - y.pieceCount || x.extra - y.extra);
+
+  const seen = new Set<string>();
+  const results: FrameMakeupResult[] = [];
+  for (const cand of candidates) {
+    const key = `${cand.a}-${cand.b}-${cand.c}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const pieces: FrameMakeupPiece[] = [];
+    if (cand.a > 0) pieces.push({ ...FRAME_SIZES[0], qty: cand.a });
+    if (cand.b > 0) pieces.push({ ...FRAME_SIZES[1], qty: cand.b });
+    if (cand.c > 0) pieces.push({ ...FRAME_SIZES[2], qty: cand.c });
+    const screwJackExtensionIn = Math.max(0, Math.min(jackMaxFt, target - cand.total)) * 12;
+    results.push({ pieces, screwJackExtensionIn, frameTall: cand.pieceCount });
+    if (results.length >= maxOptions) break;
+  }
+
+  if (results.length === 0) {
+    // Degenerate case (e.g. target is 0) — fall back to a single tall
+    // frame so callers always get at least one usable result.
+    results.push({ pieces: [{ ...FRAME_SIZES[0], qty: 1 }], screwJackExtensionIn: 0, frameTall: 1 });
+  }
+
+  return results;
+}
+
+/** Convenience wrapper — just the single best (fewest-piece) frame makeup. */
+export function computeFrameMakeup(effectiveHeightFt: number, screwJackMaxExtensionIn = 18): FrameMakeupResult {
+  return findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 1)[0];
+}
+
 export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEngineOutput {
   const linearFeet = Math.max(0, asNumber(input.linearFeet, 0));
   const wallHeight = Math.max(0, asNumber(input.wallHeight, 0));
@@ -363,15 +473,18 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
   const frameHeight = Math.max(1, asNumber(input.frameHeight, defaultScaffoldInput.frameHeight));
   const plankCountPerBay = Math.max(0, Math.ceil(asNumber(input.plankCountPerBay, defaultScaffoldInput.plankCountPerBay)));
   const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, 6));
+  const screwJackMaxExtensionIn = Math.max(0, asNumber(input.screwJackMaxExtensionIn, 18));
 
   const bayCount = Math.ceil(linearFeet / standardBayLength);
   const legCount = bayCount > 0 ? bayCount + 1 : 0;
   // The top scaffold deck doesn't need to reach the full wall height —
   // a worker standing on it can reach roughly workerReachHeight above
-  // where they stand. Frame stack height is calculated from the
-  // remaining height after that reach margin is subtracted.
+  // where they stand. The remaining height is stacked using the actual
+  // realistic frame combination (6'-4"/5'/3' + screw jack), not just a
+  // rounded-up count of same-size frames.
   const effectiveStackHeight = Math.max(0, wallHeight - workerReachHeight);
-  const frameTall = Math.max(1, Math.ceil(effectiveStackHeight / frameHeight));
+  const makeup = computeFrameMakeup(effectiveStackHeight, screwJackMaxExtensionIn);
+  const frameTall = Math.max(1, makeup.frameTall);
   const jumps = frameTall;
   const frameCount = legCount * frameTall;
   const plankCount = bayCount * plankCountPerBay;
@@ -391,6 +504,8 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
     guardrailCount,
     basePlateCount,
     screwJackCount,
+    frameMakeup: makeup.pieces,
+    screwJackExtensionIn: makeup.screwJackExtensionIn,
   };
 }
 

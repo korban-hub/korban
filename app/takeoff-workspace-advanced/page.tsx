@@ -131,7 +131,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [totalPages,     setTotalPages]     = useState(0);
   const [viewerUrl,      setViewerUrl]      = useState("");
   const [renderingPage,  setRenderingPage]  = useState(false);
-  const [viewerZoom,     setViewerZoom]     = useState(0.8);
+  const [viewerZoom,     setViewerZoom]     = useState(0.65);
   const [extractedPages, setExtractedPages] = useState<ExtractedPage[]>([]);
   const [activeExtracted,setActiveExtracted]= useState<ExtractedPage|null>(null);
 
@@ -210,11 +210,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setViewerZoom(Math.min(vw/iw, vh/ih));
   }
 
-  // Auto-set zoom after image loads
-  function handleImgLoad() {
-    // Only auto-fit on first load
-    if (viewerZoom === 0.8 && viewerUrl) setTimeout(fitToViewer, 50);
-  }
+  // Pages open at the 65% default; use the "Fit" button to fit manually.
+  function handleImgLoad() {}
 
   const handleFile = useCallback(async (file:File) => {
     if (!file) return;
@@ -243,6 +240,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
     try { setViewerUrl(await renderPage(pdfDoc,p,1.2)); }
     catch {} finally { setRenderingPage(false); }
   }
+
+  // Arrow-key page navigation — ← / → step through plan pages, same as the
+  // toolbar's ‹ › buttons. Ignored while typing in an input/textarea so it
+  // doesn't hijack normal text editing (e.g. the measurement input, level
+  // name fields).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (!pdfDoc || totalPages <= 1) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); goToPage(currentPageNo + 1); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); goToPage(currentPageNo - 1); }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pdfDoc, totalPages, currentPageNo, renderingPage]);
 
   async function extractCurrentPage() {
     if (!viewerUrl) return;

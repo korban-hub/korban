@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
-import { calculateQuantityEngine, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { calculateQuantityEngine, findFrameMakeupOptions, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -109,7 +109,7 @@ function computeLegs(
     const bayPx = bayFt * puf;
     const wallGap = 1 * puf;
     const tickLen = widthFt * puf;
-    const labelOff = wallGap + tickLen + puf * 0.6;
+    const labelOff = wallGap + tickLen + puf * 1.4;
 
     function makeLeg(dist: number, isStart = false, isEnd = false): LegResult {
       const d = Math.max(0, Math.min(dist, segLen));
@@ -169,25 +169,80 @@ function ScaffoldModel3D({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const frameRef = useRef<number>(0);
   const [rotating, setRotating] = useState(true);
+  const [zoom, setZoom] = useState(1);
   const [snapshot, setSnapshot] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!mountRef.current) return;
     const W = mountRef.current.clientWidth, H = mountRef.current.clientHeight;
+    // If the container has no size yet (can happen right as a tab/panel
+    // becomes visible, before layout settles), clamp to a safe minimum
+    // instead of building a scene with a NaN/zero camera aspect ratio —
+    // that produces a canvas that looks frozen/static even though the
+    // render loop is technically still running. The resize observer
+    // below corrects the real size as soon as layout settles.
+    const initialW = W || 400, initialH = H || 300;
+    console.log("[3D model] mounting scene", { measuredW: W, measuredH: H, usingW: initialW, usingH: initialH });
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x080604);
     scene.fog = new THREE.FogExp2(0x080604, 0.018);
 
-    const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 500);
+    const camera = new THREE.PerspectiveCamera(50, initialW / initialH, 0.1, 500);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(W, H);
+    // WebGLRenderer creation throws if the browser can't get a GPU
+    // context — most commonly because the page has exhausted its WebGL
+    // context budget after many mounts (each tab switch creates a new
+    // one). An uncaught throw here previously took the whole page down
+    // to a blank white screen with no error visible. Now it's caught
+    // and surfaced as an actual message instead.
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch (err) {
+      console.error("[3D model] Failed to create WebGL renderer — likely out of GPU contexts. Try fully restarting the browser.", err);
+      setRenderError("3D view unavailable right now (couldn't get a GPU context). Try fully closing and reopening the browser, then reload this page.");
+      return;
+    }
+    renderer.setSize(initialW, initialH);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+
+    // TEMPORARY DIAGNOSTIC — the render loop was proven to be running
+    // correctly (angle/frame count incrementing on schedule) while the
+    // view stayed visually frozen. That specific pattern is the known
+    // signature of a lost/exhausted WebGL context — render() keeps
+    // getting called and doesn't throw, but the browser silently stops
+    // compositing it. These listeners confirm it directly. Safe to
+    // remove once confirmed either way.
+    const canvas = renderer.domElement;
+    const onContextLost = (e: Event) => {
+      e.preventDefault();
+      console.error("[3D model] WEBGL CONTEXT LOST", e);
+    };
+    const onContextRestored = () => {
+      console.warn("[3D model] WebGL context restored");
+    };
+    canvas.addEventListener("webglcontextlost", onContextLost, false);
+    canvas.addEventListener("webglcontextrestored", onContextRestored, false);
+
+    // Keep the renderer/camera matched to the container if it resizes
+    // later (e.g. switching tabs, resizing the window) — a stale size
+    // here is the other common cause of a 3D view that looks frozen.
+    const resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = entry.contentRect.width, h = entry.contentRect.height;
+      if (w <= 0 || h <= 0) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+    resizeObserver.observe(mountRef.current);
 
     // Lights
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
@@ -236,7 +291,14 @@ function ScaffoldModel3D({
       const segLen = Math.sqrt(dx * dx + dz * dz);
       if (segLen < 0.1) continue;
       const ax = dx / segLen, az = dz / segLen;
-      const nx = -az, nz = ax; // outward normal (approximate)
+      // Outward normal computed on the ORIGINAL (unscaled) outline, using
+      // the same winding-aware test the Floor Plan panel uses — a naive
+      // 90° rotation here doesn't know which side is actually outside the
+      // building, and was putting scaffold on the interior whenever a
+      // trace happened to wind the "wrong" way.
+      const rawA = outline[si], rawB = outline[(si + 1) % outline.length];
+      const outwardNormal = computeOutwardNormal(rawA, rawB, outline);
+      const nx = outwardNormal.x, nz = outwardNormal.y;
 
       // Wall panel
       const wallH = jumps * BAY_H;
@@ -338,17 +400,36 @@ function ScaffoldModel3D({
 
     let angle = Math.atan2(camDist, camDist);
     let isRotating = true;
+    let zoomFactor = 1;
+    let debugFrameCount = 0;
     (mountRef.current as any).__setRotating = (v: boolean) => { isRotating = v; };
+    (mountRef.current as any).__setZoomFactor = (z: number) => { zoomFactor = z; };
     (mountRef.current as any).__snapshot = () => renderer.domElement.toDataURL("image/png");
 
     function animate() {
       frameRef.current = requestAnimationFrame(animate);
+      // TEMPORARY DIAGNOSTIC — logs once every ~2 seconds so we can see in
+      // the browser console whether this loop is actually running and
+      // what isRotating/angle actually are, instead of guessing again.
+      // Safe to remove once rotation is confirmed working.
+      debugFrameCount++;
+      if (debugFrameCount % 120 === 0) {
+        console.log("[3D model animate loop]", { isRotating, angle: angle.toFixed(3), zoomFactor, frame: debugFrameCount });
+      }
       if (isRotating) {
         angle += 0.004;
         camera.position.set(
-          center.x + Math.sin(angle) * camDist,
-          camDist * 0.55,
-          center.z + Math.cos(angle) * camDist
+          center.x + Math.sin(angle) * camDist * zoomFactor,
+          camDist * 0.55 * zoomFactor,
+          center.z + Math.cos(angle) * camDist * zoomFactor
+        );
+        camera.lookAt(center.x, center.y * 0.4, center.z);
+      } else {
+        // Still respond to zoom changes while paused, using the last angle.
+        camera.position.set(
+          center.x + Math.sin(angle) * camDist * zoomFactor,
+          camDist * 0.55 * zoomFactor,
+          center.z + Math.cos(angle) * camDist * zoomFactor
         );
         camera.lookAt(center.x, center.y * 0.4, center.z);
       }
@@ -358,7 +439,17 @@ function ScaffoldModel3D({
 
     return () => {
       cancelAnimationFrame(frameRef.current);
+      resizeObserver.disconnect();
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
       renderer.dispose();
+      // forceContextLoss() depends on the WEBGL_lose_context extension,
+      // which isn't guaranteed to exist on every browser/GPU — an
+      // unguarded call here was throwing and taking down the whole
+      // render tree on systems without it. dispose() above already does
+      // the important cleanup; this is a best-effort extra that must
+      // never be allowed to crash anything.
+      try { renderer.forceContextLoss(); } catch { /* not supported here — safe to ignore */ }
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
@@ -368,13 +459,44 @@ function ScaffoldModel3D({
     if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
   }, [rotating]);
 
+  useEffect(() => {
+    if (mountRef.current) (mountRef.current as any).__setZoomFactor?.(zoom);
+  }, [zoom]);
+
+  function handleCapture() {
+    const dataUrl = (mountRef.current as any)?.__snapshot?.();
+    if (!dataUrl) return;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `scaffold-3d-view-${Date.now()}.png`;
+    a.click();
+  }
+
+  if (renderError) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 p-6 text-center max-w-sm">
+          <p className="text-xs font-bold uppercase tracking-[0.2em] text-yellow-300">⚠ 3D View Unavailable</p>
+          <p className="mt-2 text-xs text-zinc-400">{renderError}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       <div ref={mountRef} className="flex-1 overflow-hidden rounded-t-lg" style={{ minHeight: 0 }} />
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
+        <button onClick={() => setZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold flex-shrink-0">−</button>
+        <span className="text-[9px] font-mono text-zinc-600 w-9 text-center flex-shrink-0">{Math.round((1 / zoom) * 100)}%</span>
+        <button onClick={() => setZoom(z => Math.min(3, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold flex-shrink-0">+</button>
         <button onClick={() => setRotating(r => !r)}
-          className={`w-full rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${rotating ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
-          {rotating ? "⏸ Pause Rotation" : "▶ Resume Rotation"}
+          className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-bold transition ${rotating ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
+          {rotating ? "⏸ Pause" : "▶ Resume"}
+        </button>
+        <button onClick={handleCapture}
+          className="rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[9px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300 transition">
+          📷 Capture
         </button>
       </div>
     </div>
@@ -424,12 +546,28 @@ function SectionViewPanel({
   const wallDrawX0 = 24;
   const wallPolyPx = wallPts.map(p => `${wallDrawX0 + p.x * pxPerFt},${totalH - p.y * pxPerFt}`).join(" ");
 
+  // Both sides measure the same wallOffPx distance from the SAME wall
+  // reference point (its start edge). This is a one-bay cross-section —
+  // the scaffold sits right next to the wall face, not pushed out by
+  // the wall's entire traced linear footage (that was the bug: "Scaffold
+  // Right" previously added the wall's full span as if it were the
+  // standoff distance, so the more wall you traced, the further away
+  // the scaffold drifted, and each side used a different reference
+  // point entirely).
   const scaffX = scaffoldSide === "left"
     ? wallDrawX0 - wallOffPx - widthPx
-    : wallDrawX0 + wallSpanFt * pxPerFt + wallOffPx;
+    : wallDrawX0 + wallOffPx;
 
-  const svgOriginX = Math.min(0, scaffX - 14);
-  const svgW = (scaffoldSide === "left" ? wallDrawX0 + wallSpanFt * pxPerFt : scaffX + widthPx) + 60 - svgOriginX;
+  const rightExtent = Math.max(scaffX + widthPx, wallDrawX0 + wallSpanFt * pxPerFt);
+  const svgOriginX = Math.min(0, scaffX - 14, wallDrawX0 - 14);
+  const svgW = rightExtent + 60 - svgOriginX;
+  const [sectionZoom, setSectionZoom] = useState(1);
+  const svgCenterX = svgOriginX + svgW / 2;
+  const svgCenterY = -22 + (totalH + 62) / 2;
+  const zoomedW = svgW / sectionZoom;
+  const zoomedH = (totalH + 62) / sectionZoom;
+  const zoomedX = svgCenterX - zoomedW / 2;
+  const zoomedY = svgCenterY - zoomedH / 2;
 
   function handleDrop(e: any) {
     e.preventDefault();
@@ -445,8 +583,8 @@ function SectionViewPanel({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Wall side toggle */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-900 bg-[#0a0a0a] flex-shrink-0">
+      {/* Wall side toggle + zoom */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-900 bg-[#0a0a0a] flex-shrink-0 gap-2">
         <span className="text-[8px] uppercase tracking-wider text-zinc-600">Scaffold Side</span>
         <div className="flex rounded-lg border border-zinc-800 overflow-hidden">
           <button onClick={() => onToggleSide("left")}
@@ -457,6 +595,11 @@ function SectionViewPanel({
             className={`px-2.5 py-0.5 text-[8px] font-bold transition ${scaffoldSide === "right" ? "bg-orange-500 text-black" : "text-zinc-500 hover:text-zinc-300"}`}>
             Scaffold Right
           </button>
+        </div>
+        <div className="flex items-center gap-1 ml-auto">
+          <button onClick={() => setSectionZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-5 h-5 text-zinc-400 hover:text-white text-[10px] font-bold">−</button>
+          <span className="text-[8px] font-mono text-zinc-600 w-8 text-center">{Math.round(sectionZoom * 100)}%</span>
+          <button onClick={() => setSectionZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-5 h-5 text-zinc-400 hover:text-white text-[10px] font-bold">+</button>
         </div>
       </div>
 
@@ -469,7 +612,7 @@ function SectionViewPanel({
         )}
         <svg
           ref={svgRef}
-          viewBox={`${svgOriginX} -22 ${svgW} ${totalH + 62}`}
+          viewBox={`${zoomedX} ${zoomedY} ${zoomedW} ${zoomedH}`}
           className="w-full h-full"
           style={{ maxHeight: "100%", maxWidth: "100%" }}
           onDragOver={e => e.preventDefault()}
@@ -541,13 +684,13 @@ function SectionViewPanel({
           {hasWallTrace && (
             <>
               <line
-                x1={scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0 + wallSpanFt * pxPerFt}
+                x1={scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0}
                 y1={totalH + 10}
                 x2={scaffoldSide === "left" ? wallDrawX0 : scaffX}
                 y2={totalH + 10}
                 stroke="#f97316" strokeWidth="0.5" />
               <text
-                x={((scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0 + wallSpanFt * pxPerFt) +
+                x={((scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0) +
                     (scaffoldSide === "left" ? wallDrawX0 : scaffX)) / 2}
                 y={totalH + 18} textAnchor="middle" fontSize="3.6" fill="#f97316" fontFamily="monospace">{wallOffset}' offset</text>
             </>
@@ -590,33 +733,64 @@ function SectionViewPanel({
 }
 
 // ── Frame Config Options ──────────────────────────────────────────────────────
-// Only shows the Optimal configuration Korban actually computed. No
-// invented alternate frame sizes — if there's nothing beyond optimal to
-// recommend, that's stated plainly rather than padded with options.
-function FrameConfigOptions({ frameTall, scaffoldWidthFt }: { frameTall: number; scaffoldWidthFt: number }) {
-  const FRAME_H = 6.333;
+// Shows up to 3 real, buildable frame combinations (6'-4"/5'/3' + screw
+// jack) that reach the same effective height — never an invented frame
+// size. If a wall is short enough that only one sensible combination
+// exists, the remaining slot(s) show a plain note instead of padding
+// with duplicates.
+function FrameConfigOptions({
+  effectiveHeightFt, screwJackMaxExtensionIn, scaffoldWidthFt,
+}: { effectiveHeightFt: number; screwJackMaxExtensionIn: number; scaffoldWidthFt: number }) {
+  const options = useMemo(
+    () => findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 3),
+    [effectiveHeightFt, screwJackMaxExtensionIn],
+  );
+  const labels = ["Optimal", "Alternate B", "Alternate C"];
+
   return (
-    <div className="border-t border-zinc-900 bg-[#0b0b0b] flex-shrink-0">
-      <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500 px-3 pt-2 pb-1">Frame Configuration Options</p>
-      <div className="px-3 pb-3">
-        <div className="rounded-xl border border-orange-500/40 bg-orange-500/5 p-2.5">
-          <p className="text-[9px] font-bold uppercase tracking-wider mb-1.5 text-orange-300">Optimal</p>
-          <div className="space-y-1">
-            <div className="flex justify-between text-[9px]">
-              <span className="text-zinc-600">Jumps</span>
-              <span className="font-mono text-zinc-300">{frameTall}</span>
+    <div className="flex flex-col h-full overflow-y-auto">
+      <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Frame Configuration Options</p>
+      </div>
+      <div className="px-3 pt-2 pb-3 space-y-2">
+        {labels.map((label, i) => {
+          const opt = options[i];
+          if (!opt) {
+            return (
+              <div key={label} className="rounded-xl border border-zinc-800 bg-black p-2.5">
+                <p className="text-[9px] font-bold uppercase tracking-wider mb-1 text-zinc-600">{label}</p>
+                <p className="text-[8px] text-zinc-600 italic">No further recommendations beyond optimal approach</p>
+              </div>
+            );
+          }
+          return (
+            <div key={label} className={`rounded-xl border p-2.5 ${i === 0 ? "border-orange-500/40 bg-orange-500/5" : "border-zinc-800 bg-black"}`}>
+              <p className={`text-[9px] font-bold uppercase tracking-wider mb-1.5 ${i === 0 ? "text-orange-300" : "text-zinc-400"}`}>{label}</p>
+              <div className="space-y-1">
+                {opt.pieces.map((p) => (
+                  <div key={p.label} className="flex justify-between text-[9px]">
+                    <span className="text-zinc-600">{p.label} Frame</span>
+                    <span className="font-mono text-zinc-300">× {p.qty}</span>
+                  </div>
+                ))}
+                {opt.screwJackExtensionIn > 0.05 && (
+                  <div className="flex justify-between text-[9px]">
+                    <span className="text-zinc-600">Screw Jack</span>
+                    <span className="font-mono text-zinc-300">{opt.screwJackExtensionIn.toFixed(1)}"</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-[9px]">
+                  <span className="text-zinc-600">Total Frames</span>
+                  <span className="font-mono text-zinc-300">{opt.frameTall}</span>
+                </div>
+                <div className="flex justify-between text-[9px]">
+                  <span className="text-zinc-600">Width</span>
+                  <span className="font-mono text-zinc-300">{scaffoldWidthFt}'</span>
+                </div>
+              </div>
             </div>
-            <div className="flex justify-between text-[9px]">
-              <span className="text-zinc-600">Frame H</span>
-              <span className="font-mono text-zinc-300">{FRAME_H.toFixed(2)}'</span>
-            </div>
-            <div className="flex justify-between text-[9px]">
-              <span className="text-zinc-600">Width</span>
-              <span className="font-mono text-zinc-300">{scaffoldWidthFt}'</span>
-            </div>
-          </div>
-        </div>
-        <p className="text-[8px] text-zinc-600 mt-2 italic">No further recommendations beyond optimal approach</p>
+          );
+        })}
       </div>
     </div>
   );
@@ -630,12 +804,15 @@ export default function SetScaffoldV2Inner() {
   const [showOverlay,    setShowOverlay]    = useState(true);
   const [showScaffold,   setShowScaffold]   = useState(true);
   const [editMode,       setEditMode]       = useState(false);
+  const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "3d" | "section">("overlay");
   const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
   const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
   const [overriddenFC,   setOverriddenFC]   = useState<Record<string, number>>({});
   const [legOffsets,     setLegOffsets]     = useState<Record<string, { dx: number; dy: number }>>({});
   const [draggedLegKey,  setDraggedLegKey]  = useState<string | null>(null);
   const [viewerZoom,     setViewerZoom]     = useState(1);
+  const [viewerPan,      setViewerPan]      = useState({ dx: 0, dy: 0 });
+  const [isPanning,      setIsPanning]      = useState(false);
   const [elevation,      setElevation]      = useState<ProjectElevation | null>(null);
   const [projectName,    setProjectName]    = useState(projectInfo.projectName);
   const [mounted,        setMounted]        = useState(false);
@@ -643,7 +820,9 @@ export default function SetScaffoldV2Inner() {
 
   const frameHeight       = 6.333;
   const workerReachHeight = getBackendSettings()?.scaffold?.workerReachHeight ?? 6;
+  const screwJackMaxExtensionIn = getBackendSettings()?.scaffold?.screwJackMaxExtension ?? 12;
   const frameTall         = elevation?.quantityEngine?.frameTall ?? 7;
+  const effectiveStackHeightFt = Math.max(0, (elevation?.wallHeight ?? 0) - workerReachHeight);
   const scaffoldWidthFt   = parseFt(scaffoldWidth);
   const bayLengthFt       = parseFt(bayLength) || 10;
   const ppb               = planksPerBay(scaffoldWidth);
@@ -673,17 +852,18 @@ export default function SetScaffoldV2Inner() {
     return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf);
   }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf]);
 
-  // Per-leg frame tall from elevation data
+  // Per-leg frame tall — single source of truth is `frameTall`, the same
+  // value driving the 3D model and Frame Config Options (derived from
+  // elevation.wallHeight via the real frame-makeup calculation). This
+  // used to run its own separate, older calculation from raw elevation
+  // height strings, which could drift out of sync with the rest of the
+  // app — that's the disconnect that was showing "1" here while the 3D
+  // model correctly showed "7". A manual per-leg override (set via the
+  // Edit Bay popup) still takes priority when present.
   const getFrameTallForLeg = (segIndex: number, legIndex: number): number => {
     const legKey = `${segIndex}-${legIndex}`;
     if (overriddenFC[legKey]) return overriddenFC[legKey];
-    if (!elevation?.overlayGeometry?.elevationHeights?.length) return frameTall;
-    // Use first elevation height as default for now
-    const eh = elevation.overlayGeometry.elevationHeights as any[];
-    if (!eh.length) return frameTall;
-    const avgH = eh.reduce((s: number, e: any) => s + parseFloat(e.overallHeightInput || "0"), 0) / eh.length;
-    if (!avgH) return frameTall;
-    return Math.max(1, Math.ceil((avgH - workerReachHeight) / frameHeight));
+    return frameTall;
   };
 
   // Section view — wall outline, scaffold side, hand-placed additions
@@ -791,18 +971,40 @@ export default function SetScaffoldV2Inner() {
         }
       />
 
+      {/* Tabs — mirrors Takeoff Workspace's tab style exactly. Each tab
+          shows the outputs gathered in Takeoff for that area; nothing
+          here re-does PDF upload, tracing, or scale-setting — that all
+          happens in Takeoff Workspace only. */}
+      <div className="flex items-center border-b border-zinc-900 bg-[#0b0b0b] px-6 flex-shrink-0">
+        {([
+          { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
+          { id: "3d", label: "3D Model", icon: "▲" },
+          { id: "section", label: "Section View", icon: "✂" },
+        ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => (
+          <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
+            className={`flex items-center gap-2 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.15em] border-b-2 transition ${activeMainTab === tab.id ? "border-white text-white" : "border-transparent text-zinc-600 hover:text-zinc-400"}`}>
+            <span>{tab.icon}</span>{tab.label}
+          </button>
+        ))}
+      </div>
+
       <div className="flex flex-1 overflow-hidden">
 
-        {/* ── Panel 1 — Floor Plan (50%) ──────────────────────────────── */}
-        <section className="flex flex-col border-r border-zinc-900" style={{ width: "50%" }}>
+        {/* ── Tab: Overlay / Takeoff ──────────────────────────────────── */}
+        {activeMainTab === "overlay" && (
+        <section className="flex flex-col w-full">
           <div className="flex items-center justify-between border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Floor Plan · Scaffold Layout</p>
             <div className="flex items-center gap-1.5">
               <button onClick={() => setShowOverlay(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay ? "border-blue-500/40 bg-blue-500/10 text-blue-300" : "border-zinc-800 text-zinc-600"}`}>Overlay</button>
               <button onClick={() => setShowScaffold(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600"}`}>Scaffold</button>
               <button onClick={() => setEditMode(m => !m)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "✓ Editing" : "Edit Bay"}</button>
-              <button onClick={() => setViewerZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
-              <button onClick={() => setViewerZoom(z => Math.max(0.2, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setViewerZoom(z => Math.max(0.2, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
+                <span className="text-[9px] font-mono text-zinc-600 w-9 text-center">{Math.round(viewerZoom * 100)}%</span>
+                <button onClick={() => setViewerZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
+                <button onClick={() => { setViewerZoom(1); setViewerPan({ dx: 0, dy: 0 }); }} className="rounded border border-zinc-800 px-2 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+              </div>
             </div>
           </div>
 
@@ -838,15 +1040,27 @@ export default function SetScaffoldV2Inner() {
             )}
             <div className="absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
             <svg ref={svgRef} className="h-full w-full"
-              viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1 / viewerZoom)) / 2} ${svgViewBox.y + (svgViewBox.h * (1 - 1 / viewerZoom)) / 2} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
-              onMouseMove={e => {
-                if (!draggedLegKey || !svgRef.current) return;
-                const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
-                const sx = vb.width / rect.width, sy = vb.height / rect.height;
-                setLegOffsets(p => ({ ...p, [draggedLegKey]: { dx: (p[draggedLegKey]?.dx ?? 0) + e.movementX * sx, dy: (p[draggedLegKey]?.dy ?? 0) + e.movementY * sy } }));
+              viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1 / viewerZoom)) / 2 + viewerPan.dx} ${svgViewBox.y + (svgViewBox.h * (1 - 1 / viewerZoom)) / 2 + viewerPan.dy} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
+              style={{ cursor: isPanning ? "grabbing" : editMode ? "default" : "grab" }}
+              onMouseDown={e => {
+                if (editMode || draggedLegKey) return;
+                setIsPanning(true);
               }}
-              onMouseUp={() => setDraggedLegKey(null)}
-              onMouseLeave={() => setDraggedLegKey(null)}>
+              onMouseMove={e => {
+                if (draggedLegKey && svgRef.current) {
+                  const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
+                  const sx = vb.width / rect.width, sy = vb.height / rect.height;
+                  setLegOffsets(p => ({ ...p, [draggedLegKey]: { dx: (p[draggedLegKey]?.dx ?? 0) + e.movementX * sx, dy: (p[draggedLegKey]?.dy ?? 0) + e.movementY * sy } }));
+                  return;
+                }
+                if (isPanning && svgRef.current) {
+                  const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
+                  const sx = vb.width / rect.width, sy = vb.height / rect.height;
+                  setViewerPan(p => ({ dx: p.dx - e.movementX * sx, dy: p.dy - e.movementY * sy }));
+                }
+              }}
+              onMouseUp={() => { setDraggedLegKey(null); setIsPanning(false); }}
+              onMouseLeave={() => { setDraggedLegKey(null); setIsPanning(false); }}>
 
               {/* Overlay */}
               {showOverlay && (rawOverlayRows.length > 0 ? (
@@ -914,9 +1128,16 @@ export default function SetScaffoldV2Inner() {
                             strokeWidth={sel ? "1.5" : "0.7"} strokeDasharray={sel ? "none" : "3,2"} />}
                           <line x1={wp.x} y1={wp.y} x2={tp.x} y2={tp.y}
                             strokeWidth={sel ? "2.5" : "1.8"} stroke={sel ? "#f97316" : "#f8fafc"} />
-                          <text x={lp.x} y={lp.y} fontSize={effPuf * 0.5} fontFamily="monospace"
-                            fontWeight="600" opacity="0.85" textAnchor="middle" dominantBaseline="middle"
-                            fill={sel ? "#f97316" : "#f8fafc"}>{ft}</text>
+                          <text x={lp.x} y={lp.y}
+                            opacity="0.9" textAnchor="middle" dominantBaseline="middle"
+                            fill={sel ? "#f97316" : "#f8fafc"}
+                            style={{
+                              cursor: editMode ? "pointer" : "default",
+                              fontSize: Math.max(tl * 0.5, 6.25),
+                              fontFamily: "var(--font-fira-code), ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+                              fontWeight: 300,
+                              fontStretch: "condensed",
+                            }}>{ft}</text>
                         </g>
                       );
                     })}
@@ -962,38 +1183,12 @@ export default function SetScaffoldV2Inner() {
             ))}
           </div>
         </section>
+        )}
 
-        {/* ── Right column (50%): Section View | Frame Config on top, 3D Model beneath, Inventory below that ── */}
-        <section className="flex flex-col overflow-hidden" style={{ width: "50%" }}>
-
-          {/* Top row — Section View (left half) | Frame Config (right half) */}
-          <div className="flex flex-shrink-0 border-b border-zinc-900" style={{ height: "42%" }}>
-            <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: "50%" }}>
-              <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
-              </div>
-              <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-                <SectionViewPanel
-                  wallOutline={sectionWallOutline}
-                  wallOffset={wallOffset}
-                  frameTall={frameTall}
-                  scaffoldWidthFt={scaffoldWidthFt}
-                  scaffoldSide={scaffoldSide}
-                  draftingAdditions={draftingAdditions}
-                  onDropPiece={handleDropDraftingPiece}
-                  onRemovePiece={handleRemoveDraftingPiece}
-                  onToggleSide={handleToggleScaffoldSide}
-                  sectionType={sectionType}
-                />
-              </div>
-            </div>
-            <div className="flex flex-col overflow-y-auto" style={{ width: "50%" }}>
-              <FrameConfigOptions frameTall={frameTall} scaffoldWidthFt={scaffoldWidthFt} />
-            </div>
-          </div>
-
-          {/* 3D Model — full width of this column, beneath the row above */}
-          <div className="flex flex-col border-b border-zinc-900 flex-shrink-0" style={{ height: "33%" }}>
+        {/* ── Tab: 3D Model + Total Project Material List ─────────────── */}
+        {activeMainTab === "3d" && (
+        <section className="flex flex-col w-full overflow-hidden">
+          <div className="flex flex-col flex-shrink-0" style={{ height: "62%" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
             </div>
@@ -1011,13 +1206,13 @@ export default function SetScaffoldV2Inner() {
             </div>
           </div>
 
-          {/* Inventory — live counts from project */}
-          <div className="flex-1 overflow-y-auto min-h-0">
-            <div className="px-3 pt-2 pb-1 flex items-center justify-between">
-              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Inventory · Load List</p>
-              <a href="/inventory/load-list" className="text-[8px] text-orange-400 hover:text-orange-300">Full List →</a>
+          {/* Clear separation between the 3D view and the material list below it */}
+          <div className="border-t-4 border-zinc-900 flex-1 overflow-y-auto min-h-0">
+            <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Total Project Material List</p>
+              <a href="/inventory/load-list" className="text-[9px] text-orange-400 hover:text-orange-300">Full Load List →</a>
             </div>
-            <div className="px-3 pb-3 space-y-1">
+            <div className="px-4 pb-4 space-y-1">
               {[
                 { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
                 { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
@@ -1039,6 +1234,75 @@ export default function SetScaffoldV2Inner() {
             </div>
           </div>
         </section>
+        )}
+
+        {/* ── Tab: Section View & Frame Configuration ──────────────────── */}
+        {activeMainTab === "section" && (
+        <section className="flex w-full overflow-hidden">
+          <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: "33.33%" }}>
+            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
+            </div>
+            <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+              <SectionViewPanel
+                wallOutline={sectionWallOutline}
+                wallOffset={wallOffset}
+                frameTall={frameTall}
+                scaffoldWidthFt={scaffoldWidthFt}
+                scaffoldSide={scaffoldSide}
+                draftingAdditions={draftingAdditions}
+                onDropPiece={handleDropDraftingPiece}
+                onRemovePiece={handleRemoveDraftingPiece}
+                onToggleSide={handleToggleScaffoldSide}
+                sectionType={sectionType}
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col overflow-y-auto border-r border-zinc-900" style={{ width: "33.33%" }}>
+            <FrameConfigOptions effectiveHeightFt={effectiveStackHeightFt} screwJackMaxExtensionIn={screwJackMaxExtensionIn} scaffoldWidthFt={scaffoldWidthFt} />
+          </div>
+
+          {/* Materials used at this section only — not the full project count.
+              For the whole project's material list, use the button below. */}
+          <div className="flex flex-col overflow-y-auto" style={{ width: "33.33%" }}>
+            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Materials at This Section</p>
+            </div>
+            <div className="px-3 pt-2 pb-3 space-y-1.5">
+              {(elevation?.quantityEngine?.frameMakeup ?? []).map(p => {
+                const partNo = p.label === "6'-4\"" ? "FO6L3" : p.label === "5'-0\"" ? "FO5L3" : "FM33";
+                return (
+                  <div key={p.label} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+                    <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{partNo}</span>
+                    <span className="text-[9px] text-zinc-500 flex-1 truncate">{p.label} H Frame</span>
+                    <span className="font-mono text-[10px] font-bold text-orange-300">× {p.qty}</span>
+                  </div>
+                );
+              })}
+              {manualFrameCount > 0 && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-orange-500/25 bg-orange-500/5 px-2 py-1.5">
+                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">FRM-A</span>
+                  <span className="text-[9px] text-zinc-500 flex-1 truncate">Added Frames (manual)</span>
+                  <span className="font-mono text-[10px] font-bold text-orange-300">× {manualFrameCount}</span>
+                </div>
+              )}
+              {manualBracketCount > 0 && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-orange-500/25 bg-orange-500/5 px-2 py-1.5">
+                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">BRKT</span>
+                  <span className="text-[9px] text-zinc-500 flex-1 truncate">Wall Bracket (Added)</span>
+                  <span className="font-mono text-[10px] font-bold text-orange-300">× {manualBracketCount}</span>
+                </div>
+              )}
+            </div>
+            <div className="px-3 pb-3 mt-auto">
+              <a href="/inventory/load-list" className="block w-full text-center rounded-xl border border-zinc-800 py-2 text-[10px] font-bold text-orange-400 hover:border-orange-500/40 hover:text-orange-300 transition">
+                Full Project Load List →
+              </a>
+            </div>
+          </div>
+        </section>
+        )}
       </div>
     </main>
   );
