@@ -410,8 +410,12 @@ export function findFrameMakeupOptions(
   const [SIX, FIVE, THREE] = FRAME_SIZES.map((f) => f.size);
 
   const maxSix = Math.ceil(target / SIX) + 1;
-  const maxFive = Math.ceil(target / FIVE) + 1;
-  const maxThree = Math.ceil(target / THREE) + 1;
+  // Never more than one 5' and one 3' frame in a stack — if a combination
+  // would need two of either, another 6'-4" frame should be used instead.
+  // This maximizes use of the standard tall frame rather than stacking
+  // multiple short pieces, which is how scaffold is actually assembled.
+  const maxFive = 1;
+  const maxThree = 1;
 
   type Candidate = { a: number; b: number; c: number; total: number; pieceCount: number; extra: number };
   const candidates: Candidate[] = [];

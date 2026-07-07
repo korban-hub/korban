@@ -139,20 +139,30 @@ function computeLegs(
       safetyLimit++;
     }
 
-    // End leg at cornerOffPx from end corner — mirrors start
-    if (runEnd > cornerOffPx + puf * 0.5) {
+    // End leg at cornerOffPx from end corner — mirrors start. Only
+    // skipped if the run is too short to place it at all without
+    // overlapping the start leg (not "not comfortably longer" — that
+    // was silently dropping legitimate corner ticks on shorter walls).
+    if (runEnd > 0) {
       const lastLeg = legs[legs.length - 1];
       const lastPos = lastLeg ? Math.sqrt(
         (lastLeg.wallPoint.x - start.x - normal.x * wallGap) ** 2 +
         (lastLeg.wallPoint.y - start.y - normal.y * wallGap) ** 2
       ) : 0;
-      if (Math.abs(lastPos - runEnd) > puf * 0.5) {
+      if (Math.abs(lastPos - runEnd) > puf * 0.1) {
         legs.push(makeLeg(runEnd, false, true));
       }
     }
 
-    // Filter legs inside polygon
-    const filtered = legs.filter(l => isFinitePoint(l.tickTip) && !pointInPolygon(l.tickTip, outline));
+    // Filter legs inside polygon — but never filter out the mandatory
+    // corner (start/end) ticks this way. That check is meant to hide
+    // ordinary mid-run bay ticks that fall inside a notch elsewhere in
+    // the building; at a concave corner, the same whole-polygon test
+    // can wrongly flag a perfectly correct corner tick as "inside"
+    // simply because it's testing against the far wing of the
+    // building, not the local wall. Corner ticks are required by the
+    // frame-width-plus-1' rule regardless of local concavity.
+    const filtered = legs.filter(l => isFinitePoint(l.tickTip) && (l.isStartLeg || l.isEndLeg || !pointInPolygon(l.tickTip, outline)));
     results.push({ segIndex: i, legs: filtered });
   }
   return results;
@@ -514,6 +524,7 @@ function ScaffoldModel3D({
 function SectionViewPanel({
   wallOutline, wallOffset, frameTall, scaffoldWidthFt, scaffoldSide,
   draftingAdditions, onDropPiece, onRemovePiece, onToggleSide, sectionType,
+  isExpanded, onToggleExpand,
 }: {
   wallOutline: PlanPoint[]; wallOffset: number; frameTall: number;
   scaffoldWidthFt: number; scaffoldSide: "left" | "right";
@@ -522,6 +533,8 @@ function SectionViewPanel({
   onRemovePiece: (id: string) => void;
   onToggleSide: (side: "left" | "right") => void;
   sectionType: string;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [dragKind, setDragKind] = useState<{ kind: "frame" | "bracket"; variant: string } | null>(null);
@@ -562,12 +575,14 @@ function SectionViewPanel({
   const svgOriginX = Math.min(0, scaffX - 14, wallDrawX0 - 14);
   const svgW = rightExtent + 60 - svgOriginX;
   const [sectionZoom, setSectionZoom] = useState(1);
+  const [sectionPan, setSectionPan] = useState({ dx: 0, dy: 0 });
+  const [isPanningSection, setIsPanningSection] = useState(false);
   const svgCenterX = svgOriginX + svgW / 2;
   const svgCenterY = -22 + (totalH + 62) / 2;
   const zoomedW = svgW / sectionZoom;
   const zoomedH = (totalH + 62) / sectionZoom;
-  const zoomedX = svgCenterX - zoomedW / 2;
-  const zoomedY = svgCenterY - zoomedH / 2;
+  const zoomedX = svgCenterX - zoomedW / 2 + sectionPan.dx;
+  const zoomedY = svgCenterY - zoomedH / 2 + sectionPan.dy;
 
   function handleDrop(e: any) {
     e.preventDefault();
@@ -600,6 +615,11 @@ function SectionViewPanel({
           <button onClick={() => setSectionZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-5 h-5 text-zinc-400 hover:text-white text-[10px] font-bold">−</button>
           <span className="text-[8px] font-mono text-zinc-600 w-8 text-center">{Math.round(sectionZoom * 100)}%</span>
           <button onClick={() => setSectionZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-5 h-5 text-zinc-400 hover:text-white text-[10px] font-bold">+</button>
+          <button onClick={() => { setSectionZoom(1); setSectionPan({ dx: 0, dy: 0 }); }} className="rounded border border-zinc-800 px-1.5 h-5 text-[8px] text-zinc-500 hover:text-white">Fit</button>
+          <button onClick={onToggleExpand} title={isExpanded ? "Collapse" : "Expand"}
+            className="rounded border border-zinc-800 px-1.5 h-5 text-[9px] text-zinc-400 hover:text-white hover:border-orange-500/40">
+            {isExpanded ? "⤡" : "⤢"}
+          </button>
         </div>
       </div>
 
@@ -614,9 +634,18 @@ function SectionViewPanel({
           ref={svgRef}
           viewBox={`${zoomedX} ${zoomedY} ${zoomedW} ${zoomedH}`}
           className="w-full h-full"
-          style={{ maxHeight: "100%", maxWidth: "100%" }}
+          style={{ maxHeight: "100%", maxWidth: "100%", cursor: isPanningSection ? "grabbing" : "grab" }}
           onDragOver={e => e.preventDefault()}
-          onDrop={handleDrop}>
+          onDrop={handleDrop}
+          onMouseDown={() => setIsPanningSection(true)}
+          onMouseMove={e => {
+            if (!isPanningSection || !svgRef.current) return;
+            const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
+            const sx = vb.width / rect.width, sy = vb.height / rect.height;
+            setSectionPan(p => ({ dx: p.dx - e.movementX * sx, dy: p.dy - e.movementY * sy }));
+          }}
+          onMouseUp={() => setIsPanningSection(false)}
+          onMouseLeave={() => setIsPanningSection(false)}>
 
           {/* Wall profile — actual traced outline */}
           {hasWallTrace && (
@@ -805,6 +834,7 @@ export default function SetScaffoldV2Inner() {
   const [showScaffold,   setShowScaffold]   = useState(true);
   const [editMode,       setEditMode]       = useState(false);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "3d" | "section">("overlay");
+  const [sectionExpanded, setSectionExpanded] = useState(false);
   const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
   const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
   const [overriddenFC,   setOverriddenFC]   = useState<Record<string, number>>({});
@@ -813,6 +843,8 @@ export default function SetScaffoldV2Inner() {
   const [viewerZoom,     setViewerZoom]     = useState(1);
   const [viewerPan,      setViewerPan]      = useState({ dx: 0, dy: 0 });
   const [isPanning,      setIsPanning]      = useState(false);
+  const [debugSvgClicks, setDebugSvgClicks] = useState(0);
+  const [debugTickClicks, setDebugTickClicks] = useState(0);
   const [elevation,      setElevation]      = useState<ProjectElevation | null>(null);
   const [projectName,    setProjectName]    = useState(projectInfo.projectName);
   const [mounted,        setMounted]        = useState(false);
@@ -992,44 +1024,27 @@ export default function SetScaffoldV2Inner() {
 
         {/* ── Tab: Overlay / Takeoff ──────────────────────────────────── */}
         {activeMainTab === "overlay" && (
-        <section className="flex flex-col w-full">
-          <div className="flex items-center justify-between border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Floor Plan · Scaffold Layout</p>
-            <div className="flex items-center gap-1.5">
-              <button onClick={() => setShowOverlay(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay ? "border-blue-500/40 bg-blue-500/10 text-blue-300" : "border-zinc-800 text-zinc-600"}`}>Overlay</button>
-              <button onClick={() => setShowScaffold(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600"}`}>Scaffold</button>
-              <button onClick={() => setEditMode(m => !m)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "✓ Editing" : "Edit Bay"}</button>
-              <div className="flex items-center gap-1">
-                <button onClick={() => setViewerZoom(z => Math.max(0.2, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
-                <span className="text-[9px] font-mono text-zinc-600 w-9 text-center">{Math.round(viewerZoom * 100)}%</span>
-                <button onClick={() => setViewerZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
-                <button onClick={() => { setViewerZoom(1); setViewerPan({ dx: 0, dy: 0 }); }} className="rounded border border-zinc-800 px-2 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+        <section className="flex w-full overflow-hidden">
+          {/* Main drawing area */}
+          <div className="flex flex-col flex-1 overflow-hidden">
+            <div className="flex items-center justify-between border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Floor Plan · Scaffold Layout</p>
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => setShowOverlay(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay ? "border-blue-500/40 bg-blue-500/10 text-blue-300" : "border-zinc-800 text-zinc-600"}`}>Overlay</button>
+                <button onClick={() => setShowScaffold(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600"}`}>Scaffold</button>
+                <button onClick={() => setEditMode(m => !m)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "✓ Editing" : "Edit Bay"}</button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => setViewerZoom(z => Math.max(0.2, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
+                  <span className="text-[9px] font-mono text-zinc-600 w-9 text-center">{Math.round(viewerZoom * 100)}%</span>
+                  <button onClick={() => setViewerZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
+                  <button onClick={() => { setViewerZoom(1); setViewerPan({ dx: 0, dy: 0 }); }} className="rounded border border-zinc-800 px-2 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* Scaffold config — bay length + frame width HERE */}
-          <div className="flex items-center gap-3 border-b border-zinc-900 bg-[#0a0a0a] px-3 py-2 flex-shrink-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] text-zinc-600">Width</span>
-              <select value={scaffoldWidth} onChange={e => { setScaffoldWidth(e.target.value as ScaffoldWidth); saveConfig({ scaffoldWidth: parseFt(e.target.value) }); }}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] font-mono text-orange-300 outline-none">
-                <option>3'</option><option>3'-6"</option><option>5'</option>
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] text-zinc-600">Bay Length</span>
-              <input value={bayLength} onChange={e => { setBayLength(e.target.value); saveConfig({ standardBayLength: parseFt(e.target.value) || 10 }); }}
-                className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] font-mono text-orange-300 outline-none" />
-            </div>
-            <div className="ml-auto text-[9px] text-zinc-600">
-              {scaleOk ? <span className="text-emerald-400">⊠ Scale set</span> : <span className="text-yellow-600">⚠ No scale</span>}
-            </div>
-          </div>
-
-          {/* SVG canvas */}
-          <div className="flex-1 relative overflow-hidden bg-black">
-            {mounted && !scaleOk && (
+            {/* SVG canvas */}
+            <div className="flex-1 relative overflow-hidden bg-black">
+              {mounted && !scaleOk && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
                 <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 p-6 text-center">
                   <p className="text-xs font-bold uppercase tracking-[0.2em] text-yellow-300">⚠ Scale Not Set</p>
@@ -1038,11 +1053,19 @@ export default function SetScaffoldV2Inner() {
                 </div>
               </div>
             )}
+            {/* TEMPORARY DEBUG BADGE — shows click counts directly on screen, no console needed. Safe to remove once the click bug is resolved. */}
+            <div className="absolute top-2 right-2 z-40 rounded-lg border border-yellow-500/50 bg-black/90 px-3 py-2 text-[10px] font-mono pointer-events-none">
+              <p className="text-yellow-300 font-bold">DEBUG</p>
+              <p className="text-zinc-300">SVG background clicks: <span className="text-white font-bold">{debugSvgClicks}</span></p>
+              <p className="text-zinc-300">Tick clicks: <span className="text-white font-bold">{debugTickClicks}</span></p>
+            </div>
             <div className="absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
             <svg ref={svgRef} className="h-full w-full"
               viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1 / viewerZoom)) / 2 + viewerPan.dx} ${svgViewBox.y + (svgViewBox.h * (1 - 1 / viewerZoom)) / 2 + viewerPan.dy} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
-              style={{ cursor: isPanning ? "grabbing" : editMode ? "default" : "grab" }}
+              style={{ cursor: isPanning ? "grabbing" : editMode ? "crosshair" : "grab" }}
               onMouseDown={e => {
+                console.log("[svg background] onMouseDown fired", { editMode, draggedLegKey, target: (e.target as Element)?.tagName });
+                setDebugSvgClicks(n => n + 1);
                 if (editMode || draggedLegKey) return;
                 setIsPanning(true);
               }}
@@ -1107,8 +1130,8 @@ export default function SetScaffoldV2Inner() {
                           strokeWidth="0.7" opacity="0.5" />
                       );
                     })}
-                    {/* Tick lines */}
-                    {sl.filter(leg => !pointInPolygon(leg.tickTip, outline)).map((leg, i) => {
+                    {/* Tick lines — legs are already filtered by computeLegs (with the corner exemption above); no need to re-filter here */}
+                    {sl.map((leg, i) => {
                       const k = `${segIndex}-${i}`;
                       if (deletedLegKeys.has(k)) return null;
                       if (!isFiniteNumber(leg.wallPoint.x)) return null;
@@ -1120,8 +1143,16 @@ export default function SetScaffoldV2Inner() {
                       const lp = { x: leg.labelPoint.x + off.dx, y: leg.labelPoint.y + off.dy };
                       return (
                         <g key={k} style={{ cursor: editMode ? (sel ? "grab" : "pointer") : "default" }}
-                          onClick={() => { if (editMode) setSelectedLegKey(p => p === k ? null : k); }}
-                          onMouseDown={e => { if (editMode) { e.preventDefault(); setDraggedLegKey(k); setSelectedLegKey(k); } }}>
+                          onClick={() => {
+                            console.log("[tick] onClick fired", { k, editMode });
+                            setDebugTickClicks(n => n + 1);
+                            if (editMode) setSelectedLegKey(p => p === k ? null : k);
+                          }}
+                          onMouseDown={e => {
+                            console.log("[tick] onMouseDown fired", { k, editMode });
+                            setDebugTickClicks(n => n + 1);
+                            if (editMode) { e.preventDefault(); setDraggedLegKey(k); setSelectedLegKey(k); }
+                          }}>
                           {editMode && <circle cx={(wp.x + tp.x) / 2} cy={(wp.y + tp.y) / 2} r={tl * 0.55}
                             fill={sel ? "rgba(249,115,22,0.18)" : "rgba(249,115,22,0.04)"}
                             stroke={sel ? "#f97316" : "rgba(249,115,22,0.25)"}
@@ -1171,16 +1202,44 @@ export default function SetScaffoldV2Inner() {
                 );
               })()}
             </svg>
+            </div>
           </div>
 
-          {/* Stats bar — highlighted orange */}
-          <div className="border-t border-orange-500/30 bg-orange-500/8 px-4 py-2.5 grid grid-cols-4 gap-3 flex-shrink-0" style={{boxShadow:"inset 0 1px 0 rgba(249,115,22,0.15)"}}>
-            {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (
-              <div key={l as string} className="text-center">
-                <p className="text-[9px] uppercase tracking-wider text-orange-700">{l}</p>
-                <p className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</p>
+          {/* Right sidebar — configuration + stats, out of the way of the drawing */}
+          <div className="flex flex-col border-l border-zinc-900 bg-[#0a0a0a] flex-shrink-0 overflow-y-auto" style={{ width: "220px" }}>
+            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
+              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Configuration</p>
+            </div>
+            <div className="px-3 py-3 space-y-3 border-b border-zinc-900">
+              <div>
+                <label className="text-[9px] text-zinc-600 block mb-1">Width</label>
+                <select value={scaffoldWidth} onChange={e => { setScaffoldWidth(e.target.value as ScaffoldWidth); saveConfig({ scaffoldWidth: parseFt(e.target.value) }); }}
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none">
+                  <option>3'</option><option>3'-6"</option><option>5'</option>
+                </select>
               </div>
-            ))}
+              <div>
+                <label className="text-[9px] text-zinc-600 block mb-1">Bay Length</label>
+                <input value={bayLength} onChange={e => { setBayLength(e.target.value); saveConfig({ standardBayLength: parseFt(e.target.value) || 10 }); }}
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none" />
+              </div>
+              <div className="text-[9px] text-zinc-600 pt-1">
+                {scaleOk ? <span className="text-emerald-400">⊠ Scale set</span> : <span className="text-yellow-600">⚠ No scale</span>}
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
+              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Stats</p>
+            </div>
+            <div className="px-3 py-3 space-y-2">
+              {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (
+                <div key={l as string} className="flex items-center justify-between rounded-lg border border-orange-500/25 bg-orange-500/5 px-2.5 py-1.5">
+                  <span className="text-[9px] uppercase tracking-wider text-orange-700">{l}</span>
+                  <span className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
         )}
@@ -1239,7 +1298,7 @@ export default function SetScaffoldV2Inner() {
         {/* ── Tab: Section View & Frame Configuration ──────────────────── */}
         {activeMainTab === "section" && (
         <section className="flex w-full overflow-hidden">
-          <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: "33.33%" }}>
+          <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: sectionExpanded ? "75%" : "33.33%", transition: "width 0.2s ease" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
             </div>
@@ -1255,17 +1314,19 @@ export default function SetScaffoldV2Inner() {
                 onRemovePiece={handleRemoveDraftingPiece}
                 onToggleSide={handleToggleScaffoldSide}
                 sectionType={sectionType}
+                isExpanded={sectionExpanded}
+                onToggleExpand={() => setSectionExpanded(v => !v)}
               />
             </div>
           </div>
 
-          <div className="flex flex-col overflow-y-auto border-r border-zinc-900" style={{ width: "33.33%" }}>
+          <div className="flex flex-col overflow-y-auto border-r border-zinc-900" style={{ width: sectionExpanded ? "12.5%" : "33.33%", transition: "width 0.2s ease" }}>
             <FrameConfigOptions effectiveHeightFt={effectiveStackHeightFt} screwJackMaxExtensionIn={screwJackMaxExtensionIn} scaffoldWidthFt={scaffoldWidthFt} />
           </div>
 
           {/* Materials used at this section only — not the full project count.
               For the whole project's material list, use the button below. */}
-          <div className="flex flex-col overflow-y-auto" style={{ width: "33.33%" }}>
+          <div className="flex flex-col overflow-y-auto" style={{ width: sectionExpanded ? "12.5%" : "33.33%", transition: "width 0.2s ease" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Materials at This Section</p>
             </div>
