@@ -43,6 +43,8 @@ type SectionView = {
   wallOffset: number; topOfWallDistance: number;
   frameWidth: ScaffoldWidth;
   wallOutline: Pt[]; wallComplete: boolean;
+  /** Which side of the traced wall the scaffold sits on. Toggle appears once the wall outline is complete. */
+  scaffoldSide: "left" | "right";
   frameMakeup: FrameItem[];
   totalLF: number; totalLegs: number; totalFrames: number; totalPlanks: number;
 };
@@ -129,7 +131,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [totalPages,     setTotalPages]     = useState(0);
   const [viewerUrl,      setViewerUrl]      = useState("");
   const [renderingPage,  setRenderingPage]  = useState(false);
-  const [viewerZoom,     setViewerZoom]     = useState(1);
+  const [viewerZoom,     setViewerZoom]     = useState(0.8);
   const [extractedPages, setExtractedPages] = useState<ExtractedPage[]>([]);
   const [activeExtracted,setActiveExtracted]= useState<ExtractedPage|null>(null);
 
@@ -175,9 +177,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const wallOff = bs?.scaffold?.wallOffset ?? 1;
       const topOfWall = bs?.scaffold?.workerReachHeight ?? 6;
       const fw: ScaffoldWidth = "3'";
-      setSections([{ id:"aa", label:"A-A", wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+      setSections([{ id:"aa", label:"A-A", wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     } catch {
-      setSections([{ id:"aa", label:"A-A", wallOffset:1, topOfWallDistance:6, frameWidth:"3'", wallOutline:[], wallComplete:false, frameMakeup:getFrameParts("3'"), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+      setSections([{ id:"aa", label:"A-A", wallOffset:1, topOfWallDistance:6, frameWidth:"3'", wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts("3'"), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     }
   }, []);
 
@@ -210,7 +212,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   // Auto-set zoom after image loads
   function handleImgLoad() {
-    if (viewerUrl) setTimeout(fitToViewer, 50);
+    // Only auto-fit on first load
+    if (viewerZoom === 0.8 && viewerUrl) setTimeout(fitToViewer, 50);
   }
 
   const handleFile = useCallback(async (file:File) => {
@@ -387,7 +390,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   // ── Store ─────────────────────────────────────────────────────────────────
   function ensureBase() {
     if (!localStorage.getItem("korbanProjectData_v1")) {
-      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:3, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A" }, elevationBreakdown:[] }] }] } };
+      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:3, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
       localStorage.setItem("korbanProjectData_v1",JSON.stringify({"KRB-260614-001":base}));
       localStorage.setItem("korbanActiveProjectId","KRB-260614-001");
       localStorage.setItem("korbanActiveElevationId","north-elevation");
@@ -450,6 +453,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
     } catch(e) { console.error(e); }
   }
 
+  // Converts a traced wall outline from raw page/image pixels into
+  // feet-space points — x = linear footage along the wall, y = height in
+  // feet, both relative to the outline's own lowest-left point. Doing the
+  // conversion once here (using whichever scale was actually active when
+  // the trace was made) means Set Scaffold V2 never has to guess which
+  // scale applies to a given section's wall trace.
+  function wallOutlineToFeet(pts: Pt[], puf: number): Pt[] {
+    const baselineY = Math.max(...pts.map(p => p.y));
+    const minX = Math.min(...pts.map(p => p.x));
+    return pts.map(p => ({ x: (p.x - minX) / puf, y: (baselineY - p.y) / puf }));
+  }
+
   function storeSection() {
     try {
       ensureBase();
@@ -457,7 +472,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const sec=sections.find(s=>s.id===activeSection)??sections[0];
       if(!sec) return;
       const makeupStr=sec.frameMakeup.filter(f=>f.qty>0).map(f=>`${f.qty} × ${f.description}`).join("\n");
-      saveActiveElevation({ ...elev, sectionView:{ frameMakeup:makeupStr, selectedRun:"Run N-01", wallOffset:sec.wallOffset, sectionType:sec.label } });
+
+      // Use whichever scale was actually used to trace this section's
+      // wall outline — the Section tab's own scale if set, otherwise
+      // fall back to the Floor Plan scale (matches autoPopulateSectionInventory).
+      const tracePuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
+      const wallOutlineFt = (sec.wallOutline.length >= 2 && tracePuf && tracePuf > 0)
+        ? wallOutlineToFeet(sec.wallOutline, tracePuf)
+        : elev.sectionView.wallOutline;
+
+      saveActiveElevation({
+        ...elev,
+        sectionView: {
+          ...elev.sectionView,
+          frameMakeup: makeupStr,
+          selectedRun: "Run N-01",
+          wallOffset: sec.wallOffset,
+          sectionType: sec.label,
+          wallOutline: wallOutlineFt,
+          scaffoldSide: sec.scaffoldSide,
+        },
+      });
       setSectionStored(true); setTimeout(()=>setSectionStored(false),3000);
     } catch(e) { console.error(e); }
   }
@@ -471,7 +506,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const wallOff=backendSettings?.scaffold?.wallOffset??1;
     const topOfWall=backendSettings?.scaffold?.workerReachHeight??6;
     const fw:ScaffoldWidth="3'";
-    setSections(prev=>[...prev,{ id, label, wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+    setSections(prev=>[...prev,{ id, label, wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     setActiveSection(id);
   }
 
@@ -558,7 +593,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
             {totalPages>1&&(
               <div className="flex items-center gap-1">
                 <button onClick={()=>goToPage(currentPageNo-1)} disabled={currentPageNo<=1||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">‹</button>
-                <span className="text-[10px] font-mono text-zinc-500 px-1">{currentPageNo}/{totalPages}</span>
+                <input
+                  type="number" min={1} max={totalPages}
+                  value={currentPageNo}
+                  onChange={e=>goToPage(parseInt(e.target.value)||1)}
+                  className="w-10 rounded border border-zinc-800 bg-zinc-900 text-center text-[10px] font-mono text-zinc-300 outline-none focus:border-orange-500/50 py-0.5"
+                />
+                <span className="text-[10px] font-mono text-zinc-600">/ {totalPages}</span>
                 <button onClick={()=>goToPage(currentPageNo+1)} disabled={currentPageNo>=totalPages||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">›</button>
               </div>
             )}
@@ -1034,6 +1075,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <span className="text-[9px] text-blue-300">{activeSec.wallComplete?"✓ Wall complete":"Wall outline in progress…"}</span>
                         <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[],wallComplete:false,totalLF:0,totalLegs:0,totalFrames:0,totalPlanks:0}:s))}
                           className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>
+                      </div>
+                    )}
+
+                    {/* Scaffold side toggle — appears once wall outline is complete */}
+                    {activeSec.wallComplete&&(
+                      <div>
+                        <label className="text-[9px] text-zinc-500 block mb-1.5">Scaffold Side (relative to wall)</label>
+                        <div className="flex gap-1">
+                          <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,scaffoldSide:"left"}:s))}
+                            className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${activeSec.scaffoldSide==="left"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                            Scaffold Left
+                          </button>
+                          <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,scaffoldSide:"right"}:s))}
+                            className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${activeSec.scaffoldSide==="right"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                            Scaffold Right
+                          </button>
+                        </div>
                       </div>
                     )}
 

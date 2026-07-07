@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
-import { calculateQuantityEngine, getActiveElevation, getActiveProject, saveActiveElevation, type ProjectElevation, type ScaffoldInput } from "@/lib/projectStore";
+import { calculateQuantityEngine, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -23,6 +23,19 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/project-plan-desk", label: "Project Plan Desk" },
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
   { href: "/estimate-review", label: "Estimate Review" },
+];
+
+const FRAME_TYPES: { id: string; label: string }[] = [
+  { id: "standard", label: "Standard" },
+  { id: "mason", label: "Mason" },
+  { id: "walk-through", label: "Walk-Thru" },
+  { id: "half", label: "Half Frame" },
+];
+
+const BRACKET_TYPES: { id: string; label: string }[] = [
+  { id: "12", label: "12\" Bracket" },
+  { id: "18", label: "18\" Bracket" },
+  { id: "24", label: "24\" Bracket" },
 ];
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
@@ -369,146 +382,241 @@ function ScaffoldModel3D({
 }
 
 // ── Section View SVG ──────────────────────────────────────────────────────────
+// Renders: the traced wall profile (steps, setbacks, decks — from
+// sectionView.wallOutline, converted image px → feet via
+// scale.pageUnitsPerFoot), the scaffold stacked on the chosen side at
+// the wall offset, level labels, frame height labels, cross braces, and
+// a drag-and-drop tray of frame/bracket pieces the estimator can drop
+// onto the drawing where Korban may have missed. Dropped pieces feed
+// straight back into material counts via onDropPiece.
 function SectionViewPanel({
-  wallOutline, wallOffset, frameTall, scaffoldWidthFt, frameMakeup,
-  sectionType, puf, editMode
+  wallOutline, wallOffset, frameTall, scaffoldWidthFt, scaffoldSide,
+  draftingAdditions, onDropPiece, onRemovePiece, onToggleSide, sectionType,
 }: {
   wallOutline: PlanPoint[]; wallOffset: number; frameTall: number;
-  scaffoldWidthFt: number; frameMakeup: string; sectionType: string;
-  puf: number | null; editMode: boolean;
+  scaffoldWidthFt: number; scaffoldSide: "left" | "right";
+  draftingAdditions: SectionDraftingItem[];
+  onDropPiece: (kind: "frame" | "bracket", variant: string, level: number) => void;
+  onRemovePiece: (id: string) => void;
+  onToggleSide: (side: "left" | "right") => void;
+  sectionType: string;
 }) {
-  const BAY_H = 6.333;
-  const frameHPx = 22;
-  const totalH = frameTall * frameHPx;
-  const widthPx = scaffoldWidthFt * 14;
-  const wallOffPx = wallOffset * 14;
-  const wallX = 10;
-  const scaffX = wallX + wallOffPx;
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [dragKind, setDragKind] = useState<{ kind: "frame" | "bracket"; variant: string } | null>(null);
 
-  // Convert wall outline to a simplified elevation profile
-  const hasWall = wallOutline.length >= 2;
+  const FRAME_H_FT = 6.333;
+  const pxPerFt = 14;
+  const frameHPx = FRAME_H_FT * pxPerFt;
+  const totalH = Math.max(1, frameTall) * frameHPx;
+  const widthPx = Math.max(scaffoldWidthFt, 0.1) * pxPerFt;
+  const wallOffPx = Math.max(wallOffset, 0.5) * pxPerFt;
+
+  const hasWallTrace = wallOutline.length >= 2;
+
+  // Takeoff Workspace's Section View "Store" step converts the traced
+  // wall outline to feet-space once, using whichever scale was active
+  // at trace time — x = linear footage along the wall, y = height in
+  // feet from the lowest traced point. No further scale conversion is
+  // needed here, so this just reads the points as given.
+  const wallPts = useMemo(() => (hasWallTrace ? wallOutline : ([] as PlanPoint[])), [wallOutline, hasWallTrace]);
+
+  const wallSpanFt = wallPts.length ? Math.max(1, Math.max(...wallPts.map(p => p.x))) : 14;
+  const wallDrawX0 = 24;
+  const wallPolyPx = wallPts.map(p => `${wallDrawX0 + p.x * pxPerFt},${totalH - p.y * pxPerFt}`).join(" ");
+
+  const scaffX = scaffoldSide === "left"
+    ? wallDrawX0 - wallOffPx - widthPx
+    : wallDrawX0 + wallSpanFt * pxPerFt + wallOffPx;
+
+  const svgOriginX = Math.min(0, scaffX - 14);
+  const svgW = (scaffoldSide === "left" ? wallDrawX0 + wallSpanFt * pxPerFt : scaffX + widthPx) + 60 - svgOriginX;
+
+  function handleDrop(e: any) {
+    e.preventDefault();
+    if (!dragKind || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const vb = svgRef.current.viewBox.baseVal;
+    const relY = (e.clientY - rect.top) / rect.height;
+    const yInVb = vb.y + relY * vb.height;
+    const level = Math.max(0, Math.min(frameTall - 1, Math.floor(yInVb / frameHPx)));
+    onDropPiece(dragKind.kind, dragKind.variant, level);
+    setDragKind(null);
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      {/* Wall side toggle */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-900 bg-[#0a0a0a] flex-shrink-0">
+        <span className="text-[8px] uppercase tracking-wider text-zinc-600">Scaffold Side</span>
+        <div className="flex rounded-lg border border-zinc-800 overflow-hidden">
+          <button onClick={() => onToggleSide("left")}
+            className={`px-2.5 py-0.5 text-[8px] font-bold transition ${scaffoldSide === "left" ? "bg-orange-500 text-black" : "text-zinc-500 hover:text-zinc-300"}`}>
+            Scaffold Left
+          </button>
+          <button onClick={() => onToggleSide("right")}
+            className={`px-2.5 py-0.5 text-[8px] font-bold transition ${scaffoldSide === "right" ? "bg-orange-500 text-black" : "text-zinc-500 hover:text-zinc-300"}`}>
+            Scaffold Right
+          </button>
+        </div>
+      </div>
+
       {/* SVG drawing */}
-      <div className="flex-1 flex items-center justify-center bg-zinc-950 p-2 overflow-hidden">
+      <div className="flex-1 flex items-center justify-center bg-zinc-950 p-2 overflow-hidden relative">
+        {!hasWallTrace && (
+          <p className="absolute inset-x-3 top-2 text-[8.5px] text-zinc-600 text-center leading-relaxed z-10">
+            No wall outline traced yet — trace the wall in Takeoff's Section View tab to render the real profile here. Showing scaffold only.
+          </p>
+        )}
         <svg
-          viewBox={`0 0 ${scaffX + widthPx + 30} ${totalH + 40}`}
+          ref={svgRef}
+          viewBox={`${svgOriginX} -22 ${svgW} ${totalH + 62}`}
           className="w-full h-full"
-          style={{ maxHeight: "100%", maxWidth: "100%" }}>
+          style={{ maxHeight: "100%", maxWidth: "100%" }}
+          onDragOver={e => e.preventDefault()}
+          onDrop={handleDrop}>
 
-          {/* Wall */}
-          <rect x={wallX} y="0" width="8" height={totalH + 5}
-            fill="#27272a" stroke="#3f3f46" strokeWidth="0.5" />
-          <text x={wallX + 4} y={totalH / 2} textAnchor="middle" fontSize="4"
-            fill="#71717a" fontFamily="monospace" dominantBaseline="middle"
-            transform={`rotate(-90,${wallX + 4},${totalH / 2})`}>WALL</text>
+          {/* Wall profile — actual traced outline */}
+          {hasWallTrace && (
+            <>
+              <polyline points={wallPolyPx} fill="none" stroke="#ef4444" strokeWidth="1.2" />
+              <text x={wallDrawX0} y={-8} fontSize="4" fill="#ef4444" fontFamily="monospace">WALL OUTLINE (TRACED)</text>
+            </>
+          )}
 
-          {/* Wall offset dim */}
-          <line x1={wallX + 8} y1={totalH + 8} x2={scaffX} y2={totalH + 8}
-            stroke="#f97316" strokeWidth="0.5" />
-          <line x1={wallX + 8} y1={totalH + 5} x2={wallX + 8} y2={totalH + 11} stroke="#f97316" strokeWidth="0.5" />
-          <line x1={scaffX} y1={totalH + 5} x2={scaffX} y2={totalH + 11} stroke="#f97316" strokeWidth="0.5" />
-          <text x={(wallX + 8 + scaffX) / 2} y={totalH + 16} textAnchor="middle"
-            fontSize="4" fill="#f97316" fontFamily="monospace">{wallOffset}'</text>
+          {/* Scaffold frames per level, bottom to top */}
+          {Array.from({ length: frameTall }).map((_, jFromBottom) => {
+            const level = frameTall - 1 - jFromBottom; // level index (0 = ground)
+            const y = jFromBottom * frameHPx;
+            const levelLabel = level === frameTall - 1 ? "Roof" : `Lvl ${level + 1}`;
+            const plankN = scaffoldWidthFt >= 5 ? 4 : 3;
+            const plW = (widthPx - 2) / plankN;
 
-          {/* Scaffold frames per jump */}
-          {Array.from({ length: frameTall }).map((_, j) => (
-            <g key={j}>
-              {/* Inner leg */}
-              <rect x={scaffX} y={j * frameHPx} width="2.5" height={frameHPx}
-                fill="#9ca3af" stroke="#6b7280" strokeWidth="0.3" />
-              {/* Outer leg */}
-              <rect x={scaffX + widthPx - 2.5} y={j * frameHPx} width="2.5" height={frameHPx}
-                fill="#9ca3af" stroke="#6b7280" strokeWidth="0.3" />
-              {/* Horizontal crossbar */}
-              <rect x={scaffX} y={j * frameHPx + frameHPx * 0.62} width={widthPx} height="1.5"
-                fill="#d1d5db" stroke="#6b7280" strokeWidth="0.2" />
-              {/* Cross brace */}
-              <line x1={scaffX} y1={j * frameHPx} x2={scaffX + widthPx} y2={j * frameHPx + frameHPx}
-                stroke="#6b7280" strokeWidth="0.6" opacity="0.5" />
-              {/* Planks */}
-              {Array.from({ length: Math.min(scaffoldWidthFt >= 5 ? 4 : scaffoldWidthFt >= 3.5 ? 3 : 3, 4) }).map((_, p) => {
-                const plW = (widthPx - 3) / 3;
-                return (
-                  <rect key={p} x={scaffX + 1.5 + p * plW} y={j * frameHPx + frameHPx - 2}
-                    width={plW - 0.5} height="2" fill="#92400e" stroke="#78350f" strokeWidth="0.2" />
-                );
-              })}
-              {/* Jump height label */}
-              <text x={scaffX + widthPx + 4} y={j * frameHPx + frameHPx / 2}
-                fontSize="3.5" fill="#71717a" fontFamily="monospace" dominantBaseline="middle">
-                {BAY_H.toFixed(2)}'
-              </text>
-            </g>
-          ))}
+            return (
+              <g key={level}>
+                <rect x={scaffX} y={y} width={widthPx} height={frameHPx} fill="none" stroke="#9ca3af" strokeWidth="0.6" />
+                {/* cross brace X */}
+                <line x1={scaffX} y1={y} x2={scaffX + widthPx} y2={y + frameHPx} stroke="#6b7280" strokeWidth="0.5" opacity="0.5" />
+                <line x1={scaffX + widthPx} y1={y} x2={scaffX} y2={y + frameHPx} stroke="#6b7280" strokeWidth="0.5" opacity="0.5" />
+                {/* planks on top of this level */}
+                {Array.from({ length: plankN }).map((_, p) => (
+                  <rect key={p} x={scaffX + 1 + p * plW} y={y - 2.2} width={plW - 0.5} height="2.2"
+                    fill="#92400e" stroke="#78350f" strokeWidth="0.2" />
+                ))}
+                {/* level label — left */}
+                <text x={scaffX - 4} y={y + frameHPx / 2} textAnchor="end" dominantBaseline="middle"
+                  fontSize="3.6" fill="#a1a1aa" fontFamily="monospace">{levelLabel}</text>
+                {/* frame height dimension — right */}
+                <text x={scaffX + widthPx + 4} y={y + frameHPx / 2} dominantBaseline="middle"
+                  fontSize="3.4" fill="#71717a" fontFamily="monospace">{FRAME_H_FT.toFixed(2)}'</text>
+              </g>
+            );
+          })}
 
-          {/* Guardrail */}
-          <rect x={scaffX + widthPx - 1.5} y={-10} width="1.5" height="10" fill="#9ca3af" />
-          <rect x={scaffX} y={-9} width={widthPx} height="1.2" fill="#9ca3af" />
-
-          {/* Base plates */}
-          <rect x={scaffX - 1} y={totalH} width="5" height="2" fill="#4b5563" />
-          <rect x={scaffX + widthPx - 4} y={totalH} width="5" height="2" fill="#4b5563" />
-
-          {/* Ground */}
-          <line x1="0" y1={totalH + 2} x2={scaffX + widthPx + 28} y2={totalH + 2}
-            stroke="#374151" strokeWidth="0.8" />
+          {/* Hand-placed additions */}
+          {draftingAdditions.map(item => {
+            const y = (frameTall - 1 - item.level) * frameHPx;
+            if (item.kind === "frame") {
+              return (
+                <g key={item.id} style={{ cursor: "pointer" }} onClick={() => onRemovePiece(item.id)}>
+                  <rect x={scaffX + 2} y={y + 2} width={widthPx - 4} height={frameHPx - 4}
+                    fill="rgba(249,115,22,0.12)" stroke="#f97316" strokeWidth="0.8" strokeDasharray="2,1" />
+                  <text x={scaffX + widthPx / 2} y={y + frameHPx / 2} textAnchor="middle" dominantBaseline="middle"
+                    fontSize="3" fill="#f97316" fontFamily="monospace">{item.variant}</text>
+                </g>
+              );
+            }
+            return (
+              <g key={item.id} style={{ cursor: "pointer" }} onClick={() => onRemovePiece(item.id)}>
+                <polygon points={`${scaffX + widthPx},${y + frameHPx} ${scaffX + widthPx + 10},${y + frameHPx} ${scaffX + widthPx},${y + frameHPx - 10}`}
+                  fill="rgba(249,115,22,0.3)" stroke="#f97316" strokeWidth="0.6" />
+              </g>
+            );
+          })}
 
           {/* Section cut label */}
-          <text x={scaffX + widthPx + 20} y="5" fontSize="5" fill="#f97316"
-            fontFamily="monospace" fontWeight="bold">{sectionType}</text>
+          <text x={scaffX} y={totalH + 32} fontSize="5" fill="#f97316" fontFamily="monospace" fontWeight="bold">{sectionType}</text>
+          <text x={scaffX + widthPx / 2} y={totalH + 42} textAnchor="middle" fontSize="4" fill="#2563eb" fontFamily="monospace">{scaffoldWidthFt}' wide</text>
 
-          {/* Width dim */}
-          <line x1={scaffX} y1={totalH + 22} x2={scaffX + widthPx} y2={totalH + 22} stroke="#2563eb" strokeWidth="0.5" />
-          <text x={scaffX + widthPx / 2} y={totalH + 28} textAnchor="middle"
-            fontSize="4" fill="#2563eb" fontFamily="monospace">{scaffoldWidthFt}'</text>
+          {/* Wall offset dimension */}
+          {hasWallTrace && (
+            <>
+              <line
+                x1={scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0 + wallSpanFt * pxPerFt}
+                y1={totalH + 10}
+                x2={scaffoldSide === "left" ? wallDrawX0 : scaffX}
+                y2={totalH + 10}
+                stroke="#f97316" strokeWidth="0.5" />
+              <text
+                x={((scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0 + wallSpanFt * pxPerFt) +
+                    (scaffoldSide === "left" ? wallDrawX0 : scaffX)) / 2}
+                y={totalH + 18} textAnchor="middle" fontSize="3.6" fill="#f97316" fontFamily="monospace">{wallOffset}' offset</text>
+            </>
+          )}
         </svg>
       </div>
 
-      {/* Frame makeup */}
-      {frameMakeup && (
-        <div className="px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
-          <p className="text-[8px] uppercase tracking-wider text-zinc-600 mb-1">Frame Makeup</p>
-          <p className="text-[9px] font-mono text-orange-300 leading-relaxed whitespace-pre-line">{frameMakeup}</p>
+      {/* Drafting pieces tray */}
+      <div className="border-t border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0 space-y-1.5">
+        <div>
+          <p className="text-[8px] uppercase tracking-wider text-zinc-600 mb-1">Frames — drag onto drawing</p>
+          <div className="flex gap-1.5 flex-wrap">
+            {FRAME_TYPES.map(f => (
+              <div key={f.id} draggable
+                onDragStart={() => setDragKind({ kind: "frame", variant: f.label })}
+                className="cursor-grab select-none rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[8px] text-zinc-300 hover:border-orange-500/50">
+                {f.label}
+              </div>
+            ))}
+          </div>
         </div>
-      )}
+        <div>
+          <p className="text-[8px] uppercase tracking-wider text-zinc-600 mb-1">Brackets — drag onto drawing</p>
+          <div className="flex gap-1.5 flex-wrap">
+            {BRACKET_TYPES.map(b => (
+              <div key={b.id} draggable
+                onDragStart={() => setDragKind({ kind: "bracket", variant: b.label })}
+                className="cursor-grab select-none rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[8px] text-zinc-300 hover:border-orange-500/50">
+                {b.label}
+              </div>
+            ))}
+          </div>
+        </div>
+        {draftingAdditions.length > 0 && (
+          <p className="text-[7.5px] text-zinc-700 italic">Click a placed piece on the drawing to remove it.</p>
+        )}
+      </div>
     </div>
   );
 }
 
 // ── Frame Config Options ──────────────────────────────────────────────────────
+// Only shows the Optimal configuration Korban actually computed. No
+// invented alternate frame sizes — if there's nothing beyond optimal to
+// recommend, that's stated plainly rather than padded with options.
 function FrameConfigOptions({ frameTall, scaffoldWidthFt }: { frameTall: number; scaffoldWidthFt: number }) {
   const FRAME_H = 6.333;
-  const configs = [
-    { label: "Optimal", jumps: frameTall, frameH: FRAME_H, desc: "Standard configuration" },
-    { label: "Option B", jumps: Math.ceil(frameTall * 0.85), frameH: FRAME_H * 1.1, desc: "Extended frames" },
-    { label: "Option C", jumps: frameTall + 1, frameH: FRAME_H * 0.85, desc: "Shorter frames" },
-  ];
   return (
     <div className="border-t border-zinc-900 bg-[#0b0b0b] flex-shrink-0">
       <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500 px-3 pt-2 pb-1">Frame Configuration Options</p>
-      <div className="grid grid-cols-3 gap-2 px-3 pb-3">
-        {configs.map((c, i) => (
-          <div key={i} className={`rounded-xl border p-2.5 ${i === 0 ? "border-orange-500/40 bg-orange-500/5" : "border-zinc-800 bg-black"}`}>
-            <p className={`text-[9px] font-bold uppercase tracking-wider mb-1.5 ${i === 0 ? "text-orange-300" : "text-zinc-500"}`}>{c.label}</p>
-            <div className="space-y-1">
-              <div className="flex justify-between text-[9px]">
-                <span className="text-zinc-600">Jumps</span>
-                <span className="font-mono text-zinc-300">{c.jumps}</span>
-              </div>
-              <div className="flex justify-between text-[9px]">
-                <span className="text-zinc-600">Frame H</span>
-                <span className="font-mono text-zinc-300">{c.frameH.toFixed(2)}'</span>
-              </div>
-              <div className="flex justify-between text-[9px]">
-                <span className="text-zinc-600">Width</span>
-                <span className="font-mono text-zinc-300">{scaffoldWidthFt}'</span>
-              </div>
+      <div className="px-3 pb-3">
+        <div className="rounded-xl border border-orange-500/40 bg-orange-500/5 p-2.5">
+          <p className="text-[9px] font-bold uppercase tracking-wider mb-1.5 text-orange-300">Optimal</p>
+          <div className="space-y-1">
+            <div className="flex justify-between text-[9px]">
+              <span className="text-zinc-600">Jumps</span>
+              <span className="font-mono text-zinc-300">{frameTall}</span>
             </div>
-            <p className="text-[8px] text-zinc-700 mt-1.5">{c.desc}</p>
+            <div className="flex justify-between text-[9px]">
+              <span className="text-zinc-600">Frame H</span>
+              <span className="font-mono text-zinc-300">{FRAME_H.toFixed(2)}'</span>
+            </div>
+            <div className="flex justify-between text-[9px]">
+              <span className="text-zinc-600">Width</span>
+              <span className="font-mono text-zinc-300">{scaffoldWidthFt}'</span>
+            </div>
           </div>
-        ))}
+        </div>
+        <p className="text-[8px] text-zinc-600 mt-2 italic">No further recommendations beyond optimal approach</p>
       </div>
     </div>
   );
@@ -578,7 +686,17 @@ export default function SetScaffoldV2Inner() {
     return Math.max(1, Math.ceil((avgH - workerReachHeight) / frameHeight));
   };
 
-  // Totals — correct plank formula
+  // Section view — wall outline, scaffold side, hand-placed additions
+  const sectionWallOutline = useMemo(() => {
+    const outline2 = elevation?.sectionView?.wallOutline;
+    return outline2 && outline2.length >= 2 ? (outline2 as PlanPoint[]) : ([] as PlanPoint[]);
+  }, [elevation]);
+  const scaffoldSide = elevation?.sectionView?.scaffoldSide ?? "left";
+  const draftingAdditions = elevation?.sectionView?.draftingAdditions ?? [];
+  const manualFrameCount = useMemo(() => draftingAdditions.filter(d => d.kind === "frame").length, [draftingAdditions]);
+  const manualBracketCount = useMemo(() => draftingAdditions.filter(d => d.kind === "bracket").length, [draftingAdditions]);
+
+  // Totals — correct plank formula, plus hand-placed additions from Section View
   const totals = useMemo(() => {
     let legs = 0, bays = 0, totalFrames = 0;
     for (const seg of allSegmentLegs) {
@@ -593,8 +711,13 @@ export default function SetScaffoldV2Inner() {
     }
     // Planks = bays × planksPerBay × frameTall (levels)
     const planks = bays * ppb * frameTall;
-    return { legs, bays, frames: totalFrames, planks };
-  }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation]);
+    return {
+      legs, bays,
+      frames: totalFrames + manualFrameCount,
+      brackets: manualBracketCount,
+      planks,
+    };
+  }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount]);
 
   // Overlay rows
   const rawOverlayRows = useMemo(() => {
@@ -604,13 +727,6 @@ export default function SetScaffoldV2Inner() {
       closed: Boolean(r.closed), color: r.color || (i === 0 ? "#2563eb" : "#22c55e"),
       points: r.points.filter(isFinitePoint),
     })).filter((r: any) => r.points.length >= 2);
-  }, [elevation]);
-
-  // Section wall outline
-  const sectionWallOutline = useMemo(() => {
-    const sections = elevation?.sectionView as any;
-    if (sections?.wallOutline?.length >= 2) return sections.wallOutline as PlanPoint[];
-    return [] as PlanPoint[];
   }, [elevation]);
 
   useEffect(() => {
@@ -636,8 +752,25 @@ export default function SetScaffoldV2Inner() {
     setElevation(next); saveActiveElevation(next);
   }
 
-  const sectionFM = (elevation?.sectionView as any)?.frameMakeup ?? "";
-  const sectionType = (elevation?.sectionView as any)?.sectionType ?? "A-A";
+  function handleToggleScaffoldSide(side: "left" | "right") {
+    saveSectionView({ scaffoldSide: side });
+    setElevation(cur => cur ? { ...cur, sectionView: { ...cur.sectionView, scaffoldSide: side } } : cur);
+  }
+
+  function handleDropDraftingPiece(kind: "frame" | "bracket", variant: string, level: number) {
+    const item: SectionDraftingItem = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, variant, level };
+    const next = [...draftingAdditions, item];
+    saveSectionView({ draftingAdditions: next });
+    setElevation(cur => cur ? { ...cur, sectionView: { ...cur.sectionView, draftingAdditions: next } } : cur);
+  }
+
+  function handleRemoveDraftingPiece(id: string) {
+    const next = draftingAdditions.filter(d => d.id !== id);
+    saveSectionView({ draftingAdditions: next });
+    setElevation(cur => cur ? { ...cur, sectionView: { ...cur.sectionView, draftingAdditions: next } } : cur);
+  }
+
+  const sectionType = elevation?.sectionView?.sectionType ?? "A-A";
   const wallOffset = elevation?.sectionView?.wallOffset ?? 1;
 
   return (
@@ -856,16 +989,18 @@ export default function SetScaffoldV2Inner() {
           </div>
 
           {/* Section drawing */}
-          <div className="flex-shrink-0" style={{ height: "35%" }}>
+          <div className="flex-shrink-0" style={{ height: "40%" }}>
             <SectionViewPanel
               wallOutline={sectionWallOutline}
               wallOffset={wallOffset}
               frameTall={frameTall}
               scaffoldWidthFt={scaffoldWidthFt}
-              frameMakeup={sectionFM}
+              scaffoldSide={scaffoldSide}
+              draftingAdditions={draftingAdditions}
+              onDropPiece={handleDropDraftingPiece}
+              onRemovePiece={handleRemoveDraftingPiece}
+              onToggleSide={handleToggleScaffoldSide}
               sectionType={sectionType}
-              puf={puf}
-              editMode={editMode}
             />
           </div>
 
@@ -887,6 +1022,7 @@ export default function SetScaffoldV2Inner() {
                 { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
                 { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
                 { partNo: "CPS",    description: "Coupling Pin",      qty: totals.legs * 2 },
+                { partNo: "BRKT",   description: "Wall Bracket (Added)", qty: totals.brackets },
               ].map(item => (
                 <div key={item.partNo} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 transition ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
                   <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{item.partNo}</span>
