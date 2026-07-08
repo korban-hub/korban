@@ -202,23 +202,32 @@ function ScaffoldModel3D({
     const camera = new THREE.PerspectiveCamera(50, initialW / initialH, 0.1, 500);
 
     // WebGLRenderer creation throws if the browser can't get a GPU
-    // context — most commonly because the page has exhausted its WebGL
-    // context budget after many mounts (each tab switch creates a new
-    // one). An uncaught throw here previously took the whole page down
-    // to a blank white screen with no error visible. Now it's caught
-    // and surfaced as an actual message instead.
+    // context. Separately, this machine has a CONFIRMED compositing
+    // failure: a live, correctly-sized canvas with a healthy render loop
+    // still displays blank white (verified via Inspect — canvas exists,
+    // three.js initialized, loop runs, no context-lost event). So this
+    // uses the most conservative rendering path available: no antialias
+    // (heaviest compositing feature, common trigger on flaky drivers),
+    // no shadow maps, pixel ratio capped at 1, low-power GPU preference
+    // (avoids discrete-GPU driver bugs on Windows laptops/desktops), and
+    // preserveDrawingBuffer to force a stable backbuffer instead of the
+    // fast-swap path some drivers white-out on.
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        powerPreference: "low-power",
+        preserveDrawingBuffer: true,
+        failIfMajorPerformanceCaveat: false,
+      });
     } catch (err) {
       console.error("[3D model] Failed to create WebGL renderer — likely out of GPU contexts. Try fully restarting the browser.", err);
       setRenderError("3D view unavailable right now (couldn't get a GPU context). Try fully closing and reopening the browser, then reload this page.");
       return;
     }
     renderer.setSize(initialW, initialH);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.setPixelRatio(1);
+    renderer.shadowMap.enabled = false;
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -444,6 +453,17 @@ function ScaffoldModel3D({
         camera.lookAt(center.x, center.y * 0.4, center.z);
       }
       renderer.render(scene, camera);
+      // IMAGE-MIRROR WORKAROUND — this machine's browser compositing of
+      // live WebGL canvases is broken (confirmed: the Capture PNG shows a
+      // perfect scene while the on-screen canvas displays blank white; the
+      // GPU draws fine, only the final canvas→screen step fails). Ordinary
+      // <img> elements display flawlessly, so every 5th frame (~12fps) the
+      // finished frame is copied into an <img> overlaying the canvas.
+      // Rotation stays visibly smooth; requires preserveDrawingBuffer.
+      if (debugFrameCount % 5 === 0) {
+        const img = (mountRef.current as any)?.__mirrorImg as HTMLImageElement | undefined;
+        if (img) img.src = renderer.domElement.toDataURL("image/jpeg", 0.85);
+      }
     }
     animate();
 
@@ -495,7 +515,19 @@ function ScaffoldModel3D({
 
   return (
     <div className="flex flex-col h-full">
-      <div ref={mountRef} className="flex-1 overflow-hidden rounded-t-lg" style={{ minHeight: 0 }} />
+      <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#080604]" style={{ minHeight: 0 }}>
+        {/* The live canvas mounts in here but is visually hidden — this
+            machine's compositing shows it as blank white even though the
+            GPU draws it perfectly (proven via Capture). */}
+        <div ref={mountRef} className="absolute inset-0 opacity-0" />
+        {/* Mirror image — receives the rendered frames (~12fps) and
+            displays them the way this machine handles correctly. */}
+        <img
+          ref={el => { if (mountRef.current) (mountRef.current as any).__mirrorImg = el; }}
+          alt="3D scaffold model"
+          className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+        />
+      </div>
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
         <button onClick={() => setZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold flex-shrink-0">−</button>
         <span className="text-[9px] font-mono text-zinc-600 w-9 text-center flex-shrink-0">{Math.round((1 / zoom) * 100)}%</span>
@@ -833,7 +865,7 @@ export default function SetScaffoldV2Inner() {
   const [showOverlay,    setShowOverlay]    = useState(true);
   const [showScaffold,   setShowScaffold]   = useState(true);
   const [editMode,       setEditMode]       = useState(false);
-  const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "3d" | "section">("overlay");
+  const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
   const [sectionExpanded, setSectionExpanded] = useState(false);
   const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
   const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
@@ -931,6 +963,14 @@ export default function SetScaffoldV2Inner() {
     };
   }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount]);
 
+  // Live frame height for the 3D model — average frames-per-leg from the
+  // current totals (which include per-tick overrides and deletions), so
+  // edit-mode changes visibly change the 3D model, not just the numbers.
+  const liveFrameTall = useMemo(() => {
+    if (totals.legs <= 0) return frameTall;
+    return Math.max(1, Math.round((totals.frames - manualFrameCount) / totals.legs));
+  }, [totals, frameTall, manualFrameCount]);
+
   // Overlay rows
   const rawOverlayRows = useMemo(() => {
     const g = elevation?.overlayGeometry; if (!g) return [];
@@ -955,6 +995,103 @@ export default function SetScaffoldV2Inner() {
     window.addEventListener("focus", load); window.addEventListener("pageshow", load);
     return () => { window.removeEventListener("focus", load); window.removeEventListener("pageshow", load); };
   }, []);
+
+  // ── Native pointer events on the Overlay SVG ───────────────────────────
+  // React's synthetic events provably never fire on this SVG in the user's
+  // environment (verified with on-screen counters: HTML buttons work, but
+  // clicks anywhere on the SVG — background or ticks — register zero).
+  // So instead of fighting that, these listeners attach directly to the
+  // DOM node with addEventListener, and do their own hit-testing: convert
+  // the pointer position into viewBox coordinates (accounting for the
+  // preserveAspectRatio letterboxing), find the nearest tick, and handle
+  // select/drag/pan accordingly.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg || activeMainTab !== "overlay") return;
+
+    function toViewBox(e: PointerEvent) {
+      const r = svg!.getBoundingClientRect();
+      const vb = svg!.viewBox.baseVal;
+      const scale = Math.min(r.width / vb.width, r.height / vb.height);
+      const offX = (r.width - vb.width * scale) / 2;
+      const offY = (r.height - vb.height * scale) / 2;
+      return {
+        x: vb.x + (e.clientX - r.left - offX) / scale,
+        y: vb.y + (e.clientY - r.top - offY) / scale,
+        pxScale: scale,
+      };
+    }
+
+    function findNearestLeg(pt: { x: number; y: number }): string | null {
+      const hitRadius = Math.max(scaffoldWidthFt * effPuf * 0.8, effPuf * 1.5);
+      let best: string | null = null;
+      let bestDist = hitRadius;
+      for (const seg of allSegmentLegs) {
+        const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+        sl.forEach((leg, i) => {
+          const k = `${seg.segIndex}-${i}`;
+          if (deletedLegKeys.has(k)) return;
+          const off = legOffsets[k] ?? { dx: 0, dy: 0 };
+          const mx = (leg.wallPoint.x + leg.tickTip.x) / 2 + off.dx;
+          const my = (leg.wallPoint.y + leg.tickTip.y) / 2 + off.dy;
+          const d = Math.sqrt((pt.x - mx) ** 2 + (pt.y - my) ** 2);
+          if (d < bestDist) { bestDist = d; best = k; }
+        });
+      }
+      return best;
+    }
+
+    let draggingKey: string | null = null;
+    let panning = false;
+
+    function onPointerDown(e: PointerEvent) {
+      setDebugSvgClicks(n => n + 1);
+      const pt = toViewBox(e);
+      if (editMode) {
+        const hit = findNearestLeg(pt);
+        if (hit) {
+          setDebugTickClicks(n => n + 1);
+          setSelectedLegKey(prev => (prev === hit ? prev : hit));
+          draggingKey = hit;
+          setDraggedLegKey(hit);
+          e.preventDefault();
+        } else {
+          setSelectedLegKey(null);
+        }
+      } else {
+        panning = true;
+        setIsPanning(true);
+      }
+    }
+
+    function onPointerMove(e: PointerEvent) {
+      const r = svg!.getBoundingClientRect();
+      const vb = svg!.viewBox.baseVal;
+      const scale = Math.min(r.width / vb.width, r.height / vb.height);
+      if (draggingKey) {
+        const k = draggingKey;
+        setLegOffsets(p => ({ ...p, [k]: { dx: (p[k]?.dx ?? 0) + e.movementX / scale, dy: (p[k]?.dy ?? 0) + e.movementY / scale } }));
+      } else if (panning) {
+        setViewerPan(p => ({ dx: p.dx - e.movementX / scale, dy: p.dy - e.movementY / scale }));
+      }
+    }
+
+    function onPointerUp() {
+      draggingKey = null;
+      panning = false;
+      setDraggedLegKey(null);
+      setIsPanning(false);
+    }
+
+    svg.addEventListener("pointerdown", onPointerDown);
+    svg.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      svg.removeEventListener("pointerdown", onPointerDown);
+      svg.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [activeMainTab, editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, mounted]);
 
   function saveConfig(updates: Partial<ScaffoldInput>) {
     const cur = elevation ?? getActiveElevation();
@@ -1003,24 +1140,27 @@ export default function SetScaffoldV2Inner() {
         }
       />
 
-      {/* Tabs — mirrors Takeoff Workspace's tab style exactly. Each tab
-          shows the outputs gathered in Takeoff for that area; nothing
-          here re-does PDF upload, tracing, or scale-setting — that all
-          happens in Takeoff Workspace only. */}
-      <div className="flex items-center border-b border-zinc-900 bg-[#0b0b0b] px-6 flex-shrink-0">
-        {([
-          { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
-          { id: "3d", label: "3D Model", icon: "▲" },
-          { id: "section", label: "Section View", icon: "✂" },
-        ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => (
-          <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
-            className={`flex items-center gap-2 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.15em] border-b-2 transition ${activeMainTab === tab.id ? "border-white text-white" : "border-transparent text-zinc-600 hover:text-zinc-400"}`}>
-            <span>{tab.icon}</span>{tab.label}
-          </button>
-        ))}
-      </div>
-
+      {/* Layout: left main column holds the Overlay/Section tabs; right
+          column holds the 3D model, mounted ONCE and never unmounted —
+          it stays visible and rotating at all times. (Previously the 3D
+          view was its own tab, which unmounted/remounted it on every
+          tab switch — each remount creates a fresh WebGL context, and
+          that churn matches the freeze pattern we kept hitting.) */}
       <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-col flex-1 overflow-hidden border-r border-zinc-900">
+          <div className="flex items-center border-b border-zinc-900 bg-[#0b0b0b] px-6 flex-shrink-0">
+            {([
+              { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
+              { id: "section", label: "Section View", icon: "✂" },
+            ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => (
+              <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
+                className={`flex items-center gap-2 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.15em] border-b-2 transition ${activeMainTab === tab.id ? "border-white text-white" : "border-transparent text-zinc-600 hover:text-zinc-400"}`}>
+                <span>{tab.icon}</span>{tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-1 overflow-hidden">
 
         {/* ── Tab: Overlay / Takeoff ──────────────────────────────────── */}
         {activeMainTab === "overlay" && (
@@ -1059,31 +1199,23 @@ export default function SetScaffoldV2Inner() {
               <p className="text-zinc-300">SVG background clicks: <span className="text-white font-bold">{debugSvgClicks}</span></p>
               <p className="text-zinc-300">Tick clicks: <span className="text-white font-bold">{debugTickClicks}</span></p>
             </div>
-            <div className="absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
-            <svg ref={svgRef} className="h-full w-full"
+            {/* Decorative grid — MUST be pointer-events-none: it's absolutely
+                positioned, which paints it ABOVE the static-flow svg per CSS
+                stacking rules. Without this, it invisibly covers the whole
+                canvas and swallows every click before the svg can see it —
+                which is exactly the "zero clicks register anywhere" bug. */}
+            <div className="pointer-events-none absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
+            <svg ref={svgRef} className="relative z-10 h-full w-full"
               viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1 / viewerZoom)) / 2 + viewerPan.dx} ${svgViewBox.y + (svgViewBox.h * (1 - 1 / viewerZoom)) / 2 + viewerPan.dy} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
-              style={{ cursor: isPanning ? "grabbing" : editMode ? "crosshair" : "grab" }}
-              onMouseDown={e => {
-                console.log("[svg background] onMouseDown fired", { editMode, draggedLegKey, target: (e.target as Element)?.tagName });
-                setDebugSvgClicks(n => n + 1);
-                if (editMode || draggedLegKey) return;
-                setIsPanning(true);
-              }}
-              onMouseMove={e => {
-                if (draggedLegKey && svgRef.current) {
-                  const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
-                  const sx = vb.width / rect.width, sy = vb.height / rect.height;
-                  setLegOffsets(p => ({ ...p, [draggedLegKey]: { dx: (p[draggedLegKey]?.dx ?? 0) + e.movementX * sx, dy: (p[draggedLegKey]?.dy ?? 0) + e.movementY * sy } }));
-                  return;
-                }
-                if (isPanning && svgRef.current) {
-                  const rect = svgRef.current.getBoundingClientRect(), vb = svgRef.current.viewBox.baseVal;
-                  const sx = vb.width / rect.width, sy = vb.height / rect.height;
-                  setViewerPan(p => ({ dx: p.dx - e.movementX * sx, dy: p.dy - e.movementY * sy }));
-                }
-              }}
-              onMouseUp={() => { setDraggedLegKey(null); setIsPanning(false); }}
-              onMouseLeave={() => { setDraggedLegKey(null); setIsPanning(false); }}>
+              style={{
+                cursor: isPanning
+                  ? "grabbing"
+                  : editMode
+                    // Orange crosshair — signals the mouse is a design tool
+                    // right now, not a plain pointer.
+                    ? `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg stroke='%23f97316' stroke-width='2'%3E%3Cline x1='12' y1='1' x2='12' y2='9'/%3E%3Cline x1='12' y1='15' x2='12' y2='23'/%3E%3Cline x1='1' y1='12' x2='9' y2='12'/%3E%3Cline x1='15' y1='12' x2='23' y2='12'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='1.5' fill='%23f97316'/%3E%3C/svg%3E") 12 12, crosshair`
+                    : "grab",
+              }}>
 
               {/* Overlay */}
               {showOverlay && (rawOverlayRows.length > 0 ? (
@@ -1142,17 +1274,7 @@ export default function SetScaffoldV2Inner() {
                       const tp = { x: leg.tickTip.x + off.dx, y: leg.tickTip.y + off.dy };
                       const lp = { x: leg.labelPoint.x + off.dx, y: leg.labelPoint.y + off.dy };
                       return (
-                        <g key={k} style={{ cursor: editMode ? (sel ? "grab" : "pointer") : "default" }}
-                          onClick={() => {
-                            console.log("[tick] onClick fired", { k, editMode });
-                            setDebugTickClicks(n => n + 1);
-                            if (editMode) setSelectedLegKey(p => p === k ? null : k);
-                          }}
-                          onMouseDown={e => {
-                            console.log("[tick] onMouseDown fired", { k, editMode });
-                            setDebugTickClicks(n => n + 1);
-                            if (editMode) { e.preventDefault(); setDraggedLegKey(k); setSelectedLegKey(k); }
-                          }}>
+                        <g key={k}>
                           {editMode && <circle cx={(wp.x + tp.x) / 2} cy={(wp.y + tp.y) / 2} r={tl * 0.55}
                             fill={sel ? "rgba(249,115,22,0.18)" : "rgba(249,115,22,0.04)"}
                             stroke={sel ? "#f97316" : "rgba(249,115,22,0.25)"}
@@ -1177,31 +1299,46 @@ export default function SetScaffoldV2Inner() {
               })}
 
               {/* Edit popup */}
-              {editMode && selectedLegKey && (() => {
-                const [si, li] = selectedLegKey.split("-").map(Number);
-                const seg = allSegmentLegs.find(s => s.segIndex === si);
-                const legs = seg?.legs.filter(l => !l.isTurnaroundMirror) ?? [];
-                const leg = legs[li]; if (!leg) return null;
-                const off = legOffsets[selectedLegKey] ?? { dx: 0, dy: 0 };
-                const cx = leg.tickTip.x + off.dx, cy = leg.tickTip.y + off.dy - 20;
-                const fc = overriddenFC[selectedLegKey] ?? frameTall;
-                return (
-                  <g>
-                    <rect x={cx - 54} y={cy - 14} width={108} height={28} rx={6} fill="#18181b" stroke="#f97316" strokeWidth="1" opacity="0.97" />
-                    <text x={cx - 48} y={cy + 5} fontSize="8" fill="#f97316" fontFamily="monospace" fontWeight="bold">Frames: {fc}</text>
-                    <rect x={cx + 14} y={cy - 10} width={16} height={16} rx={3} fill="#f97316" style={{ cursor: "pointer" }}
-                      onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: Math.max(1, (p[selectedLegKey] ?? frameTall) - 1) }))} />
-                    <text x={cx + 22} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>−</text>
-                    <rect x={cx + 32} y={cy - 10} width={16} height={16} rx={3} fill="#f97316" style={{ cursor: "pointer" }}
-                      onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: (p[selectedLegKey] ?? frameTall) + 1 }))} />
-                    <text x={cx + 40} y={cy + 4} fontSize="10" fill="black" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>+</text>
-                    <rect x={cx - 54} y={cy + 16} width={108} height={16} rx={4} fill="#ef4444" opacity="0.85" style={{ cursor: "pointer" }}
-                      onClick={() => { setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; }); setSelectedLegKey(null); }} />
-                    <text x={cx} y={cy + 28} fontSize="7.5" fill="white" textAnchor="middle" fontWeight="bold" style={{ pointerEvents: "none" }}>DELETE TICK</text>
-                  </g>
-                );
-              })()}
             </svg>
+
+            {/* Edit popup — HTML overlay with real HTML buttons. The old
+                version drew this inside the SVG with SVG onClick handlers,
+                which provably never fire in this environment (HTML buttons
+                do — verified with the debug counters). Positioned by
+                converting the selected tick's viewBox coords to container
+                pixels with the same letterbox-aware transform the native
+                hit-testing uses. */}
+            {editMode && selectedLegKey && (() => {
+              const [si, li] = selectedLegKey.split("-").map(Number);
+              const seg = allSegmentLegs.find(s => s.segIndex === si);
+              const legs = seg?.legs.filter(l => !l.isTurnaroundMirror) ?? [];
+              const leg = legs[li]; if (!leg) return null;
+              const svg = svgRef.current; if (!svg) return null;
+              const off = legOffsets[selectedLegKey] ?? { dx: 0, dy: 0 };
+              const vb = svg.viewBox.baseVal;
+              const r = svg.getBoundingClientRect();
+              const host = svg.parentElement?.getBoundingClientRect() ?? r;
+              const scale = Math.min(r.width / vb.width, r.height / vb.height);
+              const offX = (r.width - vb.width * scale) / 2 + (r.left - host.left);
+              const offY = (r.height - vb.height * scale) / 2 + (r.top - host.top);
+              const px = (leg.tickTip.x + off.dx - vb.x) * scale + offX;
+              const py = (leg.tickTip.y + off.dy - vb.y) * scale + offY;
+              const fc = overriddenFC[selectedLegKey] ?? frameTall;
+              return (
+                <div className="absolute z-40 rounded-xl border border-orange-500 bg-zinc-900/95 shadow-xl px-3 py-2"
+                  style={{ left: Math.max(4, Math.min(px - 80, (host.width || 300) - 170)), top: Math.max(4, py - 76) }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold text-orange-400">Frames: {fc}</span>
+                    <button onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: Math.max(1, (p[selectedLegKey] ?? frameTall) - 1) }))}
+                      className="rounded-md bg-orange-500 w-6 h-6 text-black text-sm font-bold hover:bg-orange-400">−</button>
+                    <button onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: (p[selectedLegKey] ?? frameTall) + 1 }))}
+                      className="rounded-md bg-orange-500 w-6 h-6 text-black text-sm font-bold hover:bg-orange-400">+</button>
+                  </div>
+                  <button onClick={() => { setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; }); setSelectedLegKey(null); }}
+                    className="mt-1.5 w-full rounded-md bg-red-500/85 py-1 text-[9px] font-bold text-white hover:bg-red-500">DELETE TICK</button>
+                </div>
+              );
+            })()}
             </div>
           </div>
 
@@ -1237,57 +1374,6 @@ export default function SetScaffoldV2Inner() {
                 <div key={l as string} className="flex items-center justify-between rounded-lg border border-orange-500/25 bg-orange-500/5 px-2.5 py-1.5">
                   <span className="text-[9px] uppercase tracking-wider text-orange-700">{l}</span>
                   <span className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-        )}
-
-        {/* ── Tab: 3D Model + Total Project Material List ─────────────── */}
-        {activeMainTab === "3d" && (
-        <section className="flex flex-col w-full overflow-hidden">
-          <div className="flex flex-col flex-shrink-0" style={{ height: "62%" }}>
-            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
-            </div>
-            <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-              {mounted && (
-                <ScaffoldModel3D
-                  outline={outline}
-                  puf={effPuf}
-                  bayFt={bayLengthFt}
-                  widthFt={scaffoldWidthFt}
-                  frameTall={frameTall}
-                  scaffoldWidthFt={scaffoldWidthFt}
-                />
-              )}
-            </div>
-          </div>
-
-          {/* Clear separation between the 3D view and the material list below it */}
-          <div className="border-t-4 border-zinc-900 flex-1 overflow-y-auto min-h-0">
-            <div className="px-4 pt-3 pb-1 flex items-center justify-between">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Total Project Material List</p>
-              <a href="/inventory/load-list" className="text-[9px] text-orange-400 hover:text-orange-300">Full Load List →</a>
-            </div>
-            <div className="px-4 pb-4 space-y-1">
-              {[
-                { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
-                { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
-                { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.bays   },
-                { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.bays   },
-                { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
-                { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
-                { partNo: "CPS",    description: "Coupling Pin",      qty: totals.legs * 2 },
-                { partNo: "BRKT",   description: "Wall Bracket (Added)", qty: totals.brackets },
-              ].map(item => (
-                <div key={item.partNo} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 transition ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
-                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{item.partNo}</span>
-                  <span className="text-[9px] text-zinc-500 flex-1 truncate">{item.description}</span>
-                  <span className={`font-mono text-[10px] font-bold ${item.qty > 0 ? "text-orange-300" : "text-zinc-700"}`}>
-                    {item.qty > 0 ? item.qty.toLocaleString() : "—"}
-                  </span>
                 </div>
               ))}
             </div>
@@ -1364,6 +1450,58 @@ export default function SetScaffoldV2Inner() {
           </div>
         </section>
         )}
+          </div>
+        </div>
+
+        {/* ── Persistent right column — 3D model, always mounted & rotating,
+              with the Total Project Material List beneath it ─────────── */}
+        <div className="flex flex-col flex-shrink-0 overflow-hidden" style={{ width: "30%" }}>
+          <div className="flex flex-col flex-shrink-0" style={{ height: "55%" }}>
+            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
+            </div>
+            <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+              {mounted && (
+                <ScaffoldModel3D
+                  outline={outline}
+                  puf={effPuf}
+                  bayFt={bayLengthFt}
+                  widthFt={scaffoldWidthFt}
+                  frameTall={liveFrameTall}
+                  scaffoldWidthFt={scaffoldWidthFt}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Clear separation between the 3D view and the material list */}
+          <div className="border-t-4 border-zinc-900 flex-1 overflow-y-auto min-h-0">
+            <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Total Project Material List</p>
+              <a href="/inventory/load-list" className="text-[9px] text-orange-400 hover:text-orange-300">Full Load List →</a>
+            </div>
+            <div className="px-4 pb-4 space-y-1">
+              {[
+                { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
+                { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
+                { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.bays   },
+                { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.bays   },
+                { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
+                { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
+                { partNo: "CPS",    description: "Coupling Pin",      qty: totals.legs * 2 },
+                { partNo: "BRKT",   description: "Wall Bracket (Added)", qty: totals.brackets },
+              ].map(item => (
+                <div key={item.partNo} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 transition ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
+                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{item.partNo}</span>
+                  <span className="text-[9px] text-zinc-500 flex-1 truncate">{item.description}</span>
+                  <span className={`font-mono text-[10px] font-bold ${item.qty > 0 ? "text-orange-300" : "text-zinc-700"}`}>
+                    {item.qty > 0 ? item.qty.toLocaleString() : "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   );
