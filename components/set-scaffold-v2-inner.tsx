@@ -281,7 +281,7 @@ function ScaffoldModel3D({
 
     const BAY_H = 6.333 * 0.3; // frame height in scene units
     const SCAF_D = scaffoldWidthFt * 0.3; // scaffold depth
-    const jumps = Math.min(frameTall, 8);
+    const jumps = Math.min(frameTall, 20);
 
     // Auto-scale: normalize outline to reasonable scene size regardless of SVG coordinate range
     const allX = outline.map(p => p.x), allZ = outline.map(p => p.y);
@@ -996,6 +996,21 @@ export default function SetScaffoldV2Inner() {
     return () => { window.removeEventListener("focus", load); window.removeEventListener("pageshow", load); };
   }, []);
 
+  // Load Didact Gothic for the tick-number labels — closest available
+  // web font to AutoCAD's RomanS drafting style (thin, monoline, no
+  // serifs). This is a self-contained injection since this component
+  // doesn't have access to the app's central font setup (layout.tsx) —
+  // if that setup is ever touched directly, this can be replaced with a
+  // proper next/font/google import there instead.
+  useEffect(() => {
+    if (document.getElementById("didact-gothic-font")) return;
+    const link = document.createElement("link");
+    link.id = "didact-gothic-font";
+    link.rel = "stylesheet";
+    link.href = "https://fonts.googleapis.com/css2?family=Didact+Gothic&display=swap";
+    document.head.appendChild(link);
+  }, []);
+
   // ── Native pointer events on the Overlay SVG ───────────────────────────
   // React's synthetic events provably never fire on this SVG in the user's
   // environment (verified with on-screen counters: HTML buttons work, but
@@ -1148,16 +1163,26 @@ export default function SetScaffoldV2Inner() {
           that churn matches the freeze pattern we kept hitting.) */}
       <div className="flex flex-1 overflow-hidden">
         <div className="flex flex-col flex-1 overflow-hidden border-r border-zinc-900">
-          <div className="flex items-center border-b border-zinc-900 bg-[#0b0b0b] px-6 flex-shrink-0">
+          <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2 flex-shrink-0">
             {([
               { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
               { id: "section", label: "Section View", icon: "✂" },
-            ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => (
-              <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.15em] border-b-2 transition ${activeMainTab === tab.id ? "border-white text-white" : "border-transparent text-zinc-600 hover:text-zinc-400"}`}>
-                <span>{tab.icon}</span>{tab.label}
-              </button>
-            ))}
+            ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => {
+              const active = activeMainTab === tab.id;
+              return (
+                <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
+                  className={`relative flex items-center gap-2 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active ? "text-white" : "text-zinc-600 hover:text-zinc-400"}`}
+                  style={{
+                    clipPath: "polygon(8% 0%, 92% 0%, 100% 100%, 0% 100%)",
+                    background: active ? "#080604" : "#08080a",
+                  }}>
+                  <span>{tab.icon}</span>{tab.label}
+                  {active && (
+                    <span className="absolute left-4 right-4 bottom-0 h-[2px] rounded-full bg-white shadow-[0_0_10px_2px_rgba(255,255,255,0.65)]" />
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           <div className="flex flex-1 overflow-hidden">
@@ -1287,9 +1312,8 @@ export default function SetScaffoldV2Inner() {
                             style={{
                               cursor: editMode ? "pointer" : "default",
                               fontSize: Math.max(tl * 0.5, 6.25),
-                              fontFamily: "var(--font-fira-code), ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-                              fontWeight: 300,
-                              fontStretch: "condensed",
+                              fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
+                              fontWeight: 400,
                             }}>{ft}</text>
                         </g>
                       );
@@ -1367,7 +1391,7 @@ export default function SetScaffoldV2Inner() {
 
             {/* Stats */}
             <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
-              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Stats</p>
+              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Project Data</p>
             </div>
             <div className="px-3 py-3 space-y-2">
               {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (

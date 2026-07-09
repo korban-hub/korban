@@ -128,6 +128,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [pdfLib,         setPdfLib]         = useState<any>(null);
   const [pdfLoading,     setPdfLoading]     = useState(false);
   const [currentPageNo,  setCurrentPageNo]  = useState(1);
+  const [pageNoInput,    setPageNoInput]    = useState("1");
   const [totalPages,     setTotalPages]     = useState(0);
   const [viewerUrl,      setViewerUrl]      = useState("");
   const [renderingPage,  setRenderingPage]  = useState(false);
@@ -203,11 +204,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   // Real fit — calculates zoom from image natural size vs container
   function fitToViewer() {
-    if (!imgRef.current||!viewerRef.current) return;
-    const vw=viewerRef.current.clientWidth-64, vh=viewerRef.current.clientHeight-64;
-    const iw=imgRef.current.naturalWidth||800, ih=imgRef.current.naturalHeight||1000;
-    if (!iw||!ih) return;
-    setViewerZoom(Math.min(vw/iw, vh/ih));
+    if (!imgRef.current || !viewerRef.current) return;
+    const containerRect = viewerRef.current.getBoundingClientRect();
+    const vw = containerRect.width - 64, vh = containerRect.height - 64;
+    const iw = imgRef.current.naturalWidth, ih = imgRef.current.naturalHeight;
+    if (!iw || !ih || vw <= 0 || vh <= 0) { setViewerZoom(0.65); return; }
+    const fit = Math.min(vw / iw, vh / ih);
+    setViewerZoom(fit > 0 && isFinite(fit) ? fit : 0.65);
   }
 
   // Pages open at the 65% default; use the "Fit" button to fit manually.
@@ -218,7 +221,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const isImg=file.type.startsWith("image/"), isPdf=file.type==="application/pdf";
     if (!isImg&&!isPdf) return;
     setPdfLoading(true); setViewerUrl(""); setPdfDoc(null);
-    setExtractedPages([]); setActiveExtracted(null); setCurrentPageNo(1);
+    setExtractedPages([]); setActiveExtracted(null); setCurrentPageNo(1); setPageNoInput("1");
     try {
       if (isImg) {
         const url=URL.createObjectURL(file);
@@ -236,7 +239,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   async function goToPage(n:number) {
     if (!pdfDoc||renderingPage) return;
     const p=Math.max(1,Math.min(n,totalPages));
-    setCurrentPageNo(p); setRenderingPage(true);
+    setCurrentPageNo(p); setPageNoInput(String(p)); setRenderingPage(true);
     try { setViewerUrl(await renderPage(pdfDoc,p,1.2)); }
     catch {} finally { setRenderingPage(false); }
   }
@@ -271,7 +274,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   async function loadExtracted(pg:ExtractedPage) {
     setActiveExtracted(pg);
     if (!pdfDoc) return;
-    setCurrentPageNo(pg.pageNumber); setRenderingPage(true);
+    setCurrentPageNo(pg.pageNumber); setPageNoInput(String(pg.pageNumber)); setRenderingPage(true);
     try {
       setViewerUrl(await renderPage(pdfDoc,pg.pageNumber,1.2));
       setTabScales(prev=>({...prev,[activeTab]:pg.scale}));
@@ -313,7 +316,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
   function duplicateElevation(from:string, to:string) {
     const src=elevData.find(e=>e.direction===from);
     if (!src) return;
-    setElevData(prev=>prev.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:false})) }:ed));
+    const next=elevData.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:false})) }:ed);
+    setElevData(next);
+    // Persist immediately with the fresh array — duplicating and then
+    // needing a separate Store click afterward (which could read stale
+    // state) was the "have to click Store twice" bug.
+    storeElevations(next);
   }
 
   // ── Section auto-populate inventory ──────────────────────────────────────
@@ -429,12 +437,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
     } catch(e) { console.error(e); }
   }
 
-  function storeElevations() {
+  function storeElevations(sourceElevData: typeof elevData = elevData) {
     try {
       ensureBase();
       const elev=getActiveElevation();
       // Build elevation heights from grips — each area contributes
-      const elevationHeights=elevData.map(ed=>{
+      const elevationHeights=sourceElevData.map(ed=>{
         const filled=ed.areas.filter(a=>a.rect&&a.heightFt>0);
         const avgH=filled.length?filled.reduce((s,a)=>s+a.heightFt,0)/filled.length:0;
         const totalLF=filled.reduce((s,a)=>s+a.lf,0);
@@ -450,15 +458,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
         };
       });
       // Also update quantityEngine from elevation data
-      const northData=elevData.find(e=>e.direction==="North");
+      const northData=sourceElevData.find(e=>e.direction==="North");
       const totalBays=northData?.areas.reduce((s,a)=>s+(a.bayCount||0),0)||elev.quantityEngine.bayCount;
       const totalLegs=(totalBays||0)+1;
-      const maxFrameTall=Math.max(...elevData.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
+      const maxFrameTall=Math.max(...sourceElevData.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
       const puf=tabScales.elevation.pageUnitsPerFoot;
       const existing=elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], fullOverlayRows:[], elevationRefs:[], scale:null };
       saveActiveElevation({
         ...elev,
-        wallHeight:elevData.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
+        wallHeight:sourceElevData.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
         overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
         quantityEngine:{ ...elev.quantityEngine, bayCount:totalBays, legCount:totalLegs, frameTall:maxFrameTall, frameCount:totalLegs*maxFrameTall },
       });
@@ -561,7 +569,6 @@ export default function TakeoffWorkspaceAdvancedPage() {
         ))}
         <div className="ml-auto flex items-center gap-3 text-[10px]">
           {scale.locked&&<span className="font-mono text-orange-400 opacity-70">⊠ {scale.label}</span>}
-          {totalPages>1&&<span className="text-zinc-700">{totalPages}p</span>}
         </div>
       </div>
 
@@ -607,9 +614,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
               <div className="flex items-center gap-1">
                 <button onClick={()=>goToPage(currentPageNo-1)} disabled={currentPageNo<=1||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">‹</button>
                 <input
-                  type="number" min={1} max={totalPages}
-                  value={currentPageNo}
-                  onChange={e=>goToPage(parseInt(e.target.value)||1)}
+                  type="text" inputMode="numeric"
+                  value={pageNoInput}
+                  onChange={e=>{
+                    const v=e.target.value.replace(/[^0-9]/g,"");
+                    setPageNoInput(v);
+                    if (v) { const n=parseInt(v); if(n>=1&&n<=totalPages) goToPage(n); }
+                  }}
+                  onBlur={()=>{ if(!pageNoInput) setPageNoInput(String(currentPageNo)); }}
+                  onKeyDown={e=>{ if(e.key==="Enter") (e.target as HTMLInputElement).blur(); }}
                   className="w-10 rounded border border-zinc-800 bg-zinc-900 text-center text-[10px] font-mono text-zinc-300 outline-none focus:border-orange-500/50 py-0.5"
                 />
                 <span className="text-[10px] font-mono text-zinc-600">/ {totalPages}</span>
@@ -720,15 +733,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
                   {/* Floor traces */}
                   {activeTab==="floor"&&floorLevels.map(lvl=>{
-                    if(lvl.tracePoints.length<2) return null;
+                    if(lvl.tracePoints.length<1) return null;
                     const pts=[...lvl.tracePoints,...(lvl.traceClosed?[lvl.tracePoints[0]]:[])];
+                    const mk=1/viewerZoom; // counter-scale so markers stay a constant on-screen size at any zoom
                     return (
                       <g key={lvl.id}>
-                        <polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")} fill={lvl.traceClosed?"rgba(249,115,22,0.08)":"none"} stroke={lvl.color} strokeWidth="1.5" strokeDasharray={lvl.traceClosed?"none":"4,3"}/>
+                        {lvl.tracePoints.length>=2&&(
+                          <polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")} fill={lvl.traceClosed?"rgba(249,115,22,0.08)":"none"} stroke={lvl.color} strokeWidth={1.5*mk} strokeDasharray={lvl.traceClosed?"none":`${4*mk},${3*mk}`}/>
+                        )}
                         {lvl.id===activeLevel&&lvl.tracePoints.map((pt,i)=>(
                           <g key={i}>
-                            <circle cx={pt.x} cy={pt.y} r="4" fill={lvl.color} opacity="0.9"/>
-                            <text x={pt.x+6} y={pt.y-5} fontSize="8" fill={lvl.color} fontFamily="monospace" fontWeight="bold">{i+1}</text>
+                            <circle cx={pt.x} cy={pt.y} r={2.5*mk} fill={lvl.color} opacity="0.9"/>
+                            <text x={pt.x+6*mk} y={pt.y-5*mk} fontSize={8*mk} fill={lvl.color} fontFamily="monospace" fontWeight="bold">{i+1}</text>
                           </g>
                         ))}
                       </g>
@@ -736,9 +752,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   })}
 
                   {/* Section wall + scaffold dots */}
-                  {activeTab==="section"&&activeSec&&activeSec.wallOutline.length>=2&&(
+                  {activeTab==="section"&&activeSec&&activeSec.wallOutline.length>=1&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
                     <g>
-                      <polyline points={activeSec.wallOutline.map(p=>`${p.x},${p.y}`).join(" ")} fill="none" stroke="#2563eb" strokeWidth="2" strokeDasharray={activeSec.wallComplete?"none":"4,3"}/>
+                      {activeSec.wallOutline.length>=2&&(
+                        <polyline points={activeSec.wallOutline.map(p=>`${p.x},${p.y}`).join(" ")} fill="none" stroke="#2563eb" strokeWidth={2*mk} strokeDasharray={activeSec.wallComplete?"none":`${4*mk},${3*mk}`}/>
+                      )}
+                      {activeSec.wallOutline.map((pt,i)=>(
+                        <circle key={`pt-${i}`} cx={pt.x} cy={pt.y} r={2.5*mk} fill="#2563eb" opacity="0.9"/>
+                      ))}
                       {activeSec.wallComplete&&scale.pageUnitsPerFoot&&activeSec.wallOutline.map((pt,i,arr)=>{
                         if(i>=arr.length-1) return null;
                         const next=arr[i+1];
@@ -746,31 +769,38 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         const nx=-dy/len,ny=dx/len;
                         const off=1*scale.pageUnitsPerFoot!;
                         const mid={x:(pt.x+next.x)/2+nx*off,y:(pt.y+next.y)/2+ny*off};
-                        return <circle key={i} cx={mid.x} cy={mid.y} r="4" fill="#f97316" opacity="0.8"/>;
+                        return <circle key={i} cx={mid.x} cy={mid.y} r={2.5*mk} fill="#f97316" opacity="0.8"/>;
                       })}
                     </g>
-                  )}
+                    );
+                  })()}
 
                   {/* Scale crosshairs */}
-                  {scale.point1&&(
+                  {scale.point1&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
                     <g>
-                      <line x1={scale.point1.x-12} y1={scale.point1.y} x2={scale.point1.x+12} y2={scale.point1.y} stroke="#f97316" strokeWidth="1.5"/>
-                      <line x1={scale.point1.x} y1={scale.point1.y-12} x2={scale.point1.x} y2={scale.point1.y+12} stroke="#f97316" strokeWidth="1.5"/>
-                      <circle cx={scale.point1.x} cy={scale.point1.y} r="4" fill="#f97316"/>
-                      <circle cx={scale.point1.x} cy={scale.point1.y} r="9" fill="none" stroke="#f97316" strokeWidth="0.8" opacity="0.4"/>
-                      <text x={scale.point1.x+12} y={scale.point1.y-10} fontSize="9" fill="#f97316" fontFamily="monospace" fontWeight="bold">①</text>
+                      <line x1={scale.point1.x-12*mk} y1={scale.point1.y} x2={scale.point1.x+12*mk} y2={scale.point1.y} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <line x1={scale.point1.x} y1={scale.point1.y-12*mk} x2={scale.point1.x} y2={scale.point1.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <circle cx={scale.point1.x} cy={scale.point1.y} r={4*mk} fill="#f97316"/>
+                      <circle cx={scale.point1.x} cy={scale.point1.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
+                      <text x={scale.point1.x+12*mk} y={scale.point1.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">①</text>
                     </g>
-                  )}
-                  {scale.point2&&(
+                    );
+                  })()}
+                  {scale.point2&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
                     <g>
-                      <line x1={scale.point2.x-12} y1={scale.point2.y} x2={scale.point2.x+12} y2={scale.point2.y} stroke="#f97316" strokeWidth="1.5"/>
-                      <line x1={scale.point2.x} y1={scale.point2.y-12} x2={scale.point2.x} y2={scale.point2.y+12} stroke="#f97316" strokeWidth="1.5"/>
-                      <circle cx={scale.point2.x} cy={scale.point2.y} r="4" fill="#f97316"/>
-                      <circle cx={scale.point2.x} cy={scale.point2.y} r="9" fill="none" stroke="#f97316" strokeWidth="0.8" opacity="0.4"/>
-                      <text x={scale.point2.x+12} y={scale.point2.y-10} fontSize="9" fill="#f97316" fontFamily="monospace" fontWeight="bold">②</text>
+                      <line x1={scale.point2.x-12*mk} y1={scale.point2.y} x2={scale.point2.x+12*mk} y2={scale.point2.y} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <line x1={scale.point2.x} y1={scale.point2.y-12*mk} x2={scale.point2.x} y2={scale.point2.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <circle cx={scale.point2.x} cy={scale.point2.y} r={4*mk} fill="#f97316"/>
+                      <circle cx={scale.point2.x} cy={scale.point2.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
+                      <text x={scale.point2.x+12*mk} y={scale.point2.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">②</text>
                     </g>
-                  )}
-                  {scale.point1&&scale.point2&&<line x1={scale.point1.x} y1={scale.point1.y} x2={scale.point2.x} y2={scale.point2.y} stroke="#f97316" strokeWidth="1" strokeDasharray="4,3" opacity="0.5"/>}
+                    );
+                  })()}
+                  {scale.point1&&scale.point2&&<line x1={scale.point1.x} y1={scale.point1.y} x2={scale.point2.x} y2={scale.point2.y} stroke="#f97316" strokeWidth={1/viewerZoom} strokeDasharray={`${4/viewerZoom},${3/viewerZoom}`} opacity="0.5"/>}
 
                   {/* Elevation grips */}
                   {activeTab==="elevation"&&elevData.map(ed=>ed.areas.map(a=>{
