@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { getActiveElevation, getActiveProject, saveActiveElevation } from "@/lib/projectStore";
+import { alignOverlayRows, getActiveElevation, getActiveProject, saveActiveElevation } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -22,6 +22,13 @@ type FloorLevel = {
   id: string; levelName: string; isKeyFloor: boolean;
   linealFeet: number; color: string;
   tracePoints: Pt[]; traceClosed: boolean; traceMode: boolean; stored: boolean;
+  /**
+   * Per-level anchor point — a fixed feature (column, corner, grid
+   * intersection) that appears on every level's sheet. All levels get
+   * shifted so their reference points coincide, which is what makes
+   * floors traced from different pages stack correctly.
+   */
+  refPoint: Pt | null;
 };
 
 type ElevGripArea = {
@@ -29,6 +36,16 @@ type ElevGripArea = {
   rect: { x:number; y:number; w:number; h:number }|null;
   lf: number; heightFt: number; frameTall: number; legs: number; bayCount: number;
   stored: boolean;
+  /**
+   * Which floors this gripped region actually spans. The grip already
+   * measures the height; these say which levels that measurement
+   * corresponds to — the missing link that lets Korban derive a run's
+   * base elevation (e.g. a podium wall tagged From: Level 4 starts at
+   * whatever height the Level 1→4 grip measured). Null = untagged,
+   * which behaves exactly as before: ground to top of grip.
+   */
+  fromLevelId: string | null;
+  toLevelId: string | null;
 };
 
 type ElevationData = {
@@ -77,7 +94,7 @@ function getFrameParts(width: ScaffoldWidth): FrameItem[] {
 }
 
 function newElevArea(areaIndex: number, direction: string): ElevGripArea {
-  return { id:`${direction}-${areaIndex}-${Date.now()}`, areaIndex, rect:null, lf:0, heightFt:0, frameTall:0, legs:0, bayCount:0, stored:false };
+  return { id:`${direction}-${areaIndex}-${Date.now()}`, areaIndex, rect:null, lf:0, heightFt:0, frameTall:0, legs:0, bayCount:0, stored:false, fromLevelId:null, toLevelId:null };
 }
 
 function makeElevData(dirs: string[]): ElevationData[] {
@@ -142,9 +159,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   // Floor
   const [floorLevels,  setFloorLevels]  = useState<FloorLevel[]>([
-    { id:"main", levelName:"Main", isKeyFloor:true, linealFeet:0, color:"#f97316", tracePoints:[], traceClosed:false, traceMode:false, stored:false },
+    { id:"main", levelName:"Main", isKeyFloor:true, linealFeet:0, color:"#f97316", tracePoints:[], traceClosed:false, traceMode:false, stored:false, refPoint:null },
   ]);
   const [activeLevel,  setActiveLevel]  = useState("main");
+  const [refPickLevelId, setRefPickLevelId] = useState<string|null>(null);
   const [overlayStored,setOverlayStored]= useState(false);
 
   // Elevation
@@ -301,6 +319,44 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   // ── Elevation grip helpers ────────────────────────────────────────────────
+  /**
+   * Derives how high off the ground a run tagged "From: <level>" starts,
+   * by summing the measured heights of grips that cover the levels below
+   * it. This is the whole point of the From/To tagging: the grips already
+   * measure heights, the tags say which floors those measurements cover,
+   * so a podium wall tagged From: Level 4 learns it starts 32' up from
+   * the Level 1→4 grip's own measurement — no height typed anywhere.
+   *
+   * Returns 0 for untagged grips or anything starting at the lowest
+   * level, which preserves today's behaviour (ground to top of grip).
+   * Returns null when a level below is referenced but never gripped —
+   * per the "no grip, no coverage" rule, that's surfaced to the user
+   * rather than guessed at.
+   */
+  function deriveRunBaseFt(area: ElevGripArea, areas: ElevGripArea[]): number | null {
+    if (!area.fromLevelId) return 0;
+    const startIdx = floorLevels.findIndex(l => l.id === area.fromLevelId);
+    if (startIdx <= 0) return 0; // lowest level (or unknown) starts at grade
+    const levelsBelow = floorLevels.slice(0, startIdx).map(l => l.id);
+    let base = 0;
+    for (const levelId of levelsBelow) {
+      // Find a gripped area whose tagged range covers this level.
+      const covering = areas.find(a => {
+        if (!a.fromLevelId || !a.toLevelId || !a.rect) return false;
+        const f = floorLevels.findIndex(l => l.id === a.fromLevelId);
+        const t = floorLevels.findIndex(l => l.id === a.toLevelId);
+        const i = floorLevels.findIndex(l => l.id === levelId);
+        return f >= 0 && t >= 0 && i >= f && i < t;
+      });
+      if (!covering) return null; // no grip covering that level — can't know
+      const span = Math.max(1,
+        floorLevels.findIndex(l => l.id === covering.toLevelId) -
+        floorLevels.findIndex(l => l.id === covering.fromLevelId));
+      base += covering.heightFt / span; // even split across the levels it spans
+    }
+    return parseFloat(base.toFixed(2));
+  }
+
   function calcGripArea(w:number, h:number, puf:number): Partial<ElevGripArea> {
     const lf=parseFloat((w/puf).toFixed(1));
     const heightFt=parseFloat((h/puf).toFixed(1));
@@ -361,6 +417,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
   // ── Viewer mouse handlers ─────────────────────────────────────────────────
   function handleViewerMouseDown(e:React.MouseEvent<HTMLDivElement>) {
     const pt=getImgPt(e); if(!pt) return;
+    // Reference-point pick takes priority over every other mode — one
+    // click sets the anchor for that level and exits pick mode.
+    if (refPickLevelId) {
+      setFloorLevels(prev=>prev.map(l=>l.id===refPickLevelId?{...l,refPoint:pt,stored:false}:l));
+      setRefPickLevelId(null);
+      return;
+    }
     if (scale.pickingPoint&&!scale.locked) {
       if(scale.pickingPoint===1) setScale({point1:pt,pickingPoint:2});
       else setScale({point2:pt,pickingPoint:null});
@@ -424,8 +487,25 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const elev=getActiveElevation();
       const key=floorLevels.find(l=>l.isKeyFloor);
       const lf=key?.linealFeet||0;
-      const rows=floorLevels.map((level,i)=>({ id:i+1, isKeyFloor:level.isKeyFloor, overlayType:"Level", level:level.levelName, points:level.tracePoints, closed:level.traceClosed, linealFeet:level.linealFeet, color:level.color, pageNumber:currentPageNo }));
-      const keyPts=key?.tracePoints??[];
+      const rawRows=floorLevels.map((level,i)=>({
+        id: i+1,
+        isKeyFloor: level.isKeyFloor,
+        overlayType: "Level",
+        level: level.levelName,
+        points: level.tracePoints,
+        closed: level.traceClosed,
+        linealFeet: level.linealFeet,
+        color: level.color,
+        pageNumber: currentPageNo,
+        refPoint: level.refPoint,
+        alignedPoints: level.tracePoints,
+      }));
+      // Shift every level so its reference point coincides with the
+      // anchor level's — this is what makes floors traced on different
+      // pages stack into one correct building.
+      const rows = alignOverlayRows(rawRows);
+      const keyRow = rows.find(r=>r.isKeyFloor) ?? rows[0];
+      const keyPts = keyRow?.alignedPoints ?? [];
       const puf=tabScales.floor.pageUnitsPerFoot;
       saveActiveElevation({ ...elev, linearFeet:lf,
         scale:puf?{ pageUnitsPerFoot:puf }:elev.scale,
@@ -437,12 +517,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
     } catch(e) { console.error(e); }
   }
 
-  function storeElevations(sourceElevData: typeof elevData = elevData) {
+  function storeElevations(sourceElevData?: typeof elevData) {
+    // Guard: this is sometimes wired straight to onClick, which would
+    // pass React's click event in as the first argument. Only accept a
+    // real array; anything else falls back to current state.
+    const src = Array.isArray(sourceElevData) ? sourceElevData : elevData;
     try {
       ensureBase();
       const elev=getActiveElevation();
       // Build elevation heights from grips — each area contributes
-      const elevationHeights=sourceElevData.map(ed=>{
+      const elevationHeights=src.map(ed=>{
         const filled=ed.areas.filter(a=>a.rect&&a.heightFt>0);
         const avgH=filled.length?filled.reduce((s,a)=>s+a.heightFt,0)/filled.length:0;
         const totalLF=filled.reduce((s,a)=>s+a.lf,0);
@@ -454,19 +538,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
           belowGradeEnabled:false, belowGradeInput:"",
           multipleHeights:filled.length>1,
           totalLF, totalLegs, avgFrameTall,
-          areas:filled.map(a=>({ areaIndex:a.areaIndex, lf:a.lf, heightFt:a.heightFt, frameTall:a.frameTall, legs:a.legs, bayCount:a.bayCount })),
+          areas:filled.map(a=>({ areaIndex:a.areaIndex, lf:a.lf, heightFt:a.heightFt, frameTall:a.frameTall, legs:a.legs, bayCount:a.bayCount, fromLevelId:a.fromLevelId, toLevelId:a.toLevelId, baseElevationFt:deriveRunBaseFt(a, ed.areas) })),
         };
       });
       // Also update quantityEngine from elevation data
-      const northData=sourceElevData.find(e=>e.direction==="North");
+      const northData=src.find(e=>e.direction==="North");
       const totalBays=northData?.areas.reduce((s,a)=>s+(a.bayCount||0),0)||elev.quantityEngine.bayCount;
       const totalLegs=(totalBays||0)+1;
-      const maxFrameTall=Math.max(...sourceElevData.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
+      const maxFrameTall=Math.max(...src.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
       const puf=tabScales.elevation.pageUnitsPerFoot;
       const existing=elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], fullOverlayRows:[], elevationRefs:[], scale:null };
       saveActiveElevation({
         ...elev,
-        wallHeight:sourceElevData.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
+        wallHeight:src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
         overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
         quantityEngine:{ ...elev.quantityEngine, bayCount:totalBays, legCount:totalLegs, frameTall:maxFrameTall, frameCount:totalLegs*maxFrameTall },
       });
@@ -539,7 +623,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const activeLvl=floorLevels.find(l=>l.id===activeLevel);
 
   // Cursor logic
-  const isCapturing=scale.pickingPoint||gripMode||activeLvl?.traceMode||wallOutlineMode;
+  const isCapturing=scale.pickingPoint||gripMode||activeLvl?.traceMode||wallOutlineMode||Boolean(refPickLevelId);
 
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-[#080604] text-white">
@@ -557,16 +641,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
       />
 
       {/* Tabs */}
-      <div className="flex items-center border-b border-zinc-900 bg-[#0b0b0b] px-6">
-        {([{id:"floor",label:"Floor Plan",icon:"⊞"},{id:"elevation",label:"Elevations",icon:"↕"},{id:"section",label:"Section View",icon:"✂"}] as {id:ActiveTab;label:string;icon:string}[]).map(tab=>(
+      <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2">
+        {([{id:"floor",label:"Floor Plan",icon:"⊞"},{id:"elevation",label:"Elevations",icon:"↕"},{id:"section",label:"Section View",icon:"✂"}] as {id:ActiveTab;label:string;icon:string}[]).map(tab=>{
+          const active = activeTab===tab.id;
+          return (
           <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.15em] border-b-2 transition ${activeTab===tab.id?"border-white text-white":"border-transparent text-zinc-600 hover:text-zinc-400"}`}>
+            className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-5 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active?"text-white border-zinc-700":"text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
+            style={{ background: active ? "#1a1a1a" : "#0b0b0b" }}>
             <span>{tab.icon}</span>{tab.label}
             {extractedPages.filter(p=>p.tag===TAB_TAGS[tab.id]).length>0&&(
               <span className="ml-1 rounded-full bg-white/20 px-1.5 py-0.5 text-[8px] font-bold">{extractedPages.filter(p=>p.tag===TAB_TAGS[tab.id]).length}</span>
             )}
+            {active && (
+              <span className="absolute left-1/2 -translate-x-1/2 bottom-0 h-[2px] w-6 rounded-full bg-white/80 shadow-[0_0_4px_1px_rgba(255,255,255,0.35)]" />
+            )}
           </button>
-        ))}
+          );
+        })}
         <div className="ml-auto flex items-center gap-3 text-[10px]">
           {scale.locked&&<span className="font-mono text-orange-400 opacity-70">⊠ {scale.label}</span>}
         </div>
@@ -751,6 +842,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     );
                   })}
 
+                  {/* Per-level reference points — the anchors that make
+                      levels stack correctly. Drawn as a distinct yellow
+                      crosshair so they're never confused with trace points. */}
+                  {activeTab==="floor"&&floorLevels.map(lvl=>{
+                    if(!lvl.refPoint) return null;
+                    const mk=1/viewerZoom;
+                    const {x,y}=lvl.refPoint;
+                    const isActive=lvl.id===activeLevel;
+                    return (
+                      <g key={`ref-${lvl.id}`} opacity={isActive?1:0.5}>
+                        <line x1={x-9*mk} y1={y} x2={x+9*mk} y2={y} stroke="#facc15" strokeWidth={1.4*mk}/>
+                        <line x1={x} y1={y-9*mk} x2={x} y2={y+9*mk} stroke="#facc15" strokeWidth={1.4*mk}/>
+                        <circle cx={x} cy={y} r={3.5*mk} fill="none" stroke="#facc15" strokeWidth={1.2*mk}/>
+                        <text x={x+11*mk} y={y-6*mk} fontSize={7*mk} fill="#facc15" fontFamily="monospace" fontWeight="bold">REF</text>
+                      </g>
+                    );
+                  })}
+
                   {/* Section wall + scaffold dots */}
                   {activeTab==="section"&&activeSec&&activeSec.wallOutline.length>=1&&(() => {
                     const mk=1/viewerZoom;
@@ -854,21 +963,43 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.filter((_,j)=>j!==i));}} className="text-[9px] text-zinc-700 hover:text-red-400">✕</button>}
                       </div>
 
-                      {/* LF — auto-calculated, shown after close */}
-                      <div onClick={e=>e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-0.5">
-                          <label className="text-[9px] text-zinc-600">Lineal Feet</label>
-                          {level.traceClosed&&level.linealFeet>0&&<span className="text-[8px] text-emerald-400">✓ Auto-calculated</span>}
-                        </div>
-                        <input value={level.linealFeet||""} placeholder={level.traceClosed?"Calculating…":"Trace to calculate"}
+                      {/* LF — auto-calculated, condensed to one inline row */}
+                      <div onClick={e=>e.stopPropagation()} className="flex items-center gap-2">
+                        <label className="text-[9px] text-zinc-600 flex-shrink-0">Lineal Feet</label>
+                        {level.traceClosed&&level.linealFeet>0
+                          ? <span className="text-[8px] text-emerald-400 flex-shrink-0">✓ Auto</span>
+                          : <span className="text-[8px] text-zinc-700 flex-shrink-0 whitespace-nowrap">Trace to calc</span>}
+                        <input value={level.linealFeet||""} placeholder="--"
                           readOnly={level.traceClosed&&level.linealFeet>0}
                           onChange={e=>setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,linealFeet:parseFloat(e.target.value)||0}:l))}
-                          className={`w-full mt-0.5 rounded-lg border px-2 py-1.5 text-[10px] font-mono outline-none ${level.traceClosed&&level.linealFeet>0?"border-emerald-500/30 bg-emerald-500/5 text-emerald-300":"border-zinc-800 bg-zinc-900 text-orange-300 focus:border-orange-500/50"}`}/>
+                          className={`flex-1 min-w-0 rounded-lg border px-2 py-1 text-right text-[10px] font-mono outline-none ${level.traceClosed&&level.linealFeet>0?"border-emerald-500/30 bg-emerald-500/5 text-emerald-300":"border-zinc-800 bg-zinc-900 text-orange-300 focus:border-orange-500/50"}`}/>
                       </div>
 
                       <div className="flex items-center justify-between">
                         <span className="text-[8px] text-zinc-600 uppercase tracking-wider">{level.isKeyFloor?"★ Main":""}</span>
                         {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>({...l,isKeyFloor:l.id===level.id})));}} className="text-[8px] border border-zinc-700 rounded px-1.5 py-0.5 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300">Set as Main</button>}
+                      </div>
+
+                      {/* Reference point — the anchor that lets this level
+                          stack correctly against the others */}
+                      <div onClick={e=>e.stopPropagation()} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[9px] text-zinc-600">Reference Pt</label>
+                          <span className={`text-[8px] font-mono ${level.refPoint?"text-yellow-400":"text-zinc-700"}`}>
+                            {level.refPoint?`${Math.round(level.refPoint.x)}, ${Math.round(level.refPoint.y)}`:"Not set"}
+                          </span>
+                        </div>
+                        <div className="flex gap-1">
+                          <button onClick={()=>{setActiveLevel(level.id);setRefPickLevelId(refPickLevelId===level.id?null:level.id);}}
+                            className={`flex-1 rounded-lg border px-2 py-1 text-[9px] font-bold transition ${refPickLevelId===level.id?"animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300":"border-zinc-700 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"}`}>
+                            {refPickLevelId===level.id?"Click on plan…":"Pick"}
+                          </button>
+                          <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,refPoint:null}:l))}
+                            disabled={!level.refPoint}
+                            className="rounded-lg border border-zinc-800 px-2 py-1 text-[9px] text-zinc-600 hover:border-red-500/30 hover:text-red-400 disabled:opacity-30">
+                            Clear
+                          </button>
+                        </div>
                       </div>
 
                       {/* Start / Close / Store per level */}
@@ -898,28 +1029,45 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   );
                 })}
 
-                <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false}])}
+                <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false,refPoint:null}])}
                   className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
                   + Add Level
                 </button>
 
                 {/* Overlay preview */}
-                {allLevelPoints.length>0&&(
+                {allLevelPoints.length>0&&(() => {
+                  // Preview the ACTUAL aligned stacking, not raw traces —
+                  // this is the visual confirmation that reference points
+                  // are lining the floors up correctly.
+                  const previewRows = alignOverlayRows(floorLevels.map((l,i)=>({
+                    id:i+1, isKeyFloor:l.isKeyFloor, overlayType:"Level", level:l.levelName,
+                    points:l.tracePoints, closed:l.traceClosed, linealFeet:l.linealFeet,
+                    color:l.color, pageNumber:currentPageNo, refPoint:l.refPoint, alignedPoints:l.tracePoints,
+                  }))).filter(r=>r.alignedPoints.length>=2);
+                  if(!previewRows.length) return null;
+                  const all = previewRows.flatMap(r=>r.alignedPoints);
+                  const minX=Math.min(...all.map(p=>p.x)), maxX=Math.max(...all.map(p=>p.x));
+                  const minY=Math.min(...all.map(p=>p.y)), maxY=Math.max(...all.map(p=>p.y));
+                  const gw=Math.max(1,maxX-minX), gh=Math.max(1,maxY-minY);
+                  const s=Math.min(180/gw,130/gh);
+                  const ox=10+(180-gw*s)/2, oy=10+(130-gh*s)/2;
+                  const missingRef = floorLevels.filter(l=>l.tracePoints.length>=2&&!l.refPoint);
+                  return (
                   <div className="rounded-xl border border-zinc-800 bg-black overflow-hidden">
-                    <p className="text-[9px] text-zinc-500 uppercase tracking-wider px-3 pt-3 pb-1.5">Overlay Preview → Set Scaffold</p>
+                    <p className="text-[9px] text-zinc-500 uppercase tracking-wider px-3 pt-3 pb-1.5">Overlay Preview · Aligned Stack</p>
                     <div className="px-3 pb-3">
                       <svg viewBox="0 0 200 150" className="w-full rounded-lg bg-zinc-950">
-                        {allLevelPoints.map(lvl=>{
-                          if(lvl.tracePoints.length<2) return null;
-                          const xs=lvl.tracePoints.map(p=>p.x), ys=lvl.tracePoints.map(p=>p.y);
-                          const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
-                          const gw=Math.max(1,maxX-minX),gh=Math.max(1,maxY-minY);
-                          const s=Math.min(180/gw,130/gh);
-                          const ox=10+(180-gw*s)/2,oy=10+(130-gh*s)/2;
-                          const pts=[...lvl.tracePoints,...(lvl.traceClosed?[lvl.tracePoints[0]]:[])].map(p=>`${ox+(p.x-minX)*s},${oy+(p.y-minY)*s}`).join(" ");
-                          return <polyline key={lvl.id} points={pts} fill={lvl.traceClosed?"rgba(249,115,22,0.08)":"none"} stroke={lvl.color} strokeWidth="1.5"/>;
+                        {previewRows.map(r=>{
+                          const pts=[...r.alignedPoints,...(r.closed?[r.alignedPoints[0]]:[])]
+                            .map(p=>`${ox+(p.x-minX)*s},${oy+(p.y-minY)*s}`).join(" ");
+                          return <polyline key={r.id} points={pts} fill={r.closed?"rgba(249,115,22,0.06)":"none"} stroke={r.color} strokeWidth="1.4"/>;
                         })}
                       </svg>
+                      {missingRef.length>0&&(
+                        <p className="mt-2 rounded-lg border border-yellow-500/25 bg-yellow-500/5 px-2 py-1.5 text-[8px] leading-relaxed text-yellow-400">
+                          ⚠ {missingRef.length} level{missingRef.length>1?"s":""} missing a reference point — {missingRef.length>1?"they":"it"} can&apos;t be stacked accurately until one is picked.
+                        </p>
+                      )}
                       {floorLevels.filter(l=>l.linealFeet>0).map(l=>(
                         <div key={l.id} className="flex justify-between text-[9px] mt-1">
                           <span style={{color:l.color}}>{l.levelName}</span>
@@ -928,7 +1076,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       ))}
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </div>
               <div className="p-4 border-t border-zinc-900">
                 <button onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{overlayStored?"✓ Overlay Stored":"Store Overlay"}</button>
@@ -1009,6 +1158,40 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <p className="text-[9px] text-zinc-600 mb-2">{isSelected?"Select Start then drag on drawing":"Click to select area"}</p>
                       )}
 
+                      {/* Level range — optional. Says which floors this
+                          gripped region spans, so Korban can derive where
+                          the run actually starts vertically. */}
+                      <div onClick={e=>e.stopPropagation()} className="mb-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
+                        <label className="text-[8px] uppercase tracking-wider text-zinc-600 block mb-1">Level Range (optional)</label>
+                        <div className="flex items-center gap-1">
+                          <select value={area.fromLevelId ?? ""}
+                            onChange={e=>{const v=e.target.value||null;setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,fromLevelId:v}:a)}:ed));}}
+                            className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
+                            <option value="">From…</option>
+                            {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
+                          </select>
+                          <span className="text-[8px] text-zinc-600">→</span>
+                          <select value={area.toLevelId ?? ""}
+                            onChange={e=>{const v=e.target.value||null;setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,toLevelId:v}:a)}:ed));}}
+                            className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
+                            <option value="">To…</option>
+                            {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
+                          </select>
+                        </div>
+                        {(() => {
+                          if (!area.fromLevelId) return null;
+                          const base = deriveRunBaseFt(area, currentElevData.areas);
+                          if (base === null) return (
+                            <p className="mt-1 text-[8px] leading-tight text-yellow-500">⚠ A level below this isn&apos;t gripped — base height unknown.</p>
+                          );
+                          return (
+                            <p className="mt-1 text-[8px] font-mono text-emerald-400">
+                              Starts at {Math.floor(base)}&apos;-{Math.round((base % 1) * 12)}&quot; {base === 0 ? "(grade)" : "above grade"}
+                            </p>
+                          );
+                        })()}
+                      </div>
+
                       {/* Start / Close / Store per area */}
                       <div className="flex gap-1" onClick={e=>e.stopPropagation()}>
                         <button onClick={()=>{setSelectedArea(area.areaIndex);setGripMode(true);}}
@@ -1060,7 +1243,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 </div>
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={storeElevations} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"✓ Stored":"Store Elevations"}</button>
+                <button onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"✓ Stored":"Store Elevations"}</button>
               </div>
             </div>
           )}
