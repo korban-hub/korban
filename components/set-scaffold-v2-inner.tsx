@@ -3,7 +3,7 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
 import { calculateQuantityEngine, findFrameMakeupOptions, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
@@ -930,6 +930,24 @@ export default function SetScaffoldV2Inner() {
     return frameTall;
   };
 
+  // A leg counts as "broken free" from the parallel track once its stored
+  // offset has a perpendicular (off-wall) component beyond the same
+  // breakout distance used while dragging. Used to hide the cross-brace
+  // connecting it to its neighbours — a strut drawn to a leg that's no
+  // longer in line with the run wouldn't make physical sense.
+  function isLegBrokenFree(segIndex: number, legIndex: number): boolean {
+    const off = legOffsets[`${segIndex}-${legIndex}`];
+    if (!off) return false;
+    const a = outline[segIndex], b = outline[(segIndex + 1) % outline.length];
+    if (!a || !b) return false;
+    const sdx = b.x - a.x, sdy = b.y - a.y;
+    const len = Math.sqrt(sdx * sdx + sdy * sdy);
+    if (!len) return false;
+    const nx = -sdy / len, ny = sdx / len;
+    const perp = off.dx * nx + off.dy * ny;
+    return Math.abs(perp) > effPuf * 0.75;
+  }
+
   // Section view — wall outline, scaffold side, hand-placed additions
   const sectionWallOutline = useMemo(() => {
     const outline2 = elevation?.sectionView?.wallOutline;
@@ -1015,11 +1033,24 @@ export default function SetScaffoldV2Inner() {
   // React's synthetic events provably never fire on this SVG in the user's
   // environment (verified with on-screen counters: HTML buttons work, but
   // clicks anywhere on the SVG — background or ticks — register zero).
-  // So instead of fighting that, these listeners attach directly to the
-  // DOM node with addEventListener, and do their own hit-testing: convert
-  // the pointer position into viewBox coordinates (accounting for the
-  // preserveAspectRatio letterboxing), find the nearest tick, and handle
-  // select/drag/pan accordingly.
+  // So these listeners attach directly to the DOM node and do their own
+  // hit-testing.
+  //
+  // CRITICAL: every value the handlers need is read through a ref, and the
+  // dependency array is kept minimal. Previously `legOffsets` (which
+  // changes on every single mouse-move) was a dependency — so each move
+  // tore down and re-attached the listeners, wiping the local
+  // `draggingKey` variable and killing the drag after one tiny nudge.
+  // That was the "moves in small increments/notches" bug: not slowness,
+  // but the drag being destroyed and restarted constantly.
+  const dragStateRef = useRef<{
+    draggingKey: string | null;
+    panning: boolean;
+    lastPos: { x: number; y: number } | null;
+  }>({ draggingKey: null, panning: false, lastPos: null });
+  const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline });
+  liveRef.current = { editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline };
+
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg || activeMainTab !== "overlay") return;
@@ -1033,20 +1064,20 @@ export default function SetScaffoldV2Inner() {
       return {
         x: vb.x + (e.clientX - r.left - offX) / scale,
         y: vb.y + (e.clientY - r.top - offY) / scale,
-        pxScale: scale,
       };
     }
 
     function findNearestLeg(pt: { x: number; y: number }): string | null {
-      const hitRadius = Math.max(scaffoldWidthFt * effPuf * 0.8, effPuf * 1.5);
+      const { allSegmentLegs: segs, deletedLegKeys: dels, legOffsets: offs, effPuf: puf, scaffoldWidthFt: wft } = liveRef.current;
+      const hitRadius = Math.max(wft * puf * 0.9, puf * 2);
       let best: string | null = null;
       let bestDist = hitRadius;
-      for (const seg of allSegmentLegs) {
+      for (const seg of segs) {
         const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
         sl.forEach((leg, i) => {
           const k = `${seg.segIndex}-${i}`;
-          if (deletedLegKeys.has(k)) return;
-          const off = legOffsets[k] ?? { dx: 0, dy: 0 };
+          if (dels.has(k)) return;
+          const off = offs[k] ?? { dx: 0, dy: 0 };
           const mx = (leg.wallPoint.x + leg.tickTip.x) / 2 + off.dx;
           const my = (leg.wallPoint.y + leg.tickTip.y) / 2 + off.dy;
           const d = Math.sqrt((pt.x - mx) ** 2 + (pt.y - my) ** 2);
@@ -1056,44 +1087,78 @@ export default function SetScaffoldV2Inner() {
       return best;
     }
 
-    let draggingKey: string | null = null;
-    let panning = false;
-
     function onPointerDown(e: PointerEvent) {
       setDebugSvgClicks(n => n + 1);
       const pt = toViewBox(e);
-      if (editMode) {
+      dragStateRef.current.lastPos = { x: pt.x, y: pt.y };
+      if (liveRef.current.editMode) {
         const hit = findNearestLeg(pt);
         if (hit) {
           setDebugTickClicks(n => n + 1);
-          setSelectedLegKey(prev => (prev === hit ? prev : hit));
-          draggingKey = hit;
+          setSelectedLegKey(hit);
+          dragStateRef.current.draggingKey = hit;
           setDraggedLegKey(hit);
           e.preventDefault();
+          // Capture the pointer so the drag keeps tracking even if the
+          // cursor briefly leaves the SVG bounds mid-drag.
+          try { svg!.setPointerCapture(e.pointerId); } catch {}
         } else {
           setSelectedLegKey(null);
         }
       } else {
-        panning = true;
+        dragStateRef.current.panning = true;
         setIsPanning(true);
       }
     }
 
     function onPointerMove(e: PointerEvent) {
-      const r = svg!.getBoundingClientRect();
-      const vb = svg!.viewBox.baseVal;
-      const scale = Math.min(r.width / vb.width, r.height / vb.height);
-      if (draggingKey) {
-        const k = draggingKey;
-        setLegOffsets(p => ({ ...p, [k]: { dx: (p[k]?.dx ?? 0) + e.movementX / scale, dy: (p[k]?.dy ?? 0) + e.movementY / scale } }));
-      } else if (panning) {
-        setViewerPan(p => ({ dx: p.dx - e.movementX / scale, dy: p.dy - e.movementY / scale }));
+      const st = dragStateRef.current;
+      if (!st.draggingKey && !st.panning) return;
+      // Track absolute position in viewBox space (continuous, full
+      // precision) rather than the browser's movementX/movementY, which
+      // report in whole rounded screen pixels and quantize badly at zoom.
+      const pt = toViewBox(e);
+      if (!st.lastPos) { st.lastPos = { x: pt.x, y: pt.y }; return; }
+      const deltaX = pt.x - st.lastPos.x;
+      const deltaY = pt.y - st.lastPos.y;
+      st.lastPos = { x: pt.x, y: pt.y };
+      if (st.draggingKey) {
+        const k = st.draggingKey;
+        setLegOffsets(p => {
+          const rawDx = (p[k]?.dx ?? 0) + deltaX;
+          const rawDy = (p[k]?.dy ?? 0) + deltaY;
+          // Parallel lock: decompose the offset into "along the wall run"
+          // and "perpendicular to it". Movement along the wall stays fully
+          // free; the perpendicular component is held at zero (keeping the
+          // tick in line with its neighbours) until the user deliberately
+          // pulls beyond the breakout distance, at which point it moves
+          // freely in any direction.
+          const { outline: ol, effPuf: puf } = liveRef.current;
+          const si = Number(k.split("-")[0]);
+          const a = ol[si], b = ol[(si + 1) % ol.length];
+          if (!a || !b) return { ...p, [k]: { dx: rawDx, dy: rawDy } };
+          const sdx = b.x - a.x, sdy = b.y - a.y;
+          const len = Math.sqrt(sdx * sdx + sdy * sdy);
+          if (!len) return { ...p, [k]: { dx: rawDx, dy: rawDy } };
+          const ax = sdx / len, ay = sdy / len;   // along the wall
+          const nx = -ay, ny = ax;                 // perpendicular to it
+          const along = rawDx * ax + rawDy * ay;
+          const perp = rawDx * nx + rawDy * ny;
+          const breakout = puf * 0.75;              // ~9" before it frees — quicker release
+          const usedPerp = Math.abs(perp) > breakout ? perp : 0;
+          return { ...p, [k]: { dx: ax * along + nx * usedPerp, dy: ay * along + ny * usedPerp } };
+        });
+      } else if (st.panning) {
+        setViewerPan(p => ({ dx: p.dx - deltaX, dy: p.dy - deltaY }));
       }
     }
 
-    function onPointerUp() {
-      draggingKey = null;
-      panning = false;
+    function onPointerUp(e: PointerEvent) {
+      const st = dragStateRef.current;
+      if (st.draggingKey) { try { svg!.releasePointerCapture(e.pointerId); } catch {} }
+      st.draggingKey = null;
+      st.panning = false;
+      st.lastPos = null;
       setDraggedLegKey(null);
       setIsPanning(false);
     }
@@ -1106,7 +1171,36 @@ export default function SetScaffoldV2Inner() {
       svg.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
     };
-  }, [activeMainTab, editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, mounted]);
+  }, [activeMainTab, mounted]);
+
+  // Live dimension readout while dragging a tick — measures from the
+  // dragged leg to its immediate neighbours in the same wall run, in feet,
+  // updating in real time as it moves.
+  const dragDimensions = useMemo(() => {
+    if (!draggedLegKey || effPuf <= 0) return null;
+    const [si, li] = draggedLegKey.split("-").map(Number);
+    const seg = allSegmentLegs.find(s => s.segIndex === si);
+    if (!seg) return null;
+    const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+    const posOf = (idx: number) => {
+      const leg = sl[idx];
+      if (!leg) return null;
+      const k = `${si}-${idx}`;
+      if (deletedLegKeys.has(k)) return null;
+      const off = legOffsets[k] ?? { dx: 0, dy: 0 };
+      return { x: (leg.wallPoint.x + leg.tickTip.x) / 2 + off.dx, y: (leg.wallPoint.y + leg.tickTip.y) / 2 + off.dy };
+    };
+    const self = posOf(li);
+    if (!self) return null;
+    const out: { a: PlanPoint; b: PlanPoint; feet: number }[] = [];
+    for (const nIdx of [li - 1, li + 1]) {
+      const nb = posOf(nIdx);
+      if (!nb) continue;
+      const dist = Math.sqrt((nb.x - self.x) ** 2 + (nb.y - self.y) ** 2) / effPuf;
+      out.push({ a: self, b: nb, feet: dist });
+    }
+    return out.length ? out : null;
+  }, [draggedLegKey, allSegmentLegs, legOffsets, deletedLegKeys, effPuf]);
 
   function saveConfig(updates: Partial<ScaffoldInput>) {
     const cur = elevation ?? getActiveElevation();
@@ -1171,14 +1265,11 @@ export default function SetScaffoldV2Inner() {
               const active = activeMainTab === tab.id;
               return (
                 <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
-                  className={`relative flex items-center gap-2 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active ? "text-white" : "text-zinc-600 hover:text-zinc-400"}`}
-                  style={{
-                    clipPath: "polygon(8% 0%, 92% 0%, 100% 100%, 0% 100%)",
-                    background: active ? "#080604" : "#08080a",
-                  }}>
+                  className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active ? "text-white border-zinc-700" : "text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
+                  style={{ background: active ? "#1a1a1a" : "#0b0b0b" }}>
                   <span>{tab.icon}</span>{tab.label}
                   {active && (
-                    <span className="absolute left-4 right-4 bottom-0 h-[2px] rounded-full bg-white shadow-[0_0_10px_2px_rgba(255,255,255,0.65)]" />
+                    <span className="absolute left-1/2 -translate-x-1/2 bottom-0 h-[2px] w-6 rounded-full bg-white/80 shadow-[0_0_4px_1px_rgba(255,255,255,0.35)]" />
                   )}
                 </button>
               );
@@ -1271,9 +1362,12 @@ export default function SetScaffoldV2Inner() {
 
                 return (
                   <g key={`seg-${segIndex}`} fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
-                    {/* Cross braces */}
+                    {/* Cross braces — skipped if either connected leg has
+                        broken free from the parallel track (see
+                        isLegBrokenFree above) */}
                     {sl.slice(0, -1).map((leg, i) => {
                       const next = sl[i + 1]; if (!next) return null;
+                      if (isLegBrokenFree(segIndex, i) || isLegBrokenFree(segIndex, i + 1)) return null;
                       const o1 = legOffsets[`${segIndex}-${i}`] ?? { dx: 0, dy: 0 };
                       const o2 = legOffsets[`${segIndex}-${i + 1}`] ?? { dx: 0, dy: 0 };
                       const cx = (leg.wallPoint.x + o1.dx + next.wallPoint.x + o2.dx) / 2;
@@ -1322,6 +1416,19 @@ export default function SetScaffoldV2Inner() {
                 );
               })}
 
+              {/* Live dimension guides while dragging a tick — dashed lines
+                  to each adjacent leg for visual reference. The actual
+                  measurements render in the HTML popup below at a fixed,
+                  always-readable size (in-SVG text scaled with the drawing
+                  and became unreadable when zoomed out). */}
+              {dragDimensions?.map((d, i) => (
+                <g key={`dim-${i}`} pointerEvents="none">
+                  <line x1={d.a.x} y1={d.a.y} x2={d.b.x} y2={d.b.y}
+                    stroke="#f97316" strokeWidth={effPuf * 0.09} strokeDasharray={`${effPuf * 0.4},${effPuf * 0.25}`} opacity="0.95" />
+                  <circle cx={d.b.x} cy={d.b.y} r={effPuf * 0.18} fill="#f97316" opacity="0.9" />
+                </g>
+              ))}
+
               {/* Edit popup */}
             </svg>
 
@@ -1349,17 +1456,40 @@ export default function SetScaffoldV2Inner() {
               const py = (leg.tickTip.y + off.dy - vb.y) * scale + offY;
               const fc = overriddenFC[selectedLegKey] ?? frameTall;
               return (
-                <div className="absolute z-40 rounded-xl border border-orange-500 bg-zinc-900/95 shadow-xl px-3 py-2"
-                  style={{ left: Math.max(4, Math.min(px - 80, (host.width || 300) - 170)), top: Math.max(4, py - 76) }}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-mono font-bold text-orange-400">Frames: {fc}</span>
+                <div className="absolute z-40 flex flex-col items-center gap-0.5"
+                  style={{ left: Math.max(4, Math.min(px - 40, (host.width || 300) - 84)), top: py + 30 }}>
+                  {/* Slim pill — neutral outline, bright orange only on the remove icon */}
+                  <div className="flex items-center justify-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 min-w-[76px]">
                     <button onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: Math.max(1, (p[selectedLegKey] ?? frameTall) - 1) }))}
-                      className="rounded-md bg-orange-500 w-6 h-6 text-black text-sm font-bold hover:bg-orange-400">−</button>
+                      className="flex items-center justify-center text-zinc-400 hover:text-white">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+                    </button>
+                    <span className="text-[11px] font-mono font-bold text-zinc-100 min-w-[14px] text-center">{fc}</span>
                     <button onClick={() => setOverriddenFC(p => ({ ...p, [selectedLegKey]: (p[selectedLegKey] ?? frameTall) + 1 }))}
-                      className="rounded-md bg-orange-500 w-6 h-6 text-black text-sm font-bold hover:bg-orange-400">+</button>
+                      className="flex items-center justify-center text-zinc-400 hover:text-white">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+                    </button>
+                    <span className="w-px h-3 bg-zinc-700 mx-0.5" />
+                    <button onClick={() => { setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; }); setSelectedLegKey(null); }}
+                      className="flex items-center justify-center text-orange-500 hover:text-orange-400">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                    </button>
                   </div>
-                  <button onClick={() => { setDeletedLegKeys(p => { const n = new Set(p); n.add(selectedLegKey); return n; }); setSelectedLegKey(null); }}
-                    className="mt-1.5 w-full rounded-md bg-red-500/85 py-1 text-[9px] font-bold text-white hover:bg-red-500">DELETE TICK</button>
+                  {/* Live spacing readout while dragging — matches the pill's
+                      width exactly, soft/light orange text, small enough to
+                      always fit within that width */}
+                  {dragDimensions && dragDimensions.length > 0 && (
+                    <div className="flex items-center justify-center gap-1 bg-zinc-900/90 rounded-full px-1.5 py-0.5 min-w-[76px]">
+                      {dragDimensions.map((d, i) => (
+                        <Fragment key={i}>
+                          {i > 0 && <span className="w-px h-2 bg-zinc-700" />}
+                          <span className="text-[7px] font-mono font-bold text-orange-300 whitespace-nowrap">
+                            {Math.floor(d.feet)}'-{Math.round((d.feet % 1) * 12)}"
+                          </span>
+                        </Fragment>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })()}
