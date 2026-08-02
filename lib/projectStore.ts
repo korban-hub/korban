@@ -73,6 +73,22 @@ export type StoredFullOverlayRow = {
   linealFeet: number;
   color: string;
   pageNumber: number;
+  /**
+   * Per-level reference/anchor point picked on the plan — a fixed
+   * feature (column, corner, grid intersection) that appears on every
+   * level's sheet. All levels' outlines are shifted so their reference
+   * points coincide, which is what allows floors traced from different
+   * pages to stack correctly into one building. Null until picked.
+   */
+  refPoint: StoredPoint | null;
+  /**
+   * This level's outline after reference-point alignment — i.e. in the
+   * shared building coordinate system rather than raw page pixels.
+   * Downstream consumers (overlap detection, Set Scaffold, 3D) should
+   * use these, not `points`, whenever comparing levels to each other.
+   * Falls back to a copy of `points` when no reference point is set.
+   */
+  alignedPoints: StoredPoint[];
 };
 
 export type StoredElevationReference = {
@@ -270,17 +286,50 @@ function normalizePoints(value: unknown): StoredPoint[] {
 
 function normalizeFullOverlayRow(value: unknown): StoredFullOverlayRow | null {
   if (!isRecord(value)) return null;
+  const points = normalizePoints(value.points);
+  const alignedPoints = normalizePoints(value.alignedPoints);
   return {
     id: asNumber(value.id, Date.now()),
     isKeyFloor: Boolean(value.isKeyFloor),
     overlayType: asString(value.overlayType, "Level"),
     level: asString(value.level, "Main Level"),
-    points: normalizePoints(value.points),
+    points,
     closed: Boolean(value.closed),
     linealFeet: asNumber(value.linealFeet, 0),
     color: asString(value.color, "#2563eb"),
     pageNumber: asNumber(value.pageNumber, 1),
+    refPoint: normalizePoint(value.refPoint),
+    // Older saved rows predate alignment — fall back to the raw outline
+    // so nothing breaks; it just means that level isn't yet stackable.
+    alignedPoints: alignedPoints.length ? alignedPoints : points,
   };
+}
+
+/**
+ * Shifts every level's outline so all reference points coincide at a
+ * common origin, producing one shared building coordinate system.
+ *
+ * The anchor is the first row that actually has a reference point — its
+ * own coordinates are left untouched, and every other row is translated
+ * by the difference between its reference point and the anchor's. Rows
+ * without a reference point can't be aligned, so their outline passes
+ * through unchanged (they simply won't stack correctly until one is
+ * picked — the UI should surface that rather than silently guessing).
+ *
+ * Translation only, never rotation: levels are assumed to be traced at
+ * the same orientation, which matches how plan sheets are drawn.
+ */
+export function alignOverlayRows(rows: StoredFullOverlayRow[]): StoredFullOverlayRow[] {
+  const anchor = rows.find((r) => r.refPoint);
+  if (!anchor?.refPoint) {
+    return rows.map((r) => ({ ...r, alignedPoints: r.points }));
+  }
+  const ax = anchor.refPoint.x, ay = anchor.refPoint.y;
+  return rows.map((row) => {
+    if (!row.refPoint) return { ...row, alignedPoints: row.points };
+    const dx = ax - row.refPoint.x, dy = ay - row.refPoint.y;
+    return { ...row, alignedPoints: row.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  });
 }
 
 function normalizeElevationReference(value: unknown): StoredElevationReference | null {
