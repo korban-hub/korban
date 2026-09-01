@@ -36,7 +36,7 @@ export default function LoginPage() {
       if (mode === "signIn") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        window.location.href = "/dashboard";
+        window.location.href = "/trades-panel";
         return;
       }
       if (mode === "signUp") {
@@ -173,7 +173,7 @@ export default function LoginPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => { window.location.href = "/dashboard"; }}
+                  onClick={() => { window.location.href = "/trades-panel"; }}
                   className="text-[11px] text-zinc-600 transition hover:text-zinc-400"
                   style={{ fontFamily: "ui-monospace, monospace", letterSpacing: ".05em" }}
                 >
