@@ -159,7 +159,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   // Floor
   const [floorLevels,  setFloorLevels]  = useState<FloorLevel[]>([
-    { id:"main", levelName:"Main", isKeyFloor:true, linealFeet:0, color:"#f97316", tracePoints:[], traceClosed:false, traceMode:false, stored:false, refPoint:null },
+    { id:"main", levelName:"Level 1", isKeyFloor:true, linealFeet:0, color:"#f97316", tracePoints:[], traceClosed:false, traceMode:false, stored:false, refPoint:null },
   ]);
   const [activeLevel,  setActiveLevel]  = useState("main");
   const [refPickLevelId, setRefPickLevelId] = useState<string|null>(null);
@@ -295,7 +295,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setCurrentPageNo(pg.pageNumber); setPageNoInput(String(pg.pageNumber)); setRenderingPage(true);
     try {
       setViewerUrl(await renderPage(pdfDoc,pg.pageNumber,1.2));
-      setTabScales(prev=>({...prev,[activeTab]:pg.scale}));
+      // Only restore this page's saved scale if it was actually locked when
+      // extracted, and only when the tab doesn't already have a scale set.
+      // Previously this overwrote unconditionally, so clicking a thumbnail
+      // that had been extracted before scale was set would silently wipe
+      // the scale you'd just locked — the "scale doesn't persist" bug.
+      setTabScales(prev=>{
+        const current = prev[activeTab];
+        if (current?.locked) return prev;
+        if (!pg.scale?.locked) return prev;
+        return { ...prev, [activeTab]: pg.scale };
+      });
     } catch {} finally { setRenderingPage(false); }
   }
 
@@ -803,6 +813,25 @@ export default function TakeoffWorkspaceAdvancedPage() {
             onDoubleClick={handleViewerDblClick}
             style={{cursor:isCapturing?"crosshair":"default"}}>
 
+            {/* Scale required — pinned, unmissable. Nothing measured on this
+                tab means anything until scale is locked, so this stays until
+                it is. */}
+            {viewerUrl&&!scale.locked&&(
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center px-6 pt-3">
+                <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-yellow-500/50 bg-yellow-500/10 px-4 py-2.5 shadow-lg backdrop-blur-sm">
+                  <span className="text-base leading-none">⚠</span>
+                  <div>
+                    <p className="text-[11px] font-bold text-yellow-300">Set scale before measuring</p>
+                    <p className="text-[10px] text-yellow-500/80">Click <span className="font-bold">⟷ Scale</span>, pick two points a known distance apart, then enter that distance.</p>
+                  </div>
+                  <button onClick={()=>setScale({pickingPoint:1,point1:null,point2:null})}
+                    className="ml-1 rounded-lg bg-yellow-400 px-3 py-1.5 text-[10px] font-bold text-black transition hover:bg-yellow-300">
+                    Set Scale
+                  </button>
+                </div>
+              </div>
+            )}
+
             {!viewerUrl&&!pdfLoading&&(
               <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)handleFile(f);}}
                 className="flex h-full w-full flex-col items-center justify-center gap-3 cursor-pointer">
@@ -975,10 +1004,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           className={`flex-1 min-w-0 rounded-lg border px-2 py-1 text-right text-[10px] font-mono outline-none ${level.traceClosed&&level.linealFeet>0?"border-emerald-500/30 bg-emerald-500/5 text-emerald-300":"border-zinc-800 bg-zinc-900 text-orange-300 focus:border-orange-500/50"}`}/>
                       </div>
 
-                      <div className="flex items-center justify-between">
-                        <span className="text-[8px] text-zinc-600 uppercase tracking-wider">{level.isKeyFloor?"★ Main":""}</span>
-                        {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>({...l,isKeyFloor:l.id===level.id})));}} className="text-[8px] border border-zinc-700 rounded px-1.5 py-0.5 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300">Set as Main</button>}
-                      </div>
+                      {/* Key floor — an explicit choice on every level, rather
+                          than implied by one being named "Main". This is the
+                          floor whose outline drives linear feet/quantities. */}
+                      <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>({...l,isKeyFloor:l.id===level.id})));}}
+                        className={`flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition ${level.isKeyFloor?"border-orange-500/40 bg-orange-500/5":"border-zinc-800 hover:border-zinc-700"}`}>
+                        <span className={`flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full border ${level.isKeyFloor?"border-orange-500":"border-zinc-600"}`}>
+                          {level.isKeyFloor&&<span className="h-1.5 w-1.5 rounded-full bg-orange-500" />}
+                        </span>
+                        <span className={`text-[9px] ${level.isKeyFloor?"text-orange-300":"text-zinc-500"}`}>
+                          {level.isKeyFloor?"Key floor — drives quantities":"Use as key floor"}
+                        </span>
+                      </button>
 
                       {/* Reference point — the anchor that lets this level
                           stack correctly against the others */}
@@ -1025,11 +1062,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           {level.stored?"✓":"Store"}
                         </button>
                       </div>
+
+                      {/* Undo Point — only while actively tracing this level */}
+                      {level.traceMode&&!level.traceClosed&&level.tracePoints.length>0&&(
+                        <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,tracePoints:l.tracePoints.slice(0,-1)}:l));}}
+                          className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[9px] font-bold text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300">
+                          ↩ Undo Point ({level.tracePoints.length} placed)
+                        </button>
+                      )}
                     </div>
                   );
                 })}
 
-                <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false,refPoint:null}])}
+                <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length+1}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false,refPoint:null}])}
                   className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
                   + Add Level
                 </button>
@@ -1103,17 +1148,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 {/* Duplicate toggles — North→South, East→West */}
                 {selectedElev==="North"&&(
                   <div className="flex items-center gap-2">
-                    <button onClick={()=>{setDupSouth(!dupSouth);if(!dupSouth)duplicateElevation("North","South");}}
+                    <button onClick={()=>{duplicateElevation("North","South");setDupSouth(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupSouth?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
-                      {dupSouth?"✓ Duplicated to South":"Duplicate → South"}
+                      {dupSouth?"✓ Copied to South — click to re-copy":"Duplicate → South"}
                     </button>
                   </div>
                 )}
                 {selectedElev==="East"&&(
                   <div className="flex items-center gap-2">
-                    <button onClick={()=>{setDupWest(!dupWest);if(!dupWest)duplicateElevation("East","West");}}
+                    <button onClick={()=>{duplicateElevation("East","West");setDupWest(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupWest?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
-                      {dupWest?"✓ Duplicated to West":"Duplicate → West"}
+                      {dupWest?"✓ Copied to West — click to re-copy":"Duplicate → West"}
                     </button>
                   </div>
                 )}
