@@ -72,6 +72,7 @@ const DEFAULT_SCALE: ScaleState = { locked:false, label:"", pageUnitsPerFoot:nul
 const SECTION_LABELS = ["A-A","B-B","C-C","D-D"];
 // Clockwise order
 const ELEVATION_DIRS = ["North","East","South","West"];
+
 const LEVEL_COLORS   = ["#f97316","#22c55e","#f59e0b","#a855f7"];
 
 function getFrameParts(width: ScaffoldWidth): FrameItem[] {
@@ -99,6 +100,24 @@ function newElevArea(areaIndex: number, direction: string): ElevGripArea {
 
 function makeElevData(dirs: string[]): ElevationData[] {
   return dirs.map(d => ({ direction:d, areas:[1,2,3].map(i=>newElevArea(i,d)) }));
+}
+
+/**
+ * A courtyard reuses the exact same shape as building elevations, so all
+ * the existing grip/tag logic works on it unchanged — it's just stored
+ * and totalled separately. Faces default to N/E/S/W but the estimator
+ * decides which are actually used; three walls and an open side is
+ * common, so unused faces simply never get gripped.
+ */
+type Courtyard = { id: string; name: string; faces: ElevationData[] };
+
+function makeCourtyard(index: number): Courtyard {
+  const id = `courtyard-${index}-${Date.now()}`;
+  return {
+    id,
+    name: `Courtyard ${index}`,
+    faces: ELEVATION_DIRS.map(d => ({ direction: d, areas: [1,2,3].map(i => newElevArea(i, `${id}-${d}`)) })),
+  };
 }
 
 const TAB_TAGS: Record<ActiveTab,PageTag> = { floor:"Floor Plan", elevation:"Elevation View", section:"Section View" };
@@ -175,6 +194,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [elevStored,    setElevStored]    = useState(false);
   const [dupSouth,      setDupSouth]      = useState(false);
   const [dupWest,       setDupWest]       = useState(false);
+  // Courtyards — interior voids gripped like elevations but stored and
+  // totalled separately. activeZone is "building" or a courtyard id.
+  const [courtyards,    setCourtyards]    = useState<Courtyard[]>([]);
+  const [activeZone,    setActiveZone]    = useState<string>("building");
+  const [includeCourtyards, setIncludeCourtyards] = useState(true);
 
   // Section
   const [sections,        setSections]        = useState<SectionView[]>([]);
@@ -464,7 +488,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const w=Math.abs(gripCurrent.x-gripStart.x), h=Math.abs(gripCurrent.y-gripStart.y);
     if(w<5||h<5) { setGripStart(null); setGripCurrent(null); return; }
     const calc=calcGripArea(w,h,puf);
-    setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{
+    updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
       ...ed,
       areas:ed.areas.map(a=>a.areaIndex===selectedArea?{ ...a, rect:{x,y,w,h}, ...calc }:a),
     }:ed));
@@ -558,11 +582,30 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const maxFrameTall=Math.max(...src.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
       const puf=tabScales.elevation.pageUnitsPerFoot;
       const existing=elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], fullOverlayRows:[], elevationRefs:[], scale:null };
+      // Courtyards — same per-face summary as building elevations, but
+      // stored under their own key so totals can include or exclude them.
+      const storedCourtyards = courtyards.map(cy=>({
+        id: cy.id,
+        name: cy.name,
+        faces: cy.faces.map(face=>{
+          const filled=face.areas.filter(a=>a.rect&&a.heightFt>0);
+          return {
+            face: face.direction,
+            totalLF: parseFloat(filled.reduce((s,a)=>s+a.lf,0).toFixed(1)),
+            totalLegs: filled.reduce((s,a)=>s+a.legs,0),
+            avgFrameTall: filled.length?Math.round(filled.reduce((s,a)=>s+a.frameTall,0)/filled.length):0,
+            areas: filled.map(a=>({ areaIndex:a.areaIndex, lf:a.lf, heightFt:a.heightFt, frameTall:a.frameTall, legs:a.legs, bayCount:a.bayCount, fromLevelId:a.fromLevelId, toLevelId:a.toLevelId })),
+          };
+        }).filter(f=>f.totalLF>0),
+      })).filter(cy=>cy.faces.length>0);
+
       saveActiveElevation({
         ...elev,
         wallHeight:src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
         overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
         quantityEngine:{ ...elev.quantityEngine, bayCount:totalBays, legCount:totalLegs, frameTall:maxFrameTall, frameCount:totalLegs*maxFrameTall },
+        courtyards: storedCourtyards,
+        includeCourtyards,
       });
       setElevStored(true); setTimeout(()=>setElevStored(false),3000);
     } catch(e) { console.error(e); }
@@ -627,7 +670,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   const tabPages=extractedPages.filter(p=>p.tag===TAB_TAGS[activeTab]);
   const activeSec=sections.find(s=>s.id===activeSection)??sections[0];
-  const currentElevData=elevData.find(e=>e.direction===selectedElev)??elevData[0];
+  // Zone-aware face list: either the building's elevations or the active
+  // courtyard's faces. Everything downstream (grips, tagging, rendering)
+  // works off this, so courtyards reuse the identical UI and logic.
+  const activeCourtyard = courtyards.find(c=>c.id===activeZone) ?? null;
+  const activeFaces: ElevationData[] = activeCourtyard ? activeCourtyard.faces : elevData;
+
+  /** Routes a face-list update to the building or the active courtyard. */
+  function updateActiveFaces(updater:(faces:ElevationData[])=>ElevationData[]) {
+    if (activeCourtyard) {
+      setCourtyards(prev=>prev.map(c=>c.id===activeCourtyard.id?{...c,faces:updater(c.faces)}:c));
+    } else {
+      setElevData(prev=>updater(prev));
+    }
+  }
+
+  const currentElevData=activeFaces.find(e=>e.direction===selectedElev)??activeFaces[0];
   const liveGrip=gripStart&&gripCurrent?{ x:Math.min(gripStart.x,gripCurrent.x), y:Math.min(gripStart.y,gripCurrent.y), w:Math.abs(gripCurrent.x-gripStart.x), h:Math.abs(gripCurrent.y-gripStart.y) }:null;
   const allLevelPoints=floorLevels.filter(l=>l.tracePoints.length>=2);
   const activeLvl=floorLevels.find(l=>l.id===activeLevel);
@@ -1134,19 +1192,66 @@ export default function TakeoffWorkspaceAdvancedPage() {
           {activeTab==="elevation"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Elevation Heights</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">
+                  {activeCourtyard ? `${activeCourtyard.name} Heights` : "Elevation Heights"}
+                </p>
+
+                {/* Zone — the building itself, or a courtyard. Courtyards are
+                    gripped exactly like elevations but stored separately so
+                    their quantities can be toggled in or out of totals. */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-2 space-y-2">
+                  <div className="flex gap-1 flex-wrap">
+                    <button onClick={()=>{setActiveZone("building");setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                      className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone==="building"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
+                      Building
+                    </button>
+                    {courtyards.map(cy=>(
+                      <button key={cy.id} onClick={()=>{setActiveZone(cy.id);setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                        className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone===cy.id?"border-emerald-500 bg-emerald-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-emerald-500/40"}`}>
+                        {cy.name}
+                      </button>
+                    ))}
+                    <button onClick={()=>{const c=makeCourtyard(courtyards.length+1);setCourtyards(prev=>[...prev,c]);setActiveZone(c.id);setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                      className="rounded-lg border border-dashed border-zinc-700 px-2 py-1 text-[9px] text-zinc-500 hover:border-emerald-500/40 hover:text-emerald-300">
+                      + Courtyard
+                    </button>
+                  </div>
+                  {activeCourtyard&&(
+                    <div className="flex items-center gap-1.5">
+                      <input value={activeCourtyard.name}
+                        onChange={e=>setCourtyards(prev=>prev.map(c=>c.id===activeCourtyard.id?{...c,name:e.target.value}:c))}
+                        className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-2 py-1 text-[9px] text-emerald-300 outline-none focus:border-emerald-500/50"/>
+                      <button onClick={()=>{setCourtyards(prev=>prev.filter(c=>c.id!==activeCourtyard.id));setActiveZone("building");}}
+                        className="rounded border border-zinc-800 px-2 py-1 text-[9px] text-zinc-600 hover:border-red-500/40 hover:text-red-400">
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={includeCourtyards}
+                      onChange={e=>setIncludeCourtyards(e.target.checked)}
+                      className="h-3 w-3 accent-emerald-500"/>
+                    <span className="text-[9px] text-zinc-500">Include courtyards in project totals</span>
+                  </label>
+                </div>
 
                 <div className="flex gap-1 flex-wrap">
-                  {ELEVATION_DIRS.map(dir=>(
+                  {ELEVATION_DIRS.map(dir=>{
+                    // A face counts as "in use" once something's gripped on
+                    // it — courtyards often have an open side that never is.
+                    const face=activeFaces.find(f=>f.direction===dir);
+                    const used=face?.areas.some(a=>a.rect&&a.lf>0);
+                    return (
                     <button key={dir} onClick={()=>{setSelectedElev(dir);setSelectedArea(1);setGripMode(false);}}
-                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
-                      {dir}
+                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":used?"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-orange-500/40":"border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-orange-500/40"}`}>
+                      {dir}{used&&selectedElev!==dir?" ·":""}
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {/* Duplicate toggles — North→South, East→West */}
-                {selectedElev==="North"&&(
+                {activeZone==="building"&&selectedElev==="North"&&(
                   <div className="flex items-center gap-2">
                     <button onClick={()=>{duplicateElevation("North","South");setDupSouth(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupSouth?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
@@ -1154,7 +1259,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </button>
                   </div>
                 )}
-                {selectedElev==="East"&&(
+                {activeZone==="building"&&selectedElev==="East"&&(
                   <div className="flex items-center gap-2">
                     <button onClick={()=>{duplicateElevation("East","West");setDupWest(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupWest?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
@@ -1173,7 +1278,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                       <div className="flex items-center justify-between mb-2">
                         <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>Area {area.areaIndex}</span>
-                        {hasData&&<button onClick={e=>{e.stopPropagation();setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">✕ Clear</button>}
+                        {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">✕ Clear</button>}
                       </div>
 
                       {hasData?(
@@ -1210,14 +1315,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <label className="text-[8px] uppercase tracking-wider text-zinc-600 block mb-1">Level Range (optional)</label>
                         <div className="flex items-center gap-1">
                           <select value={area.fromLevelId ?? ""}
-                            onChange={e=>{const v=e.target.value||null;setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,fromLevelId:v}:a)}:ed));}}
+                            onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,fromLevelId:v}:a)}:ed));}}
                             className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
                             <option value="">From…</option>
                             {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
                           </select>
                           <span className="text-[8px] text-zinc-600">→</span>
                           <select value={area.toLevelId ?? ""}
-                            onChange={e=>{const v=e.target.value||null;setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,toLevelId:v}:a)}:ed));}}
+                            onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,toLevelId:v}:a)}:ed));}}
                             className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
                             <option value="">To…</option>
                             {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
@@ -1247,7 +1352,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           className="flex-1 rounded-lg border border-zinc-700 px-1.5 py-1.5 text-[8px] font-bold text-zinc-500 hover:border-zinc-500 disabled:opacity-30">
                           Close
                         </button>
-                        <button onClick={()=>setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,stored:true}:a)}:ed))}
+                        <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,stored:true}:a)}:ed))}
                           disabled={!hasData}
                           className={`flex-1 rounded-lg border px-1.5 py-1.5 text-[8px] font-bold transition ${area.stored?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40"} disabled:opacity-30`}>
                           {area.stored?"✓":"Store"}
@@ -1258,7 +1363,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 })}
 
                 {/* Add Area button after last area */}
-                <button onClick={()=>setElevData(prev=>prev.map(ed=>ed.direction===selectedElev?{
+                <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
                   ...ed,
                   areas:[...ed.areas,newElevArea(ed.areas.length+1,selectedElev)],
                 }:ed))}

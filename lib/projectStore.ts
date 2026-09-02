@@ -110,6 +110,28 @@ export type StoredElevationHeight = {
 };
 
 /**
+ * A courtyard — an interior void with its own set of faces, gripped the
+ * same way building elevations are but stored separately so its
+ * quantities can be included in or excluded from project totals on
+ * demand. Faces reuse the N/E/S/W naming, but a courtyard may only use
+ * some of them (three walls and an open side is common), so which faces
+ * exist is up to the estimator rather than fixed at four.
+ */
+export type StoredCourtyardFace = {
+  face: string;
+  totalLF: number;
+  totalLegs: number;
+  avgFrameTall: number;
+  areas: unknown[];
+};
+
+export type StoredCourtyard = {
+  id: string;
+  name: string;
+  faces: StoredCourtyardFace[];
+};
+
+/**
  * Elevation Breakdown — optional, manual, purely supplementary data.
  * Entered directly by the estimator in Takeoff Workspace's "Elevation
  * Breakdown (Optional)" section. This NEVER feeds linearFeet, ticks, or
@@ -190,6 +212,14 @@ export type ProjectElevation = {
    * Defaults to an empty array — purely additive, never required.
    */
   elevationBreakdown: StoredElevationBreakdownRow[];
+  /**
+   * Courtyards captured for this elevation — see StoredCourtyard. Kept
+   * separate from the building's own elevations so their quantities can
+   * be toggled in or out of project totals.
+   */
+  courtyards: StoredCourtyard[];
+  /** Whether courtyard quantities roll into project totals. */
+  includeCourtyards: boolean;
 };
 
 export type ProjectLevel = {
@@ -362,6 +392,32 @@ function normalizeElevationBreakdownRow(value: unknown): StoredElevationBreakdow
     elevation: asString(value.elevation, "North"),
     approxLinearFeet: asNumber(value.approxLinearFeet, 0),
   };
+}
+
+function normalizeCourtyardFace(value: unknown): StoredCourtyardFace | null {
+  if (!isRecord(value)) return null;
+  return {
+    face: asString(value.face, "North"),
+    totalLF: asNumber(value.totalLF, 0),
+    totalLegs: asNumber(value.totalLegs, 0),
+    avgFrameTall: asNumber(value.avgFrameTall, 0),
+    areas: asArray<unknown>(value.areas),
+  };
+}
+
+function normalizeCourtyards(value: unknown): StoredCourtyard[] {
+  return asArray<unknown>(value)
+    .map((cy, i): StoredCourtyard | null => {
+      if (!isRecord(cy)) return null;
+      return {
+        id: asString(cy.id, `courtyard-${i + 1}`),
+        name: asString(cy.name, `Courtyard ${i + 1}`),
+        faces: asArray<unknown>(cy.faces)
+          .map(normalizeCourtyardFace)
+          .filter((f): f is StoredCourtyardFace => Boolean(f)),
+      };
+    })
+    .filter((cy): cy is StoredCourtyard => Boolean(cy));
 }
 
 function normalizeElevationBreakdown(value: unknown): StoredElevationBreakdownRow[] {
@@ -593,6 +649,8 @@ function createDemoElevation(): ProjectElevation {
       draftingAdditions: [],
     },
     elevationBreakdown: [],
+    courtyards: [],
+    includeCourtyards: true,
   };
 }
 
@@ -674,6 +732,10 @@ function normalizeElevation(value: unknown): ProjectElevation {
       draftingAdditions: normalizeSectionDraftingItems(sectionRecord.draftingAdditions),
     },
     elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
+    courtyards: normalizeCourtyards(record.courtyards),
+    // Default to including courtyards in totals — they're real scaffold
+    // on the job; the toggle exists to break them out, not hide them.
+    includeCourtyards: record.includeCourtyards === false ? false : true,
   };
 }
 
@@ -864,6 +926,54 @@ export function saveElevationBreakdown(rows: StoredElevationBreakdownRow[]) {
  * block (e.g. scaffoldSide toggle, draftingAdditions) without touching
  * linearFeet, quantityEngine, or overlay geometry.
  */
+/**
+ * Saves courtyards (and optionally the include-in-totals flag) for the
+ * active elevation without touching linearFeet, quantityEngine, or any
+ * overlay geometry — a dedicated path, same pattern as saveSectionView.
+ */
+export function saveCourtyards(courtyards: StoredCourtyard[], includeCourtyards?: boolean) {
+  const current = getActiveElevation();
+  saveActiveElevation({
+    ...current,
+    courtyards,
+    includeCourtyards: includeCourtyards ?? current.includeCourtyards,
+  });
+}
+
+/** Toggles whether courtyard quantities roll into project totals. */
+export function setIncludeCourtyards(include: boolean) {
+  const current = getActiveElevation();
+  saveActiveElevation({ ...current, includeCourtyards: include });
+}
+
+/**
+ * Sums scaffold quantities across every face of every courtyard on an
+ * elevation. Returns zeros when there are no courtyards, so callers can
+ * add this unconditionally and let the toggle decide whether to use it.
+ */
+export function computeCourtyardTotals(elevation: ProjectElevation | null) {
+  const empty = { linearFeet: 0, legs: 0, frameTall: 0, faceCount: 0, courtyardCount: 0 };
+  const courtyards = elevation?.courtyards ?? [];
+  if (!courtyards.length) return empty;
+  let linearFeet = 0, legs = 0, frameTallSum = 0, faceCount = 0;
+  for (const cy of courtyards) {
+    for (const face of cy.faces) {
+      if (face.totalLF <= 0) continue;
+      linearFeet += face.totalLF;
+      legs += face.totalLegs;
+      frameTallSum += face.avgFrameTall;
+      faceCount++;
+    }
+  }
+  return {
+    linearFeet: parseFloat(linearFeet.toFixed(1)),
+    legs,
+    frameTall: faceCount ? Math.round(frameTallSum / faceCount) : 0,
+    faceCount,
+    courtyardCount: courtyards.length,
+  };
+}
+
 export function saveSectionView(updates: Partial<ProjectElevation["sectionView"]>) {
   const current = getActiveElevation();
   saveActiveElevation({

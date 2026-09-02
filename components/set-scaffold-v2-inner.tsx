@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
-import { calculateQuantityEngine, findFrameMakeupOptions, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { calculateQuantityEngine, computeCourtyardTotals, findFrameMakeupOptions, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, setIncludeCourtyards, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -959,6 +959,24 @@ export default function SetScaffoldV2Inner() {
   const manualBracketCount = useMemo(() => draftingAdditions.filter(d => d.kind === "bracket").length, [draftingAdditions]);
 
   // Totals — correct plank formula, plus hand-placed additions from Section View
+  // Courtyard quantities — stored separately from the building's own
+  // elevations, and rolled into totals only when the include toggle is on.
+  const courtyardTotals = useMemo(() => computeCourtyardTotals(elevation), [elevation]);
+  const includeCourtyards = elevation?.includeCourtyards ?? true;
+  const courtyardContribution = useMemo(() => {
+    if (!includeCourtyards || courtyardTotals.legs <= 0) {
+      return { legs: 0, bays: 0, frames: 0, planks: 0 };
+    }
+    const cyBays = Math.max(0, courtyardTotals.legs - courtyardTotals.faceCount);
+    const cyFrameTall = courtyardTotals.frameTall || frameTall;
+    return {
+      legs: courtyardTotals.legs,
+      bays: cyBays,
+      frames: courtyardTotals.legs * cyFrameTall,
+      planks: cyBays * ppb * cyFrameTall,
+    };
+  }, [includeCourtyards, courtyardTotals, frameTall, ppb]);
+
   const totals = useMemo(() => {
     let legs = 0, bays = 0, totalFrames = 0;
     for (const seg of allSegmentLegs) {
@@ -974,19 +992,28 @@ export default function SetScaffoldV2Inner() {
     // Planks = bays × planksPerBay × frameTall (levels)
     const planks = bays * ppb * frameTall;
     return {
-      legs, bays,
-      frames: totalFrames + manualFrameCount,
+      legs: legs + courtyardContribution.legs,
+      bays: bays + courtyardContribution.bays,
+      frames: totalFrames + manualFrameCount + courtyardContribution.frames,
       brackets: manualBracketCount,
-      planks,
+      planks: planks + courtyardContribution.planks,
+      // Building-only figures, kept so the UI can show what a courtyard adds
+      buildingLegs: legs,
+      buildingFrames: totalFrames + manualFrameCount,
     };
-  }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount]);
+  }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution]);
+
+  function handleToggleCourtyards(next: boolean) {
+    setIncludeCourtyards(next);
+    setElevation(cur => cur ? { ...cur, includeCourtyards: next } : cur);
+  }
 
   // Live frame height for the 3D model — average frames-per-leg from the
   // current totals (which include per-tick overrides and deletions), so
   // edit-mode changes visibly change the 3D model, not just the numbers.
   const liveFrameTall = useMemo(() => {
-    if (totals.legs <= 0) return frameTall;
-    return Math.max(1, Math.round((totals.frames - manualFrameCount) / totals.legs));
+    if (totals.buildingLegs <= 0) return frameTall;
+    return Math.max(1, Math.round((totals.buildingFrames - manualFrameCount) / totals.buildingLegs));
   }, [totals, frameTall, manualFrameCount]);
 
   // Overlay rows
@@ -1475,11 +1502,10 @@ export default function SetScaffoldV2Inner() {
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                     </button>
                   </div>
-                  {/* Live spacing readout while dragging — matches the pill's
-                      width exactly, soft/light orange text, small enough to
-                      always fit within that width */}
+                  {/* Live spacing readout while dragging — plain floating
+                      text, no background/border, matches pill width */}
                   {dragDimensions && dragDimensions.length > 0 && (
-                    <div className="flex items-center justify-center gap-1 bg-zinc-900/90 rounded-full px-1.5 py-0.5 min-w-[76px]">
+                    <div className="flex items-center justify-center gap-1 min-w-[76px]">
                       {dragDimensions.map((d, i) => (
                         <Fragment key={i}>
                           {i > 0 && <span className="w-px h-2 bg-zinc-700" />}
@@ -1530,6 +1556,29 @@ export default function SetScaffoldV2Inner() {
                   <span className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</span>
                 </div>
               ))}
+
+              {/* Courtyards — only surfaced when some exist. Toggling
+                  recalculates every figure above in place. */}
+              {courtyardTotals.courtyardCount > 0 && (
+                <div className={`rounded-lg border px-2.5 py-2 transition ${includeCourtyards ? "border-emerald-500/30 bg-emerald-500/5" : "border-zinc-800 bg-black"}`}>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input type="checkbox" checked={includeCourtyards}
+                      onChange={e => handleToggleCourtyards(e.target.checked)}
+                      className="h-3 w-3 accent-emerald-500" />
+                    <span className={`text-[9px] font-bold ${includeCourtyards ? "text-emerald-300" : "text-zinc-500"}`}>
+                      Include courtyards
+                    </span>
+                  </label>
+                  <p className="mt-1 text-[8px] leading-relaxed text-zinc-500">
+                    {courtyardTotals.courtyardCount} courtyard{courtyardTotals.courtyardCount > 1 ? "s" : ""} · {courtyardTotals.faceCount} face{courtyardTotals.faceCount > 1 ? "s" : ""} · {courtyardTotals.linearFeet.toLocaleString()} LF
+                  </p>
+                  {includeCourtyards && courtyardContribution.legs > 0 && (
+                    <p className="mt-0.5 text-[8px] text-emerald-500/80">
+                      Adding {courtyardContribution.legs} legs · {courtyardContribution.frames.toLocaleString()} frames
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </section>
