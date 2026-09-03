@@ -17,6 +17,27 @@ export type QuantityEngineInput = {
   bracePattern: string;
   wallOffset: number;
   /**
+   * Lift count per leg, in order along the run. When supplied, every
+   * quantity is computed per bay from the real lift counts rather than
+   * assuming a uniform run — which is what makes per-tick height edits
+   * flow through to material counts. A bay spans two legs and is
+   * governed by the SHORTER of them: you can't brace, deck, or rail to
+   * a frame that isn't there.
+   *
+   * When omitted, the run is treated as uniform at the height derived
+   * from wallHeight.
+   */
+  legLifts?: number[];
+  /**
+   * Material rules — normally supplied from backend settings so each
+   * company can encode its own standard. Defaults match common practice
+   * and are documented on MATERIAL_RULE_DEFAULTS below.
+   */
+  crossBracesPerBayPerLift?: number;
+  guardrailTopPerBay?: number;
+  guardrailIntermediatePerBay?: number;
+  couplingPinsPerFrame?: number;
+  /**
    * Standard worker reach height from the top deck (default 6'). The top
    * scaffold deck doesn't need to reach the full wall height — frame
    * stack height is calculated from (wallHeight - workerReachHeight).
@@ -45,6 +66,8 @@ export type QuantityEngineOutput = {
   guardrailCount: number;
   basePlateCount: number;
   screwJackCount: number;
+  /** Frame-to-frame joints. Top frame carries none — guardrail posts take those sockets. */
+  couplingPinCount: number;
   /** Realistic physical frame stack (6'-4"/5'/3' pieces) for the optimal option — see computeFrameMakeup. */
   frameMakeup: FrameMakeupPiece[];
   /** Screw jack extension used for final fine adjustment, in inches (0–18). */
@@ -228,6 +251,24 @@ export type ProjectLevel = {
   elevations: ProjectElevation[];
 };
 
+/**
+ * How deep an estimate goes. These are stages of one process, not
+ * separate modes — each builds on the one below, and moving up never
+ * discards work already entered.
+ *
+ * - quick-bid:     elevations only. Budgetary/preliminary pricing.
+ * - straight-cost: adds floor plans, so plan geometry and layout exist.
+ * - complex:       everything — 3D, section views, recommendations.
+ */
+export type EstimateDepth = "quick-bid" | "straight-cost" | "complex";
+
+export const DEPTH_ORDER: EstimateDepth[] = ["quick-bid", "straight-cost", "complex"];
+
+/** True when the project's depth includes the required tier or higher. */
+export function depthAtLeast(current: EstimateDepth, required: EstimateDepth): boolean {
+  return DEPTH_ORDER.indexOf(current) >= DEPTH_ORDER.indexOf(required);
+}
+
 export type ProjectRecord = {
   projectId: string;
   projectName: string;
@@ -236,6 +277,10 @@ export type ProjectRecord = {
   estimator: string;
   updatedAt: string;
   schemaVersion: number;
+  /** Estimate depth — see EstimateDepth. Defaults to complex for
+   *  projects created before depth tiers existed, so nothing that was
+   *  already accessible becomes hidden on upgrade. */
+  estimateDepth: EstimateDepth;
   takeoff: {
     levels: ProjectLevel[];
   };
@@ -575,44 +620,103 @@ export function computeFrameMakeup(effectiveHeightFt: number, screwJackMaxExtens
   return findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 1)[0];
 }
 
+/**
+ * Material rules, in one place. Backend settings override these per
+ * company; the defaults encode standard practice:
+ *
+ * - Cross braces go in at every lift, both sides — 2 per bay per lift.
+ * - Guardrails: the top lift gets 4 per bay (two front, two back). Every
+ *   intermediate lift gets 2 (one mid front, one mid back).
+ * - Coupling pins: 2 per frame joint. The top frame has none, because
+ *   guardrail posts occupy those sockets — the same physical connection.
+ * - Planks: every lift gets decked, counted by scaffold width.
+ * - Base plates and screw jacks are ground-only: one per leg.
+ */
+export const MATERIAL_RULE_DEFAULTS = {
+  crossBracesPerBayPerLift: 2,
+  guardrailTopPerBay: 4,
+  guardrailIntermediatePerBay: 2,
+  couplingPinsPerFrame: 2,
+} as const;
+
+/**
+ * Planks required to deck one bay, by scaffold width. Two different
+ * wrong values for this previously existed in the codebase — a stored
+ * default of 2, and a UI helper returning 3/4/6. Both are corrected here
+ * to the single source of truth.
+ */
+export function planksPerBayForWidth(scaffoldWidthFt: number): number {
+  if (scaffoldWidthFt >= 5) return 5;
+  if (scaffoldWidthFt >= 3.5) return 4;
+  return 3;
+}
+
 export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEngineOutput {
   const linearFeet = Math.max(0, asNumber(input.linearFeet, 0));
   const wallHeight = Math.max(0, asNumber(input.wallHeight, 0));
   const standardBayLength = Math.max(1, asNumber(input.standardBayLength, defaultScaffoldInput.standardBayLength));
-  const frameHeight = Math.max(1, asNumber(input.frameHeight, defaultScaffoldInput.frameHeight));
-  const plankCountPerBay = Math.max(0, Math.ceil(asNumber(input.plankCountPerBay, defaultScaffoldInput.plankCountPerBay)));
+  const scaffoldWidth = Math.max(0, asNumber(input.scaffoldWidth, defaultScaffoldInput.scaffoldWidth));
   const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, 6));
   const screwJackMaxExtensionIn = Math.max(0, asNumber(input.screwJackMaxExtensionIn, 18));
 
-  const bayCount = Math.ceil(linearFeet / standardBayLength);
-  const legCount = bayCount > 0 ? bayCount + 1 : 0;
-  // The top scaffold deck doesn't need to reach the full wall height —
-  // a worker standing on it can reach roughly workerReachHeight above
-  // where they stand. The remaining height is stacked using the actual
-  // realistic frame combination (6'-4"/5'/3' + screw jack), not just a
-  // rounded-up count of same-size frames.
+  const bracesPerBayPerLift = Math.max(0, asNumber(input.crossBracesPerBayPerLift, MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift));
+  const railTop = Math.max(0, asNumber(input.guardrailTopPerBay, MATERIAL_RULE_DEFAULTS.guardrailTopPerBay));
+  const railMid = Math.max(0, asNumber(input.guardrailIntermediatePerBay, MATERIAL_RULE_DEFAULTS.guardrailIntermediatePerBay));
+  const pinsPerFrame = Math.max(0, asNumber(input.couplingPinsPerFrame, MATERIAL_RULE_DEFAULTS.couplingPinsPerFrame));
+
+  // Planks are a function of width, not a stored scalar. An explicit
+  // plankCountPerBay is still honoured when passed deliberately.
+  const planksPerBay = input.plankCountPerBay > 0
+    ? Math.ceil(asNumber(input.plankCountPerBay, 0))
+    : planksPerBayForWidth(scaffoldWidth);
+
+  // Height drives everything: building height → deck height → material.
   const effectiveStackHeight = Math.max(0, wallHeight - workerReachHeight);
   const makeup = computeFrameMakeup(effectiveStackHeight, screwJackMaxExtensionIn);
-  const frameTall = Math.max(1, makeup.frameTall);
-  const jumps = frameTall;
-  const frameCount = legCount * frameTall;
-  const plankCount = bayCount * plankCountPerBay;
-  const crossBraceCount = input.bracePattern === "Every Bay" ? bayCount : 0;
-  const guardrailCount = bayCount;
-  const basePlateCount = legCount;
-  const screwJackCount = legCount;
+  const uniformLifts = Math.max(1, makeup.frameTall);
+
+  const bayCount = Math.ceil(linearFeet / standardBayLength);
+  const legCount = bayCount > 0 ? bayCount + 1 : 0;
+
+  // Per-leg lift counts. Supplied by callers that know real per-tick
+  // heights; otherwise the run is uniform.
+  const legLifts = (input.legLifts && input.legLifts.length >= 2)
+    ? input.legLifts.map(n => Math.max(1, Math.round(n)))
+    : Array.from({ length: legCount }, () => uniformLifts);
+
+  let frameCount = 0, couplingPinCount = 0;
+  for (const lifts of legLifts) {
+    frameCount += lifts;
+    // Every frame joint takes pins except the topmost — guardrail posts
+    // occupy those sockets instead.
+    couplingPinCount += Math.max(0, lifts - 1) * pinsPerFrame;
+  }
+
+  // Bays span two legs and are governed by the shorter of them: you
+  // can't brace, deck, or rail to a frame that isn't there.
+  let crossBraceCount = 0, guardrailCount = 0, plankCount = 0;
+  for (let i = 0; i < legLifts.length - 1; i++) {
+    const bayLifts = Math.min(legLifts[i], legLifts[i + 1]);
+    crossBraceCount += bayLifts * bracesPerBayPerLift;
+    plankCount += bayLifts * planksPerBay;
+    guardrailCount += railTop + Math.max(0, bayLifts - 1) * railMid;
+  }
+
+  const frameTall = Math.max(...legLifts, 1);
 
   return {
     bayCount,
     legCount,
-    jumps,
+    jumps: frameTall,
     frameTall,
     frameCount,
     plankCount,
     crossBraceCount,
     guardrailCount,
-    basePlateCount,
-    screwJackCount,
+    // Ground-only: one each per leg.
+    basePlateCount: legCount,
+    screwJackCount: legCount,
+    couplingPinCount,
     frameMakeup: makeup.pieces,
     screwJackExtensionIn: makeup.screwJackExtensionIn,
   };
@@ -663,6 +767,7 @@ function createDemoProject(): ProjectRecord {
     estimator: "H. Pierre",
     updatedAt: nowIso(),
     schemaVersion: 1,
+    estimateDepth: "complex",
     takeoff: {
       levels: [
         {
@@ -764,6 +869,9 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     estimator: asString(record.estimator, fallback.estimator),
     updatedAt: asString(record.updatedAt, nowIso()),
     schemaVersion: asNumber(record.schemaVersion, 1),
+    estimateDepth: DEPTH_ORDER.includes(record.estimateDepth as EstimateDepth)
+      ? (record.estimateDepth as EstimateDepth)
+      : "complex",
     takeoff: {
       levels: normalizedLevels.length ? normalizedLevels : fallback.takeoff.levels,
     },
@@ -951,6 +1059,170 @@ export function setIncludeCourtyards(include: boolean) {
  * elevation. Returns zeros when there are no courtyards, so callers can
  * add this unconditionally and let the toggle decide whether to use it.
  */
+/** Sets the estimate depth on the active project. */
+export function setEstimateDepth(depth: EstimateDepth) {
+  const project = getActiveProject();
+  saveActiveProject({ ...project, estimateDepth: depth });
+}
+
+export function getEstimateDepth(): EstimateDepth {
+  try {
+    return getActiveProject().estimateDepth ?? "complex";
+  } catch {
+    return "complex";
+  }
+}
+
+export type ElevationOnlyTotals = {
+  linearFeet: number;
+  bayCount: number;
+  legCount: number;
+  frameTall: number;
+  frameCount: number;
+  plankCount: number;
+  crossBraceCount: number;
+  guardrailCount: number;
+  basePlateCount: number;
+  screwJackCount: number;
+  couplingPinCount: number;
+  avgHeightFt: number;
+  areaCount: number;
+};
+
+/**
+ * Quantities derived from gripped elevation areas alone, with no plan
+ * geometry — the calculation path behind Quick Bid.
+ *
+ * The math is the same as the plan-based path: bays from linear feet
+ * divided by bay length, legs from bays, and frames per leg from
+ * (height − worker reach) stacked in real frame sizes. The only
+ * difference is where linear feet comes from — summed gripped areas
+ * rather than a traced perimeter. Each gripped area is treated as its
+ * own run, which is why bays and legs accumulate per area rather than
+ * being computed from one total.
+ */
+export function computeElevationOnlyTotals(
+  elevation: ProjectElevation | null,
+  opts?: { bayLengthFt?: number; workerReachHeight?: number; plankCountPerBay?: number; screwJackMaxExtensionIn?: number; includeCourtyards?: boolean },
+): ElevationOnlyTotals {
+  const bayLen = Math.max(1, opts?.bayLengthFt ?? elevation?.scaffoldInput?.standardBayLength ?? 10);
+  const reach = Math.max(0, opts?.workerReachHeight ?? 6);
+  const ppb = Math.max(0, opts?.plankCountPerBay ?? planksPerBayForWidth(elevation?.scaffoldInput?.scaffoldWidth ?? 3));
+  const jackMax = opts?.screwJackMaxExtensionIn ?? 18;
+
+  type Run = { lf: number; heightFt: number };
+  const runs: Run[] = [];
+
+  for (const eh of (elevation?.overlayGeometry?.elevationHeights ?? []) as any[]) {
+    for (const a of (eh?.areas ?? []) as any[]) {
+      const lf = asNumber(a?.lf, 0), h = asNumber(a?.heightFt, 0);
+      if (lf > 0 && h > 0) runs.push({ lf, heightFt: h });
+    }
+  }
+
+  if (opts?.includeCourtyards ?? elevation?.includeCourtyards ?? true) {
+    for (const cy of elevation?.courtyards ?? []) {
+      for (const face of cy.faces) {
+        for (const a of (face.areas ?? []) as any[]) {
+          const lf = asNumber(a?.lf, 0), h = asNumber(a?.heightFt, 0);
+          if (lf > 0 && h > 0) runs.push({ lf, heightFt: h });
+        }
+      }
+    }
+  }
+
+  let linearFeet = 0, bayCount = 0, legCount = 0, frameCount = 0, plankCount = 0, heightSum = 0;
+  let crossBraceCount = 0, guardrailCount = 0, couplingPinCount = 0;
+  let maxFrameTall = 0;
+
+  for (const run of runs) {
+    const bays = Math.max(1, Math.ceil(run.lf / bayLen));
+    const legs = bays + 1;
+    const makeup = computeFrameMakeup(Math.max(0, run.heightFt - reach), jackMax);
+    const tall = Math.max(1, makeup.frameTall);
+    linearFeet += run.lf;
+    bayCount += bays;
+    legCount += legs;
+    frameCount += legs * tall;
+    plankCount += bays * ppb * tall;
+    // These repeat at every lift, same as on the plan-geometry path.
+    crossBraceCount += bays * tall * MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
+    guardrailCount += bays * (MATERIAL_RULE_DEFAULTS.guardrailTopPerBay + Math.max(0, tall - 1) * MATERIAL_RULE_DEFAULTS.guardrailIntermediatePerBay);
+    couplingPinCount += legs * Math.max(0, tall - 1) * MATERIAL_RULE_DEFAULTS.couplingPinsPerFrame;
+    heightSum += run.heightFt;
+    if (tall > maxFrameTall) maxFrameTall = tall;
+  }
+
+  return {
+    linearFeet: parseFloat(linearFeet.toFixed(1)),
+    bayCount,
+    legCount,
+    frameTall: maxFrameTall,
+    frameCount,
+    plankCount,
+    crossBraceCount,
+    guardrailCount,
+    couplingPinCount,
+    basePlateCount: legCount,
+    screwJackCount: legCount,
+    avgHeightFt: runs.length ? parseFloat((heightSum / runs.length).toFixed(1)) : 0,
+    areaCount: runs.length,
+  };
+}
+
+/**
+ * A plain-language account of what the current depth covers and what it
+ * doesn't — written the way a competent estimator would report to a
+ * manager: direct, specific, honest about uncertainty, and clear about
+ * what the next stage would resolve.
+ */
+export function buildPhaseReport(elevation: ProjectElevation | null, depth: EstimateDepth, totals?: ElevationOnlyTotals) {
+  const t = totals ?? computeElevationOnlyTotals(elevation);
+  const levelCount = elevation?.overlayGeometry?.fullOverlayRows?.length ?? 0;
+  const tracedLevels = (elevation?.overlayGeometry?.fullOverlayRows ?? []).filter(r => r.points.length >= 3).length;
+  const courtyardCount = elevation?.courtyards?.length ?? 0;
+
+  if (depth === "quick-bid") {
+    const covered = t.areaCount > 0
+      ? `${t.areaCount} area${t.areaCount === 1 ? "" : "s"} gripped, ${t.linearFeet.toLocaleString()} LF total, averaging ${t.avgHeightFt}' tall${courtyardCount ? `, including ${courtyardCount} courtyard${courtyardCount === 1 ? "" : "s"}` : ""}. That's enough for a budget number.`
+      : `Nothing's gripped yet, so there's no number to give you. Grip the areas that need coverage on each elevation and this fills in.`;
+    return {
+      headline: "Quick Bid",
+      covered,
+      gaps: t.areaCount > 0 ? [
+        "How these walls actually connect at the corners — inside and outside corners carry different material.",
+        "Whether any walls step back at height, which would mean brackets or a second run.",
+        "Where legs land in plan, so there's no layout drawing to hand a foreman.",
+      ] : [],
+      nextStep: t.areaCount > 0
+        ? "Straight Cost sorts that out. It needs a floor plan traced — the elevation work you've already done carries straight over."
+        : "",
+    };
+  }
+
+  if (depth === "straight-cost") {
+    return {
+      headline: "Straight Cost",
+      covered: tracedLevels > 0
+        ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced against ${t.areaCount} gripped area${t.areaCount === 1 ? "" : "s"}, ${t.linearFeet.toLocaleString()} LF. Plan geometry is in, so corners and leg positions are real rather than assumed.`
+        : `Elevations are gripped but no floor plan is traced yet, so this is still running on elevation data alone. Trace at least one level to get the plan geometry this tier is for.`,
+      gaps: [
+        "Section conditions aren't drawn, so wall steps and setbacks aren't visually verified.",
+        "No 3D check on the layout — worth having before a hard bid.",
+        levelCount > 1 ? "Multi-level step-backs are detected from the outlines but not yet reviewed against sections." : "Only one level is traced, so nothing's known about how the building changes with height.",
+      ],
+      nextStep: "Complex Package adds section views, the 3D model, and Korban's review of trouble spots.",
+    };
+  }
+
+  return {
+    headline: "Complex Package",
+    covered: `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced, ${t.areaCount} area${t.areaCount === 1 ? "" : "s"} gripped, ${t.linearFeet.toLocaleString()} LF. Full geometry, sections, and 3D are available.`,
+    gaps: [],
+    nextStep: "Everything Korban can assess is available at this depth. What's left is your judgment on the numbers.",
+  };
+}
+
 export function computeCourtyardTotals(elevation: ProjectElevation | null) {
   const empty = { linearFeet: 0, legs: 0, frameTall: 0, faceCount: 0, courtyardCount: 0 };
   const courtyards = elevation?.courtyards ?? [];

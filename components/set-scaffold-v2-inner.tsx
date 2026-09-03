@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
-import { calculateQuantityEngine, computeCourtyardTotals, findFrameMakeupOptions, getActiveElevation, getActiveProject, saveActiveElevation, saveSectionView, setIncludeCourtyards, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, saveSectionView, setIncludeCourtyards, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -88,10 +88,11 @@ function parseFt(v: string): number {
 }
 
 // ── Plank count per bay based on width ───────────────────────────────────────
+// Delegates to the shared rule in projectStore so plank counts can't
+// drift between here and the quantity engine — this helper previously
+// returned 6 for 5' width while the engine assumed something different.
 function planksPerBay(width: ScaffoldWidth): number {
-  if (width === "5'") return 6;
-  if (width === "3'-6\"") return 4;
-  return 3; // 3'
+  return planksPerBayForWidth(parseFt(width));
 }
 
 // ── Leg computation — NO orphan legs ─────────────────────────────────────────
@@ -867,6 +868,9 @@ export default function SetScaffoldV2Inner() {
   const [editMode,       setEditMode]       = useState(false);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
   const [sectionExpanded, setSectionExpanded] = useState(false);
+  // Estimate depth gates which views are available here. Quick Bid shows
+  // counts and frame config only — no layout, no 3D, no sections.
+  const [estimateDepth, setEstimateDepthState] = useState<EstimateDepth>("complex");
   const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
   const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
   const [overriddenFC,   setOverriddenFC]   = useState<Record<string, number>>({});
@@ -885,6 +889,17 @@ export default function SetScaffoldV2Inner() {
   const frameHeight       = 6.333;
   const workerReachHeight = getBackendSettings()?.scaffold?.workerReachHeight ?? 6;
   const screwJackMaxExtensionIn = getBackendSettings()?.scaffold?.screwJackMaxExtension ?? 12;
+  // Material rules come from backend settings so each company can encode
+  // its own standard; the defaults are standard practice.
+  const MATERIAL_RULES = useMemo(() => {
+    const sc = getBackendSettings()?.scaffold ?? {};
+    return {
+      crossBracesPerBayPerLift: sc.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift,
+      guardrailTopPerBay: sc.guardrailTopPerBay ?? MATERIAL_RULE_DEFAULTS.guardrailTopPerBay,
+      guardrailIntermediatePerBay: sc.guardrailIntermediatePerBay ?? MATERIAL_RULE_DEFAULTS.guardrailIntermediatePerBay,
+      couplingPinsPerFrame: sc.couplingPinsPerFrame ?? MATERIAL_RULE_DEFAULTS.couplingPinsPerFrame,
+    };
+  }, []);
   const frameTall         = elevation?.quantityEngine?.frameTall ?? 7;
   const effectiveStackHeightFt = Math.max(0, (elevation?.wallHeight ?? 0) - workerReachHeight);
   const scaffoldWidthFt   = parseFt(scaffoldWidth);
@@ -962,10 +977,27 @@ export default function SetScaffoldV2Inner() {
   // Courtyard quantities — stored separately from the building's own
   // elevations, and rolled into totals only when the include toggle is on.
   const courtyardTotals = useMemo(() => computeCourtyardTotals(elevation), [elevation]);
+
+  // Quick Bid derives everything from gripped elevation areas — no plan
+  // geometry exists at that depth, so the tick/perimeter path can't run.
+  const isQuickBid = !depthAtLeast(estimateDepth, "straight-cost");
+  const quickTotals = useMemo(
+    () => computeElevationOnlyTotals(elevation, {
+      bayLengthFt: bayLengthFt,
+      workerReachHeight,
+      plankCountPerBay: ppb,
+      screwJackMaxExtensionIn,
+    }),
+    [elevation, bayLengthFt, workerReachHeight, ppb, screwJackMaxExtensionIn],
+  );
+  const phaseReport = useMemo(
+    () => buildPhaseReport(elevation, estimateDepth, quickTotals),
+    [elevation, estimateDepth, quickTotals],
+  );
   const includeCourtyards = elevation?.includeCourtyards ?? true;
   const courtyardContribution = useMemo(() => {
     if (!includeCourtyards || courtyardTotals.legs <= 0) {
-      return { legs: 0, bays: 0, frames: 0, planks: 0 };
+      return { legs: 0, bays: 0, frames: 0, planks: 0, braces: 0, guardrails: 0, couplingPins: 0 };
     }
     const cyBays = Math.max(0, courtyardTotals.legs - courtyardTotals.faceCount);
     const cyFrameTall = courtyardTotals.frameTall || frameTall;
@@ -974,34 +1006,73 @@ export default function SetScaffoldV2Inner() {
       bays: cyBays,
       frames: courtyardTotals.legs * cyFrameTall,
       planks: cyBays * ppb * cyFrameTall,
+      // These repeat per lift just as they do on the building — they were
+      // previously omitted entirely, so courtyards contributed no bracing
+      // or railing to project totals.
+      braces: cyBays * cyFrameTall * MATERIAL_RULES.crossBracesPerBayPerLift,
+      guardrails: cyBays * (MATERIAL_RULES.guardrailTopPerBay + Math.max(0, cyFrameTall - 1) * MATERIAL_RULES.guardrailIntermediatePerBay),
+      couplingPins: courtyardTotals.legs * Math.max(0, cyFrameTall - 1) * MATERIAL_RULES.couplingPinsPerFrame,
     };
-  }, [includeCourtyards, courtyardTotals, frameTall, ppb]);
+  }, [includeCourtyards, courtyardTotals, frameTall, ppb, MATERIAL_RULES]);
 
   const totals = useMemo(() => {
+    // Quick Bid has no traced perimeter, so quantities come from gripped
+    // elevation areas instead of ticks. Courtyards are already folded in
+    // by computeElevationOnlyTotals, so no separate contribution here.
+    if (isQuickBid) {
+      return {
+        legs: quickTotals.legCount,
+        bays: quickTotals.bayCount,
+        frames: quickTotals.frameCount + manualFrameCount,
+        brackets: manualBracketCount,
+        planks: quickTotals.plankCount,
+        braces: quickTotals.crossBraceCount,
+        guardrails: quickTotals.guardrailCount,
+        couplingPins: quickTotals.couplingPinCount,
+        buildingLegs: quickTotals.legCount,
+        buildingFrames: quickTotals.frameCount + manualFrameCount,
+      };
+    }
+    // Per-bay accumulation from the real per-leg lift counts. Braces,
+    // planks, guardrails and pins all repeat at every lift — counting
+    // them once at ground level understated each by roughly the lift
+    // count. A bay is governed by its SHORTER leg: nothing can attach to
+    // a frame that isn't there.
     let legs = 0, bays = 0, totalFrames = 0;
+    let braceCount = 0, plankCount = 0, railCount = 0, pinCount = 0;
     for (const seg of allSegmentLegs) {
       const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
-      const active = sl.filter((_, i) => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
-      legs += active.length;
-      if (active.length > 1) bays += active.length - 1;
-      active.forEach((_, i) => {
-        const k = `${seg.segIndex}-${i}`;
-        totalFrames += overriddenFC[k] ?? getFrameTallForLeg(seg.segIndex, i);
-      });
+      const active = sl
+        .map((_, i) => i)
+        .filter(i => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
+      const lifts = active.map(i => overriddenFC[`${seg.segIndex}-${i}`] ?? getFrameTallForLeg(seg.segIndex, i));
+      legs += lifts.length;
+      if (lifts.length > 1) bays += lifts.length - 1;
+      for (const n of lifts) {
+        totalFrames += n;
+        pinCount += Math.max(0, n - 1) * MATERIAL_RULES.couplingPinsPerFrame;
+      }
+      for (let i = 0; i < lifts.length - 1; i++) {
+        const bayLifts = Math.min(lifts[i], lifts[i + 1]);
+        braceCount += bayLifts * MATERIAL_RULES.crossBracesPerBayPerLift;
+        plankCount += bayLifts * ppb;
+        railCount += MATERIAL_RULES.guardrailTopPerBay + Math.max(0, bayLifts - 1) * MATERIAL_RULES.guardrailIntermediatePerBay;
+      }
     }
-    // Planks = bays × planksPerBay × frameTall (levels)
-    const planks = bays * ppb * frameTall;
     return {
       legs: legs + courtyardContribution.legs,
       bays: bays + courtyardContribution.bays,
       frames: totalFrames + manualFrameCount + courtyardContribution.frames,
       brackets: manualBracketCount,
-      planks: planks + courtyardContribution.planks,
+      planks: plankCount + courtyardContribution.planks,
+      braces: braceCount + courtyardContribution.braces,
+      guardrails: railCount + courtyardContribution.guardrails,
+      couplingPins: pinCount + courtyardContribution.couplingPins,
       // Building-only figures, kept so the UI can show what a courtyard adds
       buildingLegs: legs,
       buildingFrames: totalFrames + manualFrameCount,
     };
-  }, [allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution]);
+  }, [isQuickBid, quickTotals, allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution, MATERIAL_RULES]);
 
   function handleToggleCourtyards(next: boolean) {
     setIncludeCourtyards(next);
@@ -1031,6 +1102,8 @@ export default function SetScaffoldV2Inner() {
       try {
         const e = getActiveElevation(), p = getActiveProject();
         setElevation(e); setProjectName(p.projectName || projectInfo.projectName);
+        const depth = getEstimateDepth();
+        setEstimateDepthState(depth);
         setScaffoldWidth(e.scaffoldInput.scaffoldWidth >= 5 ? "5'" : e.scaffoldInput.scaffoldWidth >= 3.5 ? "3'-6\"" : "3'");
         setBayLength(`${e.scaffoldInput.standardBayLength}'`);
       } catch {}
@@ -1276,19 +1349,112 @@ export default function SetScaffoldV2Inner() {
         }
       />
 
-      {/* Layout: left main column holds the Overlay/Section tabs; right
-          column holds the 3D model, mounted ONCE and never unmounted —
-          it stays visible and rotating at all times. (Previously the 3D
-          view was its own tab, which unmounted/remounted it on every
-          tab switch — each remount creates a fresh WebGL context, and
-          that churn matches the freeze pattern we kept hitting.) */}
+      {/* Quick Bid — no plan geometry exists at this depth, so there's no
+          layout, 3D, or section to show. Counts, frame options, material
+          list, and an honest account of what the number does and doesn't
+          cover. That's the whole job at this tier. */}
+      {isQuickBid ? (
+        <div className="flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-[1100px] px-6 py-6">
+            <div className="flex items-baseline justify-between">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Quick Bid</p>
+                <p className="mt-1 text-[13px] text-zinc-400">Budgetary pricing from elevation coverage.</p>
+              </div>
+              <a href="/estimate-depth" className="text-[10px] text-zinc-600 hover:text-orange-300">change depth ›</a>
+            </div>
+
+            {/* Headline counts */}
+            <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+              {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (
+                <div key={l as string} className="rounded-xl border border-orange-500/25 bg-orange-500/5 px-4 py-3">
+                  <p className="text-[9px] uppercase tracking-wider text-orange-700">{l}</p>
+                  <p className="mt-1 font-mono text-2xl font-bold text-orange-300">{Number(v).toLocaleString()}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-4 text-[11px] text-zinc-500">
+              <span>{quickTotals.linearFeet.toLocaleString()} LF gripped</span>
+              <span>·</span>
+              <span>{quickTotals.areaCount} coverage area{quickTotals.areaCount === 1 ? "" : "s"}</span>
+              <span>·</span>
+              <span>avg {quickTotals.avgHeightFt}&apos; tall</span>
+              {courtyardTotals.courtyardCount > 0 && (<><span>·</span><span>{courtyardTotals.courtyardCount} courtyard{courtyardTotals.courtyardCount === 1 ? "" : "s"}</span></>)}
+            </div>
+
+            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              {/* Frame configuration — needs only a height, so it works here */}
+              <div className="rounded-xl border border-zinc-900 bg-[#0b0b0b] overflow-hidden">
+                <FrameConfigOptions effectiveHeightFt={effectiveStackHeightFt} screwJackMaxExtensionIn={screwJackMaxExtensionIn} scaffoldWidthFt={scaffoldWidthFt} />
+              </div>
+
+              {/* Material list */}
+              <div className="rounded-xl border border-zinc-900 bg-[#0b0b0b]">
+                <div className="flex items-center justify-between border-b border-zinc-900 px-4 py-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Material List</p>
+                  <a href="/inventory/load-list" className="text-[9px] text-orange-400 hover:text-orange-300">Full Load List →</a>
+                </div>
+                <div className="p-3 space-y-1">
+                  {[
+                    { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
+                    { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
+                    { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.braces },
+                    { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.guardrails },
+                    { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
+                    { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
+                    { partNo: "CPS",    description: "Coupling Pin",      qty: totals.couplingPins },
+                  ].map(item => (
+                    <div key={item.partNo} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
+                      <span className="w-12 flex-shrink-0 font-mono text-[9px] text-orange-400">{item.partNo}</span>
+                      <span className="flex-1 truncate text-[10px] text-zinc-500">{item.description}</span>
+                      <span className={`font-mono text-[11px] font-bold ${item.qty > 0 ? "text-orange-300" : "text-zinc-700"}`}>
+                        {item.qty > 0 ? item.qty.toLocaleString() : "—"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Phase report — what this covers, and what it doesn't */}
+            <div className="mt-4 rounded-xl border border-zinc-800 bg-[#0b0b0b] p-5">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Where this stands</p>
+              <p className="mt-2.5 text-[13px] leading-relaxed text-zinc-300">{phaseReport.covered}</p>
+              {phaseReport.gaps.length > 0 && (
+                <>
+                  <p className="mt-4 text-[12px] text-zinc-400">What I don&apos;t know yet:</p>
+                  <ul className="mt-1.5 space-y-1.5">
+                    {phaseReport.gaps.map((g, i) => (
+                      <li key={i} className="flex gap-2 text-[12.5px] leading-relaxed text-zinc-400">
+                        <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-yellow-500/70" />
+                        {g}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {phaseReport.nextStep && (
+                <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-zinc-800 pt-3.5">
+                  <p className="flex-1 text-[12.5px] leading-relaxed text-zinc-400">{phaseReport.nextStep}</p>
+                  <a href="/estimate-depth" className="rounded-xl bg-orange-500 px-4 py-2 text-[11px] font-bold text-black transition hover:bg-orange-400">
+                    Move to Straight Cost
+                  </a>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
       <div className="flex flex-1 overflow-hidden">
         <div className="flex flex-col flex-1 overflow-hidden border-r border-zinc-900">
           <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2 flex-shrink-0">
             {([
               { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
               { id: "section", label: "Section View", icon: "✂" },
-            ] as { id: typeof activeMainTab; label: string; icon: string }[]).map(tab => {
+            ] as { id: typeof activeMainTab; label: string; icon: string }[])
+              .filter(tab => tab.id !== "section" || depthAtLeast(estimateDepth, "complex"))
+              .map(tab => {
               const active = activeMainTab === tab.id;
               return (
                 <button key={tab.id} onClick={() => setActiveMainTab(tab.id)}
@@ -1659,6 +1825,7 @@ export default function SetScaffoldV2Inner() {
         {/* ── Persistent right column — 3D model, always mounted & rotating,
               with the Total Project Material List beneath it ─────────── */}
         <div className="flex flex-col flex-shrink-0 overflow-hidden" style={{ width: "30%" }}>
+          {depthAtLeast(estimateDepth, "complex") && (
           <div className="flex flex-col flex-shrink-0" style={{ height: "55%" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
@@ -1676,6 +1843,7 @@ export default function SetScaffoldV2Inner() {
               )}
             </div>
           </div>
+          )}
 
           {/* Clear separation between the 3D view and the material list */}
           <div className="border-t-4 border-zinc-900 flex-1 overflow-y-auto min-h-0">
@@ -1687,11 +1855,11 @@ export default function SetScaffoldV2Inner() {
               {[
                 { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
                 { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
-                { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.bays   },
-                { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.bays   },
+                { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.braces },
+                { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.guardrails },
                 { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
                 { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
-                { partNo: "CPS",    description: "Coupling Pin",      qty: totals.legs * 2 },
+                { partNo: "CPS",    description: "Coupling Pin",      qty: totals.couplingPins },
                 { partNo: "BRKT",   description: "Wall Bracket (Added)", qty: totals.brackets },
               ].map(item => (
                 <div key={item.partNo} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 transition ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
@@ -1706,6 +1874,7 @@ export default function SetScaffoldV2Inner() {
           </div>
         </div>
       </div>
+      )}
     </main>
   );
 }
