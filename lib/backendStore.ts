@@ -62,6 +62,20 @@ export type LaborDefaults = {
   apprenticeRate: number;
   journeymanRate: number;
   foremanRate: number;
+  /**
+   * Hourly rate applied to erect and dismantle hours in Estimate Review.
+   * Separate from the trade rates above, which describe individual
+   * classifications rather than the rate a job is priced at.
+   */
+  erectHourlyRate: number;
+  /** Travel carries its own rate — usually a little above the erect rate. */
+  travelHourlyRate: number;
+  /**
+   * Dismantle hours as a percentage of erect hours. Confirmed at 70% by
+   * the material audit. Dismantle is never entered by hand; it derives
+   * from erect using this number.
+   */
+  dismantlePercentOfErect: number;
   travelTimeHours: number;
   truckDeliveryRate: number;
   mobilizationCost: number;
@@ -202,6 +216,9 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     apprenticeRate: 48,
     journeymanRate: 72,
     foremanRate: 85,
+    erectHourlyRate: 68,
+    travelHourlyRate: 70,
+    dismantlePercentOfErect: 70,
     travelTimeHours: 1,
     truckDeliveryRate: 425,
     mobilizationCost: 1200,
@@ -354,6 +371,9 @@ function normalizeLabor(value: unknown): LaborDefaults {
     apprenticeRate: asNumber(r.apprenticeRate, d.apprenticeRate),
     journeymanRate: asNumber(r.journeymanRate, d.journeymanRate),
     foremanRate: asNumber(r.foremanRate, d.foremanRate),
+    erectHourlyRate: asNumber(r.erectHourlyRate, d.erectHourlyRate),
+    travelHourlyRate: asNumber(r.travelHourlyRate, d.travelHourlyRate),
+    dismantlePercentOfErect: asNumber(r.dismantlePercentOfErect, d.dismantlePercentOfErect),
     travelTimeHours: asNumber(r.travelTimeHours, d.travelTimeHours),
     truckDeliveryRate: asNumber(r.truckDeliveryRate, d.truckDeliveryRate),
     mobilizationCost: asNumber(r.mobilizationCost, d.mobilizationCost),
@@ -486,7 +506,8 @@ const PRODUCTION_DAY_DEFAULTS = {
   conservativeInstallDays: 6,
   balancedInstallDays: 5,
   competitiveInstallDays: 4,
-  dismantlePercent: 60,
+  // Confirmed at 70% by the material audit. Was 60%, which predated it.
+  dismantlePercent: 70,
 };
 
 export function getRates(): KorbanRates {
@@ -501,6 +522,8 @@ export function getRates(): KorbanRates {
     tripsPerTruckLoad: 2,
     defaultProductionType: "Balanced",
     ...PRODUCTION_DAY_DEFAULTS,
+    // Backend setting wins when present; the constant above is the fallback.
+    dismantlePercent: settings.labor.dismantlePercentOfErect ?? PRODUCTION_DAY_DEFAULTS.dismantlePercent,
     defaultMarkupPercent: settings.pricing.markupPercent,
     defaultMiscCostBuffer: settings.pricing.miscCost,
     defaultMiscRevenueBuffer: 0,

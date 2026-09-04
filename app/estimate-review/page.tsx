@@ -1,15 +1,32 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanManagementShell, type KorbanMenuLink } from "@/components/korban";
 import {
-  getActiveElevation,
-  getActiveProject,
-} from "@/lib/projectStore";
+  KorbanButton,
+  KorbanHeader,
+  KorbanManagementShell,
+  type KorbanMenuLink,
+} from "@/components/korban";
+import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
+import {
+  BID_DEPTHS,
+  DEFAULT_ESTIMATE_STATE,
+  PRODUCTION_TYPES,
+  loadEstimateState,
+  saveEstimateState,
+  type BidDepth,
+  type ConsumableLine,
+  type ProductionKey,
+  type ProductionPhase,
+} from "@/lib/estimateState";
 
-type RentalDuration = "30 Days" | "60 Days" | "90 Days" | "120 Days" | "Custom";
+// ─────────────────────────────────────────────────────────────────────────────
+// Types and reference data
+// ─────────────────────────────────────────────────────────────────────────────
+
 type ProposalStatus = "Draft" | "Internal Review" | "Ready To Send" | "Submitted";
+
 type BidRoundPhase =
   | "Budget / ROM"
   | "50% CD"
@@ -19,22 +36,16 @@ type BidRoundPhase =
   | "Final Round"
   | "Awarded";
 
-type ExtraMaterialItem = {
-  id: number;
-  item: string;
-  quantity: number;
-  unitRate: number;
-};
+type TabKey = "breakdown" | "proposal";
 
-type InstallMixItem = {
-  id: number;
-  phase: string;
-  days: number;
-  laborers: number;
-  note: string;
-};
-
-const rentalDurationOptions: RentalDuration[] = ["30 Days", "60 Days", "90 Days", "120 Days", "Custom"];
+const revisionHistory: { phase: BidRoundPhase; date: string; amount: number; note: string }[] = [
+  { phase: "Budget / ROM", date: "05/02/26", amount: 171500, note: "Early budget number based on conceptual scaffold LF." },
+  { phase: "50% CD", date: "05/13/26", amount: 184250, note: "Updated for expanded elevations and access conditions." },
+  { phase: "75% CD", date: "05/24/26", amount: 192600, note: "Added revised plank counts and labor assumptions." },
+  { phase: "100% CD", date: "06/02/26", amount: 201300, note: "Adjusted for final drawing set and rental duration." },
+  { phase: "GMP", date: "06/08/26", amount: 198900, note: "Value engineering review reduced misc. scope exposure." },
+  { phase: "Final Round", date: "06/14/26", amount: 196750, note: "Final internal review before submission." },
+];
 
 const bidRoundPhases: BidRoundPhase[] = [
   "Budget / ROM",
@@ -44,20 +55,6 @@ const bidRoundPhases: BidRoundPhase[] = [
   "GMP",
   "Final Round",
   "Awarded",
-];
-
-const revisionHistory: {
-  phase: BidRoundPhase;
-  date: string;
-  amount: number;
-  note: string;
-}[] = [
-  { phase: "Budget / ROM", date: "05/02/26", amount: 171500, note: "Early budget number based on conceptual scaffold LF." },
-  { phase: "50% CD", date: "05/13/26", amount: 184250, note: "Updated for expanded elevations and access conditions." },
-  { phase: "75% CD", date: "05/24/26", amount: 192600, note: "Added revised plank counts and labor assumptions." },
-  { phase: "100% CD", date: "06/02/26", amount: 201300, note: "Adjusted for final drawing set and rental duration." },
-  { phase: "GMP", date: "06/08/26", amount: 198900, note: "Value engineering review reduced misc. scope exposure." },
-  { phase: "Final Round", date: "06/14/26", amount: 196750, note: "Final internal review before submission." },
 ];
 
 const baseEstimate = {
@@ -82,14 +79,22 @@ const baseEstimate = {
   guardrails: 372,
   basePlates: 125,
   screwJacks: 125,
-  erectDays: 5,
-  dismantleDays: 3,
+  couplingPins: 750,
   truckLoads: 3,
   deliveryTrips: 2,
   pickupTrips: 2,
 };
 
 type EstimateData = typeof baseEstimate;
+
+const addAlternates = [
+  { id: 1, title: "Shrink wrap", description: "Shrink wrap enclosure at scaffold perimeter as directed.", value: 18400 },
+  { id: 2, title: "Toe boards", description: "Toe boards at working deck elevations where required.", value: 6200 },
+  { id: 3, title: "Debris netting", description: "Debris netting at scaffold exterior elevations.", value: 9800 },
+  { id: 4, title: "Stair tower", description: "Scaffold stair tower access at field-determined location.", value: 14500 },
+  { id: 5, title: "Pedestrian canopy", description: "Pedestrian canopy protection at designated access zones.", value: 22500 },
+  { id: 6, title: "Hoist landing", description: "Hoist landing platform and required scaffold adjustments.", value: 12800 },
+];
 
 const estimateMenuLinks: KorbanMenuLink[] = [
   { href: "/", label: "Bid Room" },
@@ -99,79 +104,57 @@ const estimateMenuLinks: KorbanMenuLink[] = [
   { href: "/settings", label: "Settings" },
 ];
 
-const standardMaterialInputs = [
-  { item: "Frames", quantity: baseEstimate.frames, unitRate: 4, source: "Backend > Material Pricing" },
-  { item: "Planks", quantity: baseEstimate.planks, unitRate: 2, source: "Backend > Material Pricing" },
-];
+const HOURS_PER_DAY = 8;
 
-const laborRates = [
-  { type: "Apprentice", abbreviation: "APP", rate: 48 },
-  { type: "Journeyman", abbreviation: "JOURN", rate: 72 },
-  { type: "Foreman", abbreviation: "FORMAN", rate: 85 },
-];
-
-const productionTypes = [
-  { key: "Conservative", title: "Conservative", installDays: 6, productionRate: "Slower / safer", note: "Used when access is difficult, plans are unclear, or field risk is higher." },
-  { key: "Balanced", title: "Conventional", installDays: 5, productionRate: "Standard", note: "Default estimator production assumption for typical frame scaffold work." },
-  { key: "Competitive", title: "Competitive", installDays: 4, productionRate: "Aggressive", note: "Used when schedule, access, and repetition support a tighter labor number." },
-] as const;
-
-type ProductionType = (typeof productionTypes)[number]["key"];
-
-const defaultInstallMix: InstallMixItem[] = [
-  { id: 1, phase: "Install Breakdown", days: 5, laborers: 4, note: "Primary install crew mix used for selected production type." },
-];
-
-const dismantleBackendPercent = 60;
-
-const addAlternates = [
-  { id: 1, title: "Shrink Wrap", description: "Provide shrink wrap enclosure at scaffold perimeter as directed by client.", value: 18400 },
-  { id: 2, title: "Toe Boards", description: "Provide toe boards at working deck elevations where required.", value: 6200 },
-  { id: 3, title: "Debris Netting", description: "Provide debris netting at scaffold exterior elevations.", value: 9800 },
-  { id: 4, title: "Stair Tower", description: "Provide scaffold stair tower access at field-determined location.", value: 14500 },
-  { id: 5, title: "Pedestrian Canopy", description: "Provide pedestrian canopy protection at designated access zones.", value: 22500 },
-  { id: 6, title: "Hoist Landing", description: "Provide hoist landing platform and required scaffold adjustments.", value: 12800 },
-];
+// ─────────────────────────────────────────────────────────────────────────────
+// Page
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function EstimateReviewPage() {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [rentalDuration, setRentalDuration] = useState<RentalDuration>("30 Days");
-  const [customRentalDays, setCustomRentalDays] = useState("45");
-  const [proposalStatus, setProposalStatus] = useState<ProposalStatus>("Draft");
-  const [bidRoundPhase, setBidRoundPhase] = useState<BidRoundPhase>("Final Round");
-
-  // FIX: Correct default rates — $4/frame, $2/plank per Backend spec
-  const [frameRate, setFrameRate] = useState(4);
-  const [plankRate, setPlankRate] = useState(2);
-  const [extraMaterialItems, setExtraMaterialItems] = useState<ExtraMaterialItem[]>([]);
-
-  const [productionType, setProductionType] = useState<ProductionType>("Balanced");
-  const [installMix, setInstallMix] = useState<InstallMixItem[]>(defaultInstallMix);
-  const [appRate, setAppRate] = useState(48);
-  const [journeyRate, setJourneyRate] = useState(72);
-  const [foremanRate, setForemanRate] = useState(85);
-  const [laborRevenue, setLaborRevenue] = useState(48750);
-
-  const [baseMonthlyRentalRevenue, setBaseMonthlyRentalRevenue] = useState(52600);
-  const [miscCost, setMiscCost] = useState(4200);
-  const [miscRevenue, setMiscRevenue] = useState(6800);
-  const [markupPercent, setMarkupPercent] = useState(15);
-  const [materialDurationMonths, setMaterialDurationMonths] = useState(1);
-  const [approvedAlternates, setApprovedAlternates] = useState<number[]>([]);
-  const [proposalNotes, setProposalNotes] = useState(
-    "Proposal includes furnishing, erecting, maintaining, and dismantling frame scaffold based on provided bid documents and current KORBAN takeoff assumptions."
-  );
+  const [activeTab, setActiveTab] = useState<TabKey>("breakdown");
   const [isHydrated, setIsHydrated] = useState(false);
+
   const [storedEstimate, setStoredEstimate] = useState<EstimateData | null>(null);
-  const [elevationBreakdownRows, setElevationBreakdownRows] = useState<{ elevation: string; approxLinearFeet: number }[]>([]);
+  const [elevationBreakdownRows, setElevationBreakdownRows] = useState<
+    { elevation: string; approxLinearFeet: number }[]
+  >([]);
   const [partialExteriorMarkupPercent, setPartialExteriorMarkupPercent] = useState(6);
 
+  // Estimate state (shared with /margin-review)
+  const [bidDepth, setBidDepth] = useState<BidDepth>(DEFAULT_ESTIMATE_STATE.bidDepth);
+  const [rentalDays, setRentalDays] = useState(DEFAULT_ESTIMATE_STATE.rentalDays);
+  const [frameRate, setFrameRate] = useState(DEFAULT_ESTIMATE_STATE.frameRate);
+  const [plankRate, setPlankRate] = useState(DEFAULT_ESTIMATE_STATE.plankRate);
+  const [consumables, setConsumables] = useState<ConsumableLine[]>(DEFAULT_ESTIMATE_STATE.consumables);
+
+  const [erectRate, setErectRate] = useState(DEFAULT_ESTIMATE_STATE.erectRate);
+  const [travelRate, setTravelRate] = useState(DEFAULT_ESTIMATE_STATE.travelRate);
+  const [travelHours, setTravelHours] = useState(DEFAULT_ESTIMATE_STATE.travelHours);
+  const [dismantlePercent, setDismantlePercent] = useState(DEFAULT_ESTIMATE_STATE.dismantlePercentOfErect);
+
+  const [productionKey, setProductionKey] = useState<ProductionKey>(DEFAULT_ESTIMATE_STATE.productionKey);
+  const [crewSize, setCrewSize] = useState(DEFAULT_ESTIMATE_STATE.crewSize);
+  const [phaseModeOn, setPhaseModeOn] = useState(DEFAULT_ESTIMATE_STATE.phaseModeOn);
+  const [phases, setPhases] = useState<ProductionPhase[]>(DEFAULT_ESTIMATE_STATE.phases);
+
+  const [laborMarkupPercent, setLaborMarkupPercent] = useState(DEFAULT_ESTIMATE_STATE.laborMarkupPercent);
+  const [miscRevenue, setMiscRevenue] = useState(DEFAULT_ESTIMATE_STATE.miscRevenue);
+
+  // Proposal-tab state
+  const [proposalStatus, setProposalStatus] = useState<ProposalStatus>("Draft");
+  const [bidRoundPhase, setBidRoundPhase] = useState<BidRoundPhase>("Final Round");
+  const [approvedAlternates, setApprovedAlternates] = useState<number[]>([]);
+  const [proposalNotes, setProposalNotes] = useState(
+    "Proposal includes furnishing, erecting, maintaining and dismantling frame scaffold based on the provided bid documents and current KORBAN takeoff assumptions."
+  );
+
+  // ── Hydration ──────────────────────────────────────────────────────────────
   useEffect(() => {
     function loadStoredEstimate() {
       const project = getActiveProject();
       const elevation = getActiveElevation();
       const quantityEngine = elevation.quantityEngine;
-      console.log("ESTIMATE REVIEW LOADED LF:", elevation.linearFeet);
 
       setStoredEstimate({
         ...baseEstimate,
@@ -189,97 +172,211 @@ export default function EstimateReviewPage() {
         guardrails: quantityEngine.guardrailCount ?? baseEstimate.guardrails,
         basePlates: quantityEngine.basePlateCount ?? baseEstimate.basePlates,
         screwJacks: quantityEngine.screwJackCount ?? baseEstimate.screwJacks,
+        couplingPins: quantityEngine.couplingPinCount ?? baseEstimate.couplingPins,
       });
 
-      const breakdownRows = (elevation.elevationBreakdown || []).filter((row) => row.approxLinearFeet > 0);
-      setElevationBreakdownRows(breakdownRows);
+      setElevationBreakdownRows(
+        (elevation.elevationBreakdown || []).filter((row) => row.approxLinearFeet > 0)
+      );
 
       const backendSettings = getBackendSettings();
-      setPartialExteriorMarkupPercent(backendSettings.pricing.partialExteriorMarkupPercent ?? 6);
-      // FIX: correct Backend fallback defaults — $4/frame, $2/plank
-      // Load rates from backend — clamp to sensible defaults if stale values detected
-      // Backend spec: frames = $4/ea, planks = $2/ea
-      const storedFrameRate = backendSettings.pricing.frameMonthlyRate;
-      const storedPlankRate = backendSettings.pricing.plankMonthlyRate;
-      setFrameRate((storedFrameRate != null && storedFrameRate <= 10) ? storedFrameRate : 4);
-      setPlankRate((storedPlankRate != null && storedPlankRate <= 5) ? storedPlankRate : 2);
-      setAppRate(backendSettings.labor.apprenticeRate ?? 48);
-      setJourneyRate(backendSettings.labor.journeymanRate ?? 72);
-      setForemanRate(backendSettings.labor.foremanRate ?? 85);
+      const pricing = backendSettings.pricing as unknown as Record<string, number | undefined>;
+      const labor = backendSettings.labor as unknown as Record<string, number | undefined>;
+      const saved = loadEstimateState();
+
+      setPartialExteriorMarkupPercent(pricing.partialExteriorMarkupPercent ?? 6);
+
+      // Rental rates: monthly per-piece rates. Backend wins, then saved, then default.
+      // Guard against stale values — a frame does not rent for more than $10/mo.
+      const backendFrameRate = pricing.frameMonthlyRate;
+      const backendPlankRate = pricing.plankMonthlyRate;
+      setFrameRate(
+        backendFrameRate != null && backendFrameRate > 0 && backendFrameRate <= 10
+          ? backendFrameRate
+          : saved.frameRate
+      );
+      setPlankRate(
+        backendPlankRate != null && backendPlankRate > 0 && backendPlankRate <= 10
+          ? backendPlankRate
+          : saved.plankRate
+      );
+
+      setErectRate(labor.erectHourlyRate ?? labor.journeymanRate ?? saved.erectRate);
+      setTravelRate(labor.travelHourlyRate ?? saved.travelRate);
+      setDismantlePercent(labor.dismantlePercentOfErect ?? saved.dismantlePercentOfErect);
+
+      setBidDepth(saved.bidDepth);
+      setRentalDays(saved.rentalDays);
+      setConsumables(saved.consumables);
+      setTravelHours(saved.travelHours);
+      setProductionKey(saved.productionKey);
+      setCrewSize(saved.crewSize);
+      setPhaseModeOn(saved.phaseModeOn);
+      setPhases(saved.phases);
+      setLaborMarkupPercent(saved.laborMarkupPercent);
+      setMiscRevenue(saved.miscRevenue);
 
       setIsHydrated(true);
     }
 
-    const loadStoredEstimateDelay = window.setTimeout(loadStoredEstimate, 250);
+    const delay = window.setTimeout(loadStoredEstimate, 250);
     window.addEventListener("focus", loadStoredEstimate);
     window.addEventListener("pageshow", loadStoredEstimate);
 
     return () => {
-      window.clearTimeout(loadStoredEstimateDelay);
+      window.clearTimeout(delay);
       window.removeEventListener("focus", loadStoredEstimate);
       window.removeEventListener("pageshow", loadStoredEstimate);
     };
   }, []);
 
   const estimate = storedEstimate ?? baseEstimate;
+  const selectedProduction =
+    PRODUCTION_TYPES.find((type) => type.key === productionKey) ?? PRODUCTION_TYPES[1];
+  const selectedDepth = BID_DEPTHS.find((depth) => depth.key === bidDepth) ?? BID_DEPTHS[2];
 
-  const rentalDays =
-    rentalDuration === "Custom" ? Number(customRentalDays || 0) : Number(rentalDuration.split(" ")[0]);
+  // ── Math ───────────────────────────────────────────────────────────────────
+  const totals = useMemo(() => {
+    const rentalMonths = Math.max(1, Math.ceil(rentalDays / 30));
 
-  const rentalMonths = Math.max(1, Math.ceil(rentalDays / 30));
+    const frameRental = estimate.frames * frameRate * rentalMonths;
+    const plankRental = estimate.planks * plankRate * rentalMonths;
+    const consumablesRevenue = consumables.reduce(
+      (sum, line) => sum + line.quantity * line.unitRate,
+      0
+    );
+    const rentalsRevenue = frameRental + plankRental + consumablesRevenue;
+
+    const phaseManHours = phases.reduce(
+      (sum, row) => sum + row.days * row.crews * row.menPerCrew * HOURS_PER_DAY,
+      0
+    );
+    const phaseDays = phases.reduce((sum, row) => sum + row.days, 0);
+
+    const productionDays = phaseModeOn ? phaseDays : selectedProduction.days;
+    const erectHours = phaseModeOn ? phaseManHours : selectedProduction.days * crewSize * HOURS_PER_DAY;
+    const dismantleHours = Math.round(erectHours * (dismantlePercent / 100));
+
+    const erectCost = erectHours * erectRate;
+    const dismantleCost = dismantleHours * erectRate;
+    const travelCost = travelHours * travelRate;
+    const laborCost = erectCost + dismantleCost + travelCost;
+
+    const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
+    const alternateRevenue = addAlternates
+      .filter((alternate) => approvedAlternates.includes(alternate.id))
+      .reduce((sum, alternate) => sum + alternate.value, 0);
+
+    const finalBid = Math.round(rentalsRevenue + laborRevenue + miscRevenue + alternateRevenue);
+
+    const totalPieces =
+      estimate.frames +
+      estimate.planks +
+      estimate.crossBraces +
+      estimate.guardrails +
+      estimate.basePlates +
+      estimate.screwJacks +
+      estimate.couplingPins;
+
+    return {
+      rentalMonths,
+      frameRental,
+      plankRental,
+      consumablesRevenue,
+      rentalsRevenue,
+      productionDays,
+      phaseDays,
+      erectHours,
+      dismantleHours,
+      erectCost,
+      dismantleCost,
+      travelCost,
+      laborCost,
+      laborRevenue,
+      alternateRevenue,
+      finalBid,
+      totalPieces,
+    };
+  }, [
+    approvedAlternates,
+    consumables,
+    crewSize,
+    dismantlePercent,
+    erectRate,
+    estimate,
+    frameRate,
+    laborMarkupPercent,
+    miscRevenue,
+    phaseModeOn,
+    phases,
+    plankRate,
+    rentalDays,
+    selectedProduction.days,
+    travelHours,
+    travelRate,
+  ]);
+
+  // ── Persist ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isHydrated) return;
+    saveEstimateState({
+      bidDepth,
+      rentalDays,
+      frameRate,
+      plankRate,
+      consumables,
+      erectRate,
+      travelRate,
+      travelHours,
+      dismantlePercentOfErect: dismantlePercent,
+      productionKey,
+      crewSize,
+      phaseModeOn,
+      phases,
+      derived: {
+        frames: estimate.frames,
+        planks: estimate.planks,
+        crossBraces: estimate.crossBraces,
+        guardrails: estimate.guardrails,
+        basePlates: estimate.basePlates,
+        screwJacks: estimate.screwJacks,
+        totalPieces: totals.totalPieces,
+        linearFeet: estimate.totalLinearFeet,
+        rentalsRevenue: totals.rentalsRevenue,
+        consumablesRevenue: totals.consumablesRevenue,
+        erectHours: totals.erectHours,
+        dismantleHours: totals.dismantleHours,
+        travelHours,
+        erectCost: totals.erectCost,
+        dismantleCost: totals.dismantleCost,
+        travelCost: totals.travelCost,
+        laborCost: totals.laborCost,
+        productionDays: totals.productionDays,
+        savedAt: Date.now(),
+      },
+    });
+  }, [
+    bidDepth,
+    consumables,
+    crewSize,
+    dismantlePercent,
+    erectRate,
+    estimate,
+    frameRate,
+    isHydrated,
+    phaseModeOn,
+    phases,
+    plankRate,
+    productionKey,
+    rentalDays,
+    totals,
+    travelHours,
+    travelRate,
+  ]);
 
   const activeRevision =
     revisionHistory.find((revision) => revision.phase === bidRoundPhase) ??
     revisionHistory[revisionHistory.length - 1];
-
-  const selectedProduction = productionTypes.find((item) => item.key === productionType) ?? productionTypes[1];
-  const allowedInstallDays = selectedProduction.installDays;
-  const dismantleDays = Math.max(1, Math.ceil(allowedInstallDays * (dismantleBackendPercent / 100)));
-
-  const effectiveLaborRates = useMemo(
-    () => [
-      { type: "Apprentice", abbreviation: "APP", rate: appRate },
-      { type: "Journeyman", abbreviation: "JOURN", rate: journeyRate },
-      { type: "Foreman", abbreviation: "FORMAN", rate: foremanRate },
-    ],
-    [appRate, foremanRate, journeyRate]
-  );
-
-  const totals = useMemo(() => {
-    const frameMaterialCost = estimate.frames * frameRate;
-    const plankMaterialCost = estimate.planks * plankRate;
-    const standardMaterialCost = frameMaterialCost + plankMaterialCost;
-    const extraMaterialCost = extraMaterialItems.reduce((sum, item) => sum + item.quantity * item.unitRate, 0);
-    const materialCost = (standardMaterialCost + extraMaterialCost) * materialDurationMonths;
-    const installLaborerDays = installMix.reduce((sum, row) => sum + row.days * row.laborers, 0);
-    const averageInstallCrew = Math.max(1, Math.round(installMix.reduce((sum, row) => sum + row.laborers, 0) / Math.max(1, installMix.length)));
-    const dismantleLaborerDays = dismantleDays * averageInstallCrew;
-    const totalLaborerDays = installLaborerDays + dismantleLaborerDays;
-    const totalLaborHours = totalLaborerDays * 8;
-    const blendedLaborRate = effectiveLaborRates.reduce((sum, item) => sum + item.rate, 0) / effectiveLaborRates.length;
-    const laborCost = Math.round(totalLaborHours * blendedLaborRate);
-    const rentalRevenue = baseMonthlyRentalRevenue * rentalMonths;
-    const alternateRevenue = addAlternates.filter((a) => approvedAlternates.includes(a.id)).reduce((sum, a) => sum + a.value, 0);
-    const costSubtotal = materialCost + laborCost + miscCost;
-    const revenueSubtotal = rentalRevenue + laborRevenue + miscRevenue + alternateRevenue;
-    const markupValue = Math.round(costSubtotal * (markupPercent / 100));
-    const finalBid = revenueSubtotal + markupValue;
-    const projectedLaborProfit = laborRevenue - laborCost;
-    const projectedLaborMargin = laborRevenue > 0 ? (projectedLaborProfit / laborRevenue) * 100 : 0;
-
-    return {
-      frameMaterialCost, plankMaterialCost, standardMaterialCost, extraMaterialCost,
-      materialCost, installLaborerDays, dismantleLaborerDays, totalLaborerDays,
-      totalLaborHours, blendedLaborRate, laborCost, rentalRevenue, alternateRevenue,
-      costSubtotal, revenueSubtotal, markupValue, finalBid,
-      projectedLaborProfit, projectedLaborMargin,
-    };
-  }, [
-    approvedAlternates, baseMonthlyRentalRevenue, effectiveLaborRates,
-    estimate.frames, estimate.planks, extraMaterialItems, frameRate,
-    installMix, dismantleDays, laborRevenue, miscCost, miscRevenue,
-    plankRate, rentalMonths, markupPercent, materialDurationMonths,
-  ]);
 
   const elevationPricing = useMemo(() => {
     const totalEnteredLf = elevationBreakdownRows.reduce((sum, row) => sum + row.approxLinearFeet, 0);
@@ -287,72 +384,54 @@ export default function EstimateReviewPage() {
     const rows = elevationBreakdownRows.map((row) => {
       const share = row.approxLinearFeet / totalEnteredLf;
       const baseShare = share * totals.finalBid;
-      const partialPrice = baseShare * (1 + partialExteriorMarkupPercent / 100);
-      return { elevation: row.elevation, approxLinearFeet: row.approxLinearFeet, sharePercent: share * 100, baseShare, partialPrice };
+      return {
+        elevation: row.elevation,
+        approxLinearFeet: row.approxLinearFeet,
+        sharePercent: share * 100,
+        baseShare,
+        partialPrice: baseShare * (1 + partialExteriorMarkupPercent / 100),
+      };
     });
-    const totalPartialCost = rows.reduce((sum, row) => sum + row.partialPrice, 0);
-    return { rows, totalPartialCost, hasData: true };
-  }, [elevationBreakdownRows, totals.finalBid, partialExteriorMarkupPercent]);
+    return {
+      rows,
+      totalPartialCost: rows.reduce((sum, row) => sum + row.partialPrice, 0),
+      hasData: true,
+    };
+  }, [elevationBreakdownRows, partialExteriorMarkupPercent, totals.finalBid]);
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+  function updateConsumable(id: string, field: "quantity" | "unitRate", value: number) {
+    setConsumables((current) =>
+      current.map((line) => (line.id === id ? { ...line, [field]: Math.max(0, value) } : line))
+    );
+  }
+
+  function updatePhase(id: number, field: "days" | "crews" | "menPerCrew", value: number) {
+    setPhases((current) =>
+      current.map((row) => (row.id === id ? { ...row, [field]: Math.max(0, value) } : row))
+    );
+  }
+
+  function renamePhase(id: number, name: string) {
+    setPhases((current) => current.map((row) => (row.id === id ? { ...row, phase: name } : row)));
+  }
+
+  function addPhase() {
+    setPhases((current) => [
+      ...current,
+      { id: Date.now(), phase: `Phase ${current.length + 1}`, days: 1, crews: 1, menPerCrew: crewSize },
+    ]);
+  }
+
+  function removePhase(id: number) {
+    setPhases((current) => (current.length <= 1 ? current : current.filter((row) => row.id !== id)));
+  }
 
   function toggleAlternate(id: number) {
     setApprovedAlternates((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
     );
   }
-
-  function addMaterialItem(itemName: string) {
-    if (!itemName) return;
-    setExtraMaterialItems((current) => [...current, { id: Date.now(), item: itemName, quantity: 1, unitRate: 0 }]);
-  }
-
-  function updateExtraMaterial(id: number, field: "quantity" | "unitRate", value: number) {
-    setExtraMaterialItems((current) => current.map((item) => (item.id === id ? { ...item, [field]: value } : item)));
-  }
-
-  function removeExtraMaterial(id: number) {
-    setExtraMaterialItems((current) => current.filter((item) => item.id !== id));
-  }
-
-  function updateProductionType(type: ProductionType) {
-    const nextProduction = productionTypes.find((item) => item.key === type) ?? productionTypes[1];
-    setProductionType(type);
-    setInstallMix((current) => {
-      const [first, ...rest] = current;
-      const restDays = rest.reduce((sum, item) => sum + item.days, 0);
-      const adjustedFirstDays = Math.max(1, nextProduction.installDays - restDays);
-      return [{ ...first, days: adjustedFirstDays }, ...rest.filter((item) => item.days > 0)];
-    });
-  }
-
-  function addInstallMix() {
-    setInstallMix((current) => {
-      const usedDays = current.reduce((sum, item) => sum + item.days, 0);
-      const remainingDays = Math.max(0, allowedInstallDays - usedDays);
-      if (remainingDays <= 0) return current;
-      return [...current, { id: Date.now(), phase: `Install Breakdown ${current.length + 1}`, days: remainingDays, laborers: 3, note: "Additional install crew mix within selected production output." }];
-    });
-  }
-
-  function updateInstallMix(id: number, field: "days" | "laborers", value: number) {
-    setInstallMix((current) => {
-      const otherDays = current.filter((item) => item.id !== id).reduce((sum, item) => sum + item.days, 0);
-      return current.map((item) => {
-        if (item.id !== id) return item;
-        if (field === "days") {
-          const maxAllowedForThisLine = Math.max(1, allowedInstallDays - otherDays);
-          return { ...item, days: Math.max(1, Math.min(value, maxAllowedForThisLine)) };
-        }
-        return { ...item, laborers: Math.max(1, value) };
-      });
-    });
-  }
-
-  function removeInstallMix(id: number) {
-    setInstallMix((current) => current.length <= 1 ? current : current.filter((item) => item.id !== id));
-  }
-
-  function submitPrice() { setProposalStatus("Submitted"); }
-  function approveProposal() { setProposalStatus("Ready To Send"); }
 
   if (!isHydrated) {
     return <main className="min-h-screen bg-korban-base text-white" />;
@@ -363,776 +442,127 @@ export default function EstimateReviewPage() {
       header={
         <KorbanHeader
           title="Estimate Review"
-          subtitle="Finalize estimate numbers, approve proposal content, and submit price to client"
+          subtitle={`${estimate.projectName} · ${estimate.proposalNumber}`}
           menuLinks={estimateMenuLinks}
           menuOpen={menuOpen}
           onMenuToggle={() => setMenuOpen((current) => !current)}
           actionsClassName="gap-3"
           actions={
             <>
-              <KorbanHeaderMeta label="Project" value={estimate.projectName} />
-              <StatusBadge status={proposalStatus} />
-              <KorbanButton variant="ghost" onClick={approveProposal}>Approve Proposal</KorbanButton>
-              <KorbanButton variant="primary" onClick={submitPrice}>Submit Price</KorbanButton>
+              <div className="rounded-xl border border-orange-500/25 bg-orange-500/[0.07] px-4 py-2 text-right">
+                <p className="text-[10px] tracking-[0.16em] text-zinc-500">Final bid</p>
+                <p className="font-mono text-lg font-bold leading-tight text-orange-400">
+                  {formatMoney(totals.finalBid)}
+                </p>
+              </div>
+              <a
+                href="/margin-review"
+                className="rounded-xl border border-zinc-700 bg-zinc-400/[0.06] px-4 py-2.5 text-xs font-bold text-zinc-300 transition hover:border-zinc-500 hover:bg-zinc-400/[0.1]"
+              >
+                Review margins ↗
+              </a>
+              <KorbanButton variant="primary" onClick={() => setProposalStatus("Submitted")}>
+                Submit price
+              </KorbanButton>
             </>
           }
         />
       }
       bodyClassName="p-4"
     >
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,6.5fr)_minmax(280px,2.5fr)_minmax(150px,1fr)]">
-        <section className="space-y-5">
-          <ProposalSheet>
-            <div className="flex items-start justify-between gap-6 border-b border-zinc-800 pb-5">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.35em] text-orange-500">Estimate Review</p>
-                <h2 className="mt-3 text-3xl font-bold text-white">{estimate.projectName}</h2>
-                <p className="mt-1 text-sm text-zinc-500">{estimate.projectAddress}</p>
-              </div>
-              <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 text-right">
-                <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Proposal No.</p>
-                <a href="/project-plan-desk" className="mt-1 block font-mono text-sm font-bold text-orange-400 hover:text-orange-300 underline-offset-2 hover:underline">
-                  {estimate.proposalNumber}
-                </a>
-                <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-zinc-500">Bid Date</p>
-                <p className="mt-1 font-mono text-sm text-zinc-300">{estimate.bidDate}</p>
-              </div>
-            </div>
+      <TabStrip activeTab={activeTab} onChange={setActiveTab} />
 
-            <div className="mt-5 grid gap-5 md:grid-cols-2">
-              <MaterialSummarySection
-                frameQuantity={estimate.frames}
-                frameRate={frameRate}
-                setFrameRate={setFrameRate}
-                plankQuantity={estimate.planks}
-                plankRate={plankRate}
-                setPlankRate={setPlankRate}
-                standardMaterialCost={totals.standardMaterialCost}
-                extraMaterialItems={extraMaterialItems}
-                addMaterialItem={addMaterialItem}
-                updateExtraMaterial={updateExtraMaterial}
-                removeExtraMaterial={removeExtraMaterial}
-                extraMaterialCost={totals.extraMaterialCost}
-                rentalDays={rentalDays}
-                rentalMonths={rentalMonths}
-                rentalDuration={rentalDuration}
-                setRentalDuration={setRentalDuration}
-                customRentalDays={customRentalDays}
-                setCustomRentalDays={setCustomRentalDays}
-                baseMonthlyRentalRevenue={baseMonthlyRentalRevenue}
-                setBaseMonthlyRentalRevenue={setBaseMonthlyRentalRevenue}
-                rentalRevenue={totals.rentalRevenue}
-              />
-
-              <LaborSummarySection
-                allowedInstallDays={allowedInstallDays}
-                dismantleDays={dismantleDays}
-                dismantleBackendPercent={dismantleBackendPercent}
-                truckLoads={estimate.truckLoads}
-                deliveryTrips={estimate.deliveryTrips}
-                pickupTrips={estimate.pickupTrips}
-                productionType={productionType}
-                updateProductionType={updateProductionType}
-                installMix={installMix}
-                addInstallMix={addInstallMix}
-                updateInstallMix={updateInstallMix}
-                removeInstallMix={removeInstallMix}
-                appRate={appRate}
-                setAppRate={setAppRate}
-                journeyRate={journeyRate}
-                setJourneyRate={setJourneyRate}
-                foremanRate={foremanRate}
-                setForemanRate={setForemanRate}
-                blendedLaborRate={totals.blendedLaborRate}
-                laborCost={totals.laborCost}
-                totalLaborHours={totals.totalLaborHours}
-              />
-            </div>
-
-            <RevisionHistory activeRevision={activeRevision} bidRoundPhase={bidRoundPhase} setBidRoundPhase={setBidRoundPhase} />
-
-            <CostSummary
-              materialCost={totals.materialCost}
-              laborCost={totals.laborCost}
-              miscCost={miscCost}
-              setMiscCost={setMiscCost}
-              costSubtotal={totals.costSubtotal}
-              markupPercent={markupPercent}
-              setMarkupPercent={setMarkupPercent}
-              markupValue={totals.markupValue}
-              finalBid={totals.finalBid}
-              materialDurationMonths={materialDurationMonths}
-              setMaterialDurationMonths={setMaterialDurationMonths}
-            />
-
-            <ExteriorCostComparison
-              completeExteriorCost={totals.finalBid}
-              elevationPricing={elevationPricing}
-              partialExteriorMarkupPercent={partialExteriorMarkupPercent}
-            />
-
-            <AddAlternatesSection approvedAlternates={approvedAlternates} toggleAlternate={toggleAlternate} />
-
-            <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
-              <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Proposal Notes</h3>
-              <textarea
-                value={proposalNotes}
-                onChange={(event) => setProposalNotes(event.target.value)}
-                className="mt-4 min-h-28 w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-6 text-zinc-300 outline-none focus:border-orange-500/40"
-              />
-            </div>
-
-            <div className="mt-5 grid gap-5 xl:grid-cols-2">
-              <InternalReviewCard
-                rentalDays={rentalDays}
-                rentalMonths={rentalMonths}
-                proposalStatus={proposalStatus}
-                approvedAlternateCount={approvedAlternates.length}
-                finalBid={totals.finalBid}
-                activeRevision={activeRevision}
-                bidRoundPhase={bidRoundPhase}
-                setBidRoundPhase={setBidRoundPhase}
-                blendedLaborRate={totals.blendedLaborRate}
-                productionType={productionType}
-              />
-              <ProposalActionCard
-                proposalStatus={proposalStatus}
-                setProposalStatus={setProposalStatus}
-                approveProposal={approveProposal}
-                submitPrice={submitPrice}
-              />
-            </div>
-          </ProposalSheet>
-        </section>
-
-        <aside className="space-y-5">
-          <PreProposalPanel
-            projectName={estimate.projectName}
-            projectAddress={estimate.projectAddress}
-            customer={estimate.customer}
-            contactName={estimate.contactName}
-            contactEmail={estimate.contactEmail}
-            contactPhone={estimate.contactPhone}
-            estimator={estimate.estimator}
-            unionStatus={estimate.unionStatus}
-            bidRoundPhase={bidRoundPhase}
-            projectType={estimate.projectType}
-            totalLinearFeet={estimate.totalLinearFeet}
-            frames={estimate.frames}
-            planks={estimate.planks}
-            rentalDays={rentalDays}
-            rentalMonths={rentalMonths}
-            rentalRevenue={totals.rentalRevenue}
-            laborRevenue={laborRevenue}
-            miscRevenue={miscRevenue}
-            alternateRevenue={totals.alternateRevenue}
-            finalBid={totals.finalBid}
-            approvedAlternates={approvedAlternates}
-          />
-        </aside>
-
-        <aside className="space-y-5">
-          <RevenuePanel
-            rentalRevenue={totals.rentalRevenue}
-            baseMonthlyRentalRevenue={baseMonthlyRentalRevenue}
-            laborRevenue={laborRevenue}
-            setLaborRevenue={setLaborRevenue}
-            miscRevenue={miscRevenue}
-            setMiscRevenue={setMiscRevenue}
-            alternateRevenue={totals.alternateRevenue}
-            materialCost={totals.materialCost}
-            laborCost={totals.laborCost}
-            miscCost={miscCost}
-            projectedLaborProfit={totals.projectedLaborProfit}
-            projectedLaborMargin={totals.projectedLaborMargin}
-            finalBid={totals.finalBid}
-            rentalMonths={rentalMonths}
-          />
-        </aside>
-      </section>
+      {activeTab === "breakdown" ? (
+        <BreakdownTab
+          estimate={estimate}
+          bidDepth={bidDepth}
+          setBidDepth={setBidDepth}
+          selectedDepth={selectedDepth}
+          rentalDays={rentalDays}
+          setRentalDays={setRentalDays}
+          frameRate={frameRate}
+          plankRate={plankRate}
+          consumables={consumables}
+          updateConsumable={updateConsumable}
+          totals={totals}
+          erectRate={erectRate}
+          setErectRate={setErectRate}
+          travelRate={travelRate}
+          setTravelRate={setTravelRate}
+          travelHours={travelHours}
+          setTravelHours={setTravelHours}
+          dismantlePercent={dismantlePercent}
+          productionKey={productionKey}
+          setProductionKey={setProductionKey}
+          crewSize={crewSize}
+          setCrewSize={setCrewSize}
+          phaseModeOn={phaseModeOn}
+          setPhaseModeOn={setPhaseModeOn}
+          phases={phases}
+          updatePhase={updatePhase}
+          renamePhase={renamePhase}
+          addPhase={addPhase}
+          removePhase={removePhase}
+          selectedProductionDays={selectedProduction.days}
+          bidRoundPhase={bidRoundPhase}
+          setBidRoundPhase={setBidRoundPhase}
+          activeRevision={activeRevision}
+          elevationPricing={elevationPricing}
+          partialExteriorMarkupPercent={partialExteriorMarkupPercent}
+        />
+      ) : (
+        <ProposalTab
+          estimate={estimate}
+          rentalDays={rentalDays}
+          rentalMonths={totals.rentalMonths}
+          rentalsRevenue={totals.rentalsRevenue}
+          laborRevenue={totals.laborRevenue}
+          miscRevenue={miscRevenue}
+          setMiscRevenue={setMiscRevenue}
+          alternateRevenue={totals.alternateRevenue}
+          finalBid={totals.finalBid}
+          approvedAlternates={approvedAlternates}
+          toggleAlternate={toggleAlternate}
+          proposalNotes={proposalNotes}
+          setProposalNotes={setProposalNotes}
+          proposalStatus={proposalStatus}
+          setProposalStatus={setProposalStatus}
+          bidRoundPhase={bidRoundPhase}
+          setBidRoundPhase={setBidRoundPhase}
+        />
+      )}
     </KorbanManagementShell>
   );
 }
 
-// ── Material Summary ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Tabs
+// ─────────────────────────────────────────────────────────────────────────────
 
-function MaterialSummarySection({
-  frameQuantity, frameRate, setFrameRate,
-  plankQuantity, plankRate, setPlankRate,
-  standardMaterialCost, extraMaterialItems, addMaterialItem,
-  updateExtraMaterial, removeExtraMaterial, extraMaterialCost,
-  rentalDays, rentalMonths, rentalDuration, setRentalDuration,
-  customRentalDays, setCustomRentalDays,
-  baseMonthlyRentalRevenue, setBaseMonthlyRentalRevenue, rentalRevenue,
-}: {
-  frameQuantity: number; frameRate: number; setFrameRate: (v: number) => void;
-  plankQuantity: number; plankRate: number; setPlankRate: (v: number) => void;
-  standardMaterialCost: number; extraMaterialItems: ExtraMaterialItem[];
-  addMaterialItem: (name: string) => void;
-  updateExtraMaterial: (id: number, field: "quantity" | "unitRate", value: number) => void;
-  removeExtraMaterial: (id: number) => void; extraMaterialCost: number;
-  rentalDays: number; rentalMonths: number; rentalDuration: RentalDuration;
-  setRentalDuration: (d: RentalDuration) => void; customRentalDays: string;
-  setCustomRentalDays: (d: string) => void; baseMonthlyRentalRevenue: number;
-  setBaseMonthlyRentalRevenue: (v: number) => void; rentalRevenue: number;
-}) {
+function TabStrip({ activeTab, onChange }: { activeTab: TabKey; onChange: (tab: TabKey) => void }) {
+  const tabs: { key: TabKey; label: string }[] = [
+    { key: "breakdown", label: "Breakdown" },
+    { key: "proposal", label: "Proposal" },
+  ];
+
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-black p-5">
-      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Material Summary</h3>
-      <p className="mt-1 text-xs text-zinc-500">Source: Backend &gt; Material Pricing</p>
-
-      <div className="mt-4 space-y-2">
-        {/* FIX: Quantities larger + orange, rate shows $ prefix */}
-        <RateInputRow
-          label="Frames"
-          quantity={frameQuantity}
-          rate={frameRate}
-          onChange={setFrameRate}
-          total={frameQuantity * frameRate}
-        />
-        <RateInputRow
-          label="Planks"
-          quantity={plankQuantity}
-          rate={plankRate}
-          onChange={setPlankRate}
-          total={plankQuantity * plankRate}
-        />
-        <TotalBox label="Standard Material Total" value={formatMoney(standardMaterialCost)} />
-      </div>
-
-      <div className="my-4 h-px bg-zinc-800" />
-
-      <MiscMaterialSummaryList
-        extraMaterialItems={extraMaterialItems}
-        addMaterialItem={addMaterialItem}
-        updateExtraMaterial={updateExtraMaterial}
-        removeExtraMaterial={removeExtraMaterial}
-        extraMaterialCost={extraMaterialCost}
-      />
-
-      <div className="my-4 h-px bg-zinc-800" />
-
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <p className="text-xs font-bold text-zinc-300">Rental Duration</p>
-          <p className="mt-0.5 text-[10px] text-zinc-600">{rentalMonths} billing month(s) applied to rental revenue.</p>
-        </div>
-        <div className="text-right">
-          <p className="font-mono text-lg font-bold text-orange-400">{rentalDays} Days</p>
-        </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {rentalDurationOptions.map((option) => (
+    <div className="flex items-end gap-1 border-b border-zinc-800 px-1">
+      {tabs.map((tab) => {
+        const active = tab.key === activeTab;
+        return (
           <button
-            key={option}
-            onClick={() => setRentalDuration(option)}
-            className={`rounded-lg border px-3 py-1.5 text-[10px] font-bold transition ${
-              rentalDuration === option
-                ? "border-orange-500 bg-orange-500 text-black"
-                : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/50"
+            key={tab.key}
+            onClick={() => onChange(tab.key)}
+            className={`relative rounded-t-lg border border-b-0 px-6 py-2.5 text-xs font-bold transition ${
+              active
+                ? "border-zinc-800 bg-[#0b0b0b] text-white"
+                : "border-transparent bg-transparent text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            {option}
-          </button>
-        ))}
-        {rentalDuration === "Custom" && (
-          <input
-            value={customRentalDays}
-            onChange={(event) => setCustomRentalDays(event.target.value)}
-            className="w-20 rounded-lg border border-orange-500/30 bg-black px-2 py-1.5 text-[10px] font-bold text-orange-300 outline-none"
-            placeholder="Days"
-          />
-        )}
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">
-          <p className="text-[9px] uppercase tracking-[0.16em] text-zinc-600">Monthly Rate</p>
-          <input
-            value={baseMonthlyRentalRevenue}
-            onChange={(event) => setBaseMonthlyRentalRevenue(Number(event.target.value || 0))}
-            type="number"
-            className="mt-1 w-full bg-transparent text-right font-mono text-xs font-bold text-orange-300 outline-none"
-          />
-        </div>
-        <TotalBox label="Applied Rental Revenue" value={formatMoney(rentalRevenue)} />
-      </div>
-
-      <a
-        href="/inventory"
-        className="mt-4 block w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2.5 text-center text-xs font-bold text-orange-300 hover:bg-orange-500/20"
-      >
-        Load List
-      </a>
-    </div>
-  );
-}
-
-// ── RateInputRow — FIX: quantity larger + orange, rate shows $ ────────────────
-
-function RateInputRow({
-  label, quantity, rate, onChange, total,
-}: {
-  label: string; quantity: number; rate: number;
-  onChange: (value: number) => void; total: number;
-}) {
-  return (
-    <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-      {/* Top row: label + total */}
-      <div className="flex items-center justify-between gap-4">
-        <span className="text-xs font-bold text-zinc-300">{label}</span>
-        <span className="font-mono text-xs font-bold text-orange-400">{formatMoney(total)}</span>
-      </div>
-
-      {/* Bottom row: quantity (larger, orange) + rate with $ */}
-      <div className="mt-2 flex items-center justify-between gap-3">
-        {/* FIX: quantity ~2× larger, orange */}
-        <p className="font-mono text-xl font-black text-orange-400">
-          {formatNumber(quantity)}
-          <span className="ml-1 text-[10px] font-normal text-zinc-600">qty.</span>
-        </p>
-        {/* FIX: rate input with $ prefix */}
-        <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1">
-          <span className="font-mono text-xs font-bold text-zinc-500">$</span>
-          <input
-            value={rate}
-            onChange={(event) => onChange(Number(event.target.value || 0))}
-            type="number"
-            step="0.01"
-            className="w-16 bg-transparent text-right font-mono text-[11px] font-bold text-orange-300 outline-none"
-          />
-          <span className="text-[10px] text-zinc-600">/ea</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Misc Material — FIX: grey glow button, centered text ─────────────────────
-
-const MISC_MATERIAL_ITEMS = ["Brackets", "H.D. Wall Brackets", "Post Shores", "Beams", "Joists"];
-
-function MiscMaterialSummaryList({
-  extraMaterialItems, addMaterialItem, updateExtraMaterial,
-  removeExtraMaterial, extraMaterialCost,
-}: {
-  extraMaterialItems: ExtraMaterialItem[];
-  addMaterialItem: (itemName: string) => void;
-  updateExtraMaterial: (id: number, field: "quantity" | "unitRate", value: number) => void;
-  removeExtraMaterial: (id: number) => void;
-  extraMaterialCost: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div>
-      {/* FIX: grey glow background, centered text */}
-      <button
-        onClick={() => setExpanded((current) => !current)}
-        className="w-full rounded-xl border border-zinc-600/40 bg-zinc-400/[0.07] px-3 py-2.5 text-center text-xs font-bold text-zinc-300 shadow-[0_0_16px_rgba(255,255,255,0.04)] hover:border-zinc-500/50 hover:bg-zinc-400/[0.10] transition"
-      >
-        {expanded ? "− Misc. Material" : "+ Misc. Material"}
-      </button>
-
-      {expanded && (
-        <div className="mt-2 space-y-2">
-          {MISC_MATERIAL_ITEMS.map((itemName) => {
-            const existing = extraMaterialItems.find((item) => item.item === itemName);
-
-            if (!existing) {
-              return (
-                <button
-                  key={itemName}
-                  onClick={() => addMaterialItem(itemName)}
-                  className="flex w-full items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 p-2.5 text-left text-xs font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
-                >
-                  <span>{itemName}</span>
-                  <span className="text-[10px] uppercase tracking-[0.12em]">+ Add</span>
-                </button>
-              );
-            }
-
-            return (
-              <div key={itemName} className="rounded-xl border border-zinc-800 bg-black p-2.5">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-bold text-zinc-300">{itemName}</p>
-                  <button onClick={() => removeExtraMaterial(existing.id)} className="text-[10px] font-bold text-zinc-600 hover:text-red-300">Remove</button>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <MiniNumberInput label="Qty" value={existing.quantity} onChange={(value) => updateExtraMaterial(existing.id, "quantity", value)} />
-                  <MiniNumberInput label="Rate" value={existing.unitRate} onChange={(value) => updateExtraMaterial(existing.id, "unitRate", value)} />
-                </div>
-                <p className="mt-2 text-right font-mono text-xs font-bold text-orange-400">{formatMoney(existing.quantity * existing.unitRate)}</p>
-              </div>
-            );
-          })}
-          <TotalBox label="Misc. Material Total" value={formatMoney(extraMaterialCost)} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── All remaining components unchanged from original ─────────────────────────
-
-function ExteriorCostComparison({ completeExteriorCost, elevationPricing, partialExteriorMarkupPercent }: {
-  completeExteriorCost: number;
-  elevationPricing: { rows: { elevation: string; approxLinearFeet: number; sharePercent: number; baseShare: number; partialPrice: number }[]; totalPartialCost: number; hasData: boolean };
-  partialExteriorMarkupPercent: number;
-}) {
-  return (
-    <div className="mt-5 rounded-3xl border border-zinc-800 bg-black p-5">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Complete vs. Partial Exterior Cost</h3>
-          <p className="mt-1 text-xs text-zinc-500">Partial pricing reflects the added cost of mobilizing elevation-by-elevation instead of as one complete exterior job.</p>
-        </div>
-        <div className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-right">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-500">Markup</p>
-          <p className="font-mono text-sm font-bold text-orange-300">+{partialExteriorMarkupPercent}%</p>
-        </div>
-      </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Complete Exterior Cost</p>
-          <p className="mt-2 font-mono text-2xl font-bold text-orange-400">{formatMoney(completeExteriorCost)}</p>
-          <p className="mt-1 text-[10px] text-zinc-600">Pricing the full building as one job.</p>
-        </div>
-        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Partial Exterior Cost</p>
-          <p className="mt-2 font-mono text-2xl font-bold text-orange-400">{elevationPricing.hasData ? formatMoney(elevationPricing.totalPartialCost) : "—"}</p>
-          <p className="mt-1 text-[10px] text-zinc-600">{elevationPricing.hasData ? "Sum of all elevations priced separately, with markup." : "Enter Approx LF per elevation in Takeoff Workspace > Elevation Breakdown to see this."}</p>
-        </div>
-      </div>
-      {elevationPricing.hasData && (
-        <div className="mt-4 space-y-2">
-          {elevationPricing.rows.map((row) => (
-            <div key={row.elevation} className="grid grid-cols-[80px_1fr_90px_120px] items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-3 text-xs">
-              <span className="font-bold text-zinc-200">{row.elevation}</span>
-              <span className="text-zinc-600">{row.approxLinearFeet.toLocaleString()} LF · {row.sharePercent.toFixed(0)}% of total</span>
-              <span className="text-right font-mono text-zinc-500">{formatMoney(row.baseShare)}</span>
-              <span className="text-right font-mono font-bold text-orange-400">{formatMoney(row.partialPrice)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PreProposalPanel({ projectName, projectAddress, customer, contactName, contactEmail, contactPhone, estimator, unionStatus, bidRoundPhase, projectType, totalLinearFeet, frames, planks, rentalDays, rentalMonths, rentalRevenue, laborRevenue, miscRevenue, alternateRevenue, finalBid, approvedAlternates }: {
-  projectName: string; projectAddress: string; customer: string; contactName: string; contactEmail: string; contactPhone: string; estimator: string; unionStatus: string; bidRoundPhase: BidRoundPhase; projectType: string; totalLinearFeet: number; frames: number; planks: number; rentalDays: number; rentalMonths: number; rentalRevenue: number; laborRevenue: number; miscRevenue: number; alternateRevenue: number; finalBid: number; approvedAlternates: number[];
-}) {
-  return (
-    <section className="rounded-[2rem] border border-zinc-700 bg-zinc-800/40 p-5 shadow-2xl">
-      <div className="rounded-3xl border border-zinc-700 bg-zinc-900/90 p-5">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-orange-400">Proposal Preview</p>
-            <h2 className="mt-2 text-xl font-bold text-white">{projectName}</h2>
-            <p className="mt-1 text-xs text-zinc-500">{customer}</p>
-          </div>
-          <div className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-right">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Status</p>
-            <p className="font-mono text-xs font-bold text-orange-300">Draft</p>
-          </div>
-        </div>
-        <div className="mt-5 space-y-4">
-          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Project Information</h3>
-            <div className="mt-3 space-y-2">
-              <InfoRow label="Project" value={projectName} />
-              <InfoRow label="Address" value={projectAddress} />
-              <InfoRow label="Project Type" value={projectType} />
-              <InfoRow label="Estimator" value={estimator} />
-              <InfoRow label="Union Status" value={unionStatus} />
-              <InfoRow label="Bid Round Phase" value={bidRoundPhase} />
-            </div>
-          </div>
-          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Customer Information</h3>
-            <div className="mt-3 space-y-2">
-              <InfoRow label="Customer" value={customer} />
-              <InfoRow label="Contact" value={contactName} />
-              <InfoRow label="Email" value={contactEmail} />
-              <InfoRow label="Phone" value={contactPhone} />
-            </div>
-          </div>
-          <div className="rounded-2xl border border-zinc-700 bg-zinc-950/80 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Customer Scope</h3>
-            <div className="mt-3 space-y-2">
-              <InfoRow label="Scaffold Type" value={projectType} />
-              <InfoRow label="Total Coverage" value={`${formatNumber(totalLinearFeet)} LF`} />
-              <InfoRow label="Rental Duration" value={`${rentalDays} Days / ${rentalMonths} Mo.`} />
-            </div>
-          </div>
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Included In Proposal</h3>
-            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-              <ProposalMiniTile label="Frames" value={formatNumber(frames)} />
-              <ProposalMiniTile label="Planks" value={formatNumber(planks)} />
-              <ProposalMiniTile label="Install" value="Included" />
-              <ProposalMiniTile label="Dismantle" value="Included" />
-            </div>
-          </div>
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Add Alternates</h3>
-            <div className="mt-3 space-y-2">
-              {approvedAlternates.length ? (
-                approvedAlternates.map((alternate, index) => (
-                  <div key={alternate} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black px-3 py-2 text-xs">
-                    <span className="text-zinc-400">Add Alternate #{index + 1}</span>
-                    <span className="text-right font-bold text-zinc-200">{alternate}</span>
-                  </div>
-                ))
-              ) : (
-                <p className="rounded-xl border border-zinc-800 bg-black px-3 py-3 text-xs text-zinc-600">No add alternates selected.</p>
-              )}
-            </div>
-          </div>
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.22em] text-orange-400">Proposal Figures</h3>
-            <div className="mt-3 space-y-2">
-              <ProposalFigure label="Rental" value={rentalRevenue} />
-              <ProposalFigure label="Labor" value={laborRevenue} />
-              <ProposalFigure label="Misc" value={miscRevenue} />
-              <ProposalFigure label="Alternates" value={alternateRevenue} />
-            </div>
-          </div>
-          <div className="rounded-3xl border border-orange-500/30 bg-orange-500/10 p-5 text-center">
-            <p className="text-[10px] uppercase tracking-[0.22em] text-orange-300/70">Proposal Total</p>
-            <p className="mt-2 font-mono text-3xl font-black text-orange-300">{formatMoney(finalBid)}</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function ProposalMiniTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-black p-3">
-      <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
-      <p className="mt-1 font-mono text-xs font-bold text-zinc-200">{value}</p>
-    </div>
-  );
-}
-
-function ProposalFigure({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="font-mono text-xs font-bold text-zinc-200">{formatMoney(value)}</span>
-    </div>
-  );
-}
-
-function ProposalSheet({ children }: { children: React.ReactNode }) {
-  return (
-    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-4 shadow-2xl">
-      <div className="rounded-[1.5rem] border border-zinc-800 bg-[#090909] p-4">{children}</div>
-    </section>
-  );
-}
-
-function RevisionHistory({ activeRevision, bidRoundPhase, setBidRoundPhase }: {
-  activeRevision: { phase: BidRoundPhase; date: string; amount: number; note: string };
-  bidRoundPhase: BidRoundPhase;
-  setBidRoundPhase: (phase: BidRoundPhase) => void;
-}) {
-  return (
-    <div className="mt-5 rounded-2xl border border-zinc-800 bg-black p-3">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="text-[11px] font-bold uppercase tracking-[0.22em] text-orange-400">Revision History</h3>
-        <span className="font-mono text-[10px] text-zinc-600">Active: {activeRevision.phase} · {formatMoney(activeRevision.amount)}</span>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {revisionHistory.map((revision) => {
-          const active = revision.phase === bidRoundPhase;
-          return (
-            <button key={revision.phase} onClick={() => setBidRoundPhase(revision.phase)} title={revision.note}
-              className={`rounded-lg border px-2.5 py-1.5 text-left text-[10px] transition ${active ? "border-orange-500/50 bg-orange-500/10 text-orange-300" : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/30"}`}
-            >
-              <span className="font-bold">{revision.phase}</span>
-              <span className="ml-2 font-mono">{formatMoney(revision.amount)}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function LaborSummarySection({ allowedInstallDays, dismantleDays, dismantleBackendPercent, truckLoads, deliveryTrips, pickupTrips, productionType, updateProductionType, installMix, addInstallMix, updateInstallMix, removeInstallMix, appRate, setAppRate, journeyRate, setJourneyRate, foremanRate, setForemanRate, blendedLaborRate, laborCost, totalLaborHours }: {
-  allowedInstallDays: number; dismantleDays: number; dismantleBackendPercent: number;
-  truckLoads: number; deliveryTrips: number; pickupTrips: number;
-  productionType: ProductionType; updateProductionType: (type: ProductionType) => void;
-  installMix: InstallMixItem[]; addInstallMix: () => void;
-  updateInstallMix: (id: number, field: "days" | "laborers", value: number) => void;
-  removeInstallMix: (id: number) => void;
-  appRate: number; setAppRate: (v: number) => void;
-  journeyRate: number; setJourneyRate: (v: number) => void;
-  foremanRate: number; setForemanRate: (v: number) => void;
-  blendedLaborRate: number; laborCost: number; totalLaborHours: number;
-}) {
-  return (
-    <div className="rounded-3xl border border-zinc-800 bg-black p-5">
-      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Labor Summary</h3>
-      <p className="mt-1 text-xs text-zinc-500">Source: Backend &gt; Labor Planning &amp; Labor Rates</p>
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <QuantityRow label="Install Days" value={allowedInstallDays} />
-        <QuantityRow label="Dismantle Days" value={dismantleDays} />
-        <QuantityRow label="Truck Loads" value={truckLoads} />
-        <QuantityRow label="Delivery Trips" value={deliveryTrips} />
-        <QuantityRow label="Pickup Trips" value={pickupTrips} />
-      </div>
-      <div className="my-4 h-px bg-zinc-800" />
-      <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Crew Mix</p>
-      <ProductionSelector productionType={productionType} updateProductionType={updateProductionType} />
-      <div className="mt-3 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3">
-        <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Allowed Install Output</p>
-        <p className="mt-2 font-mono text-lg font-bold text-orange-400">{allowedInstallDays} Days</p>
-      </div>
-      <div className="mt-3 space-y-2">
-        {installMix.map((row) => (
-          <InstallMixEditor key={row.id} row={row} canRemove={installMix.length > 1} updateInstallMix={updateInstallMix} removeInstallMix={removeInstallMix} />
-        ))}
-      </div>
-      <button onClick={addInstallMix} className="mt-2 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/20">+ Add Install Breakdown</button>
-      <div className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-xs font-bold text-zinc-300">Dismantle</p>
-          <p className="font-mono text-xs font-bold text-orange-400">{dismantleBackendPercent}% down · {dismantleDays} days</p>
-        </div>
-      </div>
-      <div className="mt-3">
-        <TotalBox label="Total Hours" value={`${totalLaborHours.toLocaleString()} hrs`} hint="Days × Laborers × 8 hrs" />
-      </div>
-      <div className="my-4 h-px bg-zinc-800" />
-      <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-zinc-600">Labor Rates</p>
-      <div className="grid grid-cols-3 gap-2">
-        <RateOnlyInput label="Apprentice" value={appRate} onChange={setAppRate} />
-        <RateOnlyInput label="Journeyman" value={journeyRate} onChange={setJourneyRate} />
-        <RateOnlyInput label="Foreman" value={foremanRate} onChange={setForemanRate} />
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <TotalBox label="Blended Avg. Rate" value={`${formatMoney(blendedLaborRate)} / hr`} />
-        <TotalBox label="Total Labor Cost" value={formatMoney(laborCost)} />
-      </div>
-    </div>
-  );
-}
-
-function TotalBox({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">{label}</p>
-      <p className="mt-2 font-mono text-lg font-bold text-orange-400">{value}</p>
-      {hint && <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>}
-    </div>
-  );
-}
-
-function CostSummary({ materialCost, laborCost, miscCost, setMiscCost, costSubtotal, markupPercent, setMarkupPercent, markupValue, finalBid, materialDurationMonths, setMaterialDurationMonths }: {
-  materialCost: number; laborCost: number; miscCost: number; setMiscCost: (v: number) => void;
-  costSubtotal: number; markupPercent: number; setMarkupPercent: (v: number) => void;
-  markupValue: number; finalBid: number; materialDurationMonths: number; setMaterialDurationMonths: (v: number) => void;
-}) {
-  return (
-    <div className="mt-5 rounded-3xl border border-zinc-400/30 bg-zinc-400/[0.08] p-5">
-      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Total Cost Summary</h3>
-      <div className="mt-4 space-y-2">
-        <StaticMoneyRow label="Material Cost" value={materialCost} />
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-3">
-          <div>
-            <span className="text-xs text-zinc-500">Duration (months)</span>
-            <p className="mt-0.5 text-[10px] text-zinc-600">Multiplies material cost — e.g. 2 months = 2× total.</p>
-          </div>
-          <input
-            value={materialDurationMonths}
-            onChange={(event) => setMaterialDurationMonths(Math.max(1, Number(event.target.value || 1)))}
-            type="number" min={1}
-            className="w-20 rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
-          />
-        </div>
-        <StaticMoneyRow label="Labor Cost" value={laborCost} />
-        <ProposalCostRow label="Misc. Cost" value={miscCost} onChange={setMiscCost} />
-        <div className="my-3 h-px bg-zinc-800" />
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-300/20 bg-zinc-300/10 p-3">
-          <span className="text-xs font-bold text-zinc-200">Subtotal</span>
-          <span className="font-mono text-sm font-black text-orange-300">{formatMoney(costSubtotal)}</span>
-        </div>
-        <PercentRow label="Markup %" value={markupPercent} onChange={setMarkupPercent} />
-        <StaticMoneyRow label="Markup Amount" value={markupValue} />
-        <div className="my-3 h-px bg-orange-500/30" />
-        <div className="flex items-center justify-between rounded-2xl border border-orange-500/30 bg-orange-500/10 p-4">
-          <span className="text-sm font-bold uppercase tracking-[0.2em] text-orange-300">Final Bid</span>
-          <span className="font-mono text-3xl font-bold text-orange-400">{formatMoney(finalBid)}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AddAlternatesSection({ approvedAlternates, toggleAlternate }: { approvedAlternates: number[]; toggleAlternate: (id: number) => void }) {
-  return (
-    <div className="mt-5 rounded-3xl border border-zinc-700/40 bg-zinc-400/[0.06] p-5">
-      <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Add Alternates</h3>
-      <p className="mt-1 text-xs text-zinc-500">Alternates are excluded by default and shown separately for proposal purposes.</p>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        {addAlternates.map((alternate) => {
-          const included = approvedAlternates.includes(alternate.id);
-          return (
-            <button key={alternate.id} onClick={() => toggleAlternate(alternate.id)}
-              className={`rounded-2xl border p-4 text-left transition ${included ? "border-orange-500/50 bg-orange-500/10" : "border-zinc-800 bg-zinc-950 hover:border-orange-500/30"}`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-bold text-zinc-200">Add Alternate #{alternate.id} — {alternate.title}</p>
-                  <p className="mt-1 text-[11px] leading-5 text-zinc-500">{alternate.description}</p>
-                </div>
-                <span className={`rounded-full border px-2 py-1 text-[9px] font-bold ${included ? "border-orange-500/50 bg-orange-500 text-black" : "border-zinc-700 bg-black text-zinc-500"}`}>
-                  {included ? "ADD" : "EXCLUDED"}
-                </span>
-              </div>
-              <p className="mt-3 font-mono text-sm font-bold text-orange-400">{formatMoney(alternate.value)}</p>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function RateOnlyInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-      <span className="block text-[10px] text-zinc-500">{label}</span>
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <input
-          value={value}
-          onChange={(event) => onChange(Number(event.target.value || 0))}
-          type="number"
-          className="w-full min-w-0 rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-right font-mono text-[11px] font-bold text-orange-300 outline-none focus:border-orange-500/40"
-        />
-        <span className="shrink-0 text-[10px] text-zinc-600">/hr</span>
-      </div>
-    </div>
-  );
-}
-
-function ProductionSelector({ productionType, updateProductionType }: { productionType: ProductionType; updateProductionType: (type: ProductionType) => void }) {
-  return (
-    <div className="grid gap-2 md:grid-cols-3">
-      {productionTypes.map((type) => {
-        const active = productionType === type.key;
-        return (
-          <button key={type.key} onClick={() => updateProductionType(type.key)}
-            className={`rounded-2xl border p-3 text-left transition ${active ? "border-white/30 bg-white/5 shadow-[0_0_20px_rgba(255,255,255,0.15)]" : "border-zinc-800 bg-black hover:border-orange-500/30"}`}
-          >
-            <p className={active ? "text-xs font-bold text-white" : "text-xs font-bold text-zinc-300"}>{type.title}</p>
-            <p className={active ? "mt-1 text-[10px] text-zinc-300" : "mt-1 text-[10px] text-zinc-600"}>{type.installDays} days · {type.productionRate}</p>
+            {tab.label}
+            {active && (
+              <span className="absolute bottom-1 left-1/2 h-px w-6 -translate-x-1/2 bg-white shadow-[0_0_8px_rgba(255,255,255,0.6)]" />
+            )}
           </button>
         );
       })}
@@ -1140,227 +570,976 @@ function ProductionSelector({ productionType, updateProductionType }: { producti
   );
 }
 
-function InstallMixEditor({ row, canRemove, updateInstallMix, removeInstallMix }: { row: InstallMixItem; canRemove: boolean; updateInstallMix: (id: number, field: "days" | "laborers", value: number) => void; removeInstallMix: (id: number) => void }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Breakdown tab
+// ─────────────────────────────────────────────────────────────────────────────
+
+type TotalsShape = {
+  rentalMonths: number;
+  frameRental: number;
+  plankRental: number;
+  consumablesRevenue: number;
+  rentalsRevenue: number;
+  productionDays: number;
+  phaseDays: number;
+  erectHours: number;
+  dismantleHours: number;
+  erectCost: number;
+  dismantleCost: number;
+  travelCost: number;
+  laborCost: number;
+  laborRevenue: number;
+  alternateRevenue: number;
+  finalBid: number;
+  totalPieces: number;
+};
+
+function BreakdownTab(props: {
+  estimate: EstimateData;
+  bidDepth: BidDepth;
+  setBidDepth: (depth: BidDepth) => void;
+  selectedDepth: (typeof BID_DEPTHS)[number];
+  rentalDays: number;
+  setRentalDays: (days: number) => void;
+  frameRate: number;
+  plankRate: number;
+  consumables: ConsumableLine[];
+  updateConsumable: (id: string, field: "quantity" | "unitRate", value: number) => void;
+  totals: TotalsShape;
+  erectRate: number;
+  setErectRate: (rate: number) => void;
+  travelRate: number;
+  setTravelRate: (rate: number) => void;
+  travelHours: number;
+  setTravelHours: (hours: number) => void;
+  dismantlePercent: number;
+  productionKey: ProductionKey;
+  setProductionKey: (key: ProductionKey) => void;
+  crewSize: number;
+  setCrewSize: (size: number) => void;
+  phaseModeOn: boolean;
+  setPhaseModeOn: (on: boolean) => void;
+  phases: ProductionPhase[];
+  updatePhase: (id: number, field: "days" | "crews" | "menPerCrew", value: number) => void;
+  renamePhase: (id: number, name: string) => void;
+  addPhase: () => void;
+  removePhase: (id: number) => void;
+  selectedProductionDays: number;
+  bidRoundPhase: BidRoundPhase;
+  setBidRoundPhase: (phase: BidRoundPhase) => void;
+  activeRevision: { phase: BidRoundPhase; date: string; amount: number; note: string };
+  elevationPricing: {
+    rows: { elevation: string; approxLinearFeet: number; sharePercent: number; baseShare: number; partialPrice: number }[];
+    totalPartialCost: number;
+    hasData: boolean;
+  };
+  partialExteriorMarkupPercent: number;
+}) {
+  const {
+    estimate, bidDepth, setBidDepth, selectedDepth, rentalDays, setRentalDays,
+    frameRate, plankRate, consumables, updateConsumable, totals,
+    erectRate, setErectRate, travelRate, setTravelRate, travelHours, setTravelHours,
+    dismantlePercent, productionKey, setProductionKey, crewSize, setCrewSize,
+    phaseModeOn, setPhaseModeOn, phases, updatePhase, renamePhase, addPhase, removePhase,
+    selectedProductionDays, bidRoundPhase, setBidRoundPhase, activeRevision,
+    elevationPricing, partialExteriorMarkupPercent,
+  } = props;
+
   return (
-    <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-xs font-bold text-zinc-300">{row.phase}</p>
-        {canRemove && <button onClick={() => removeInstallMix(row.id)} className="text-[10px] font-bold text-zinc-600 hover:text-red-300">Remove</button>}
+    <div className="rounded-b-[1.25rem] rounded-tr-[1.25rem] border border-t-0 border-zinc-800 bg-[#0b0b0b] p-4">
+      <DepthSelector bidDepth={bidDepth} setBidDepth={setBidDepth} selectedDepth={selectedDepth} />
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <RentalPanel
+          frames={estimate.frames}
+          planks={estimate.planks}
+          frameRate={frameRate}
+          plankRate={plankRate}
+          rentalDays={rentalDays}
+          setRentalDays={setRentalDays}
+          rentalMonths={totals.rentalMonths}
+          frameRental={totals.frameRental}
+          plankRental={totals.plankRental}
+          consumables={consumables}
+          updateConsumable={updateConsumable}
+          consumablesRevenue={totals.consumablesRevenue}
+          rentalsRevenue={totals.rentalsRevenue}
+        />
+
+        <LaborPanel
+          erectHours={totals.erectHours}
+          dismantleHours={totals.dismantleHours}
+          travelHours={travelHours}
+          setTravelHours={setTravelHours}
+          erectRate={erectRate}
+          setErectRate={setErectRate}
+          travelRate={travelRate}
+          setTravelRate={setTravelRate}
+          erectCost={totals.erectCost}
+          dismantleCost={totals.dismantleCost}
+          travelCost={totals.travelCost}
+          laborCost={totals.laborCost}
+          dismantlePercent={dismantlePercent}
+        />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <MiniNumberInput label="Days" value={row.days} onChange={(value) => updateInstallMix(row.id, "days", value)} />
-        <MiniNumberInput label="Laborers" value={row.laborers} onChange={(value) => updateInstallMix(row.id, "laborers", value)} />
-      </div>
-      <p className="mt-2 font-mono text-xs font-bold text-orange-400">{row.laborers} laborers × {row.days} days</p>
+
+      <ProductionPanel
+        productionKey={productionKey}
+        setProductionKey={setProductionKey}
+        crewSize={crewSize}
+        setCrewSize={setCrewSize}
+        phaseModeOn={phaseModeOn}
+        setPhaseModeOn={setPhaseModeOn}
+        phases={phases}
+        updatePhase={updatePhase}
+        renamePhase={renamePhase}
+        addPhase={addPhase}
+        removePhase={removePhase}
+        selectedProductionDays={selectedProductionDays}
+        phaseDays={totals.phaseDays}
+        erectHours={totals.erectHours}
+        dismantleHours={totals.dismantleHours}
+        dismantlePercent={dismantlePercent}
+      />
+
+      <RevisionHistory
+        bidRoundPhase={bidRoundPhase}
+        setBidRoundPhase={setBidRoundPhase}
+        activeRevision={activeRevision}
+      />
+
+      <PartialExteriorAccordion
+        completeExteriorCost={totals.finalBid}
+        elevationPricing={elevationPricing}
+        partialExteriorMarkupPercent={partialExteriorMarkupPercent}
+      />
     </div>
   );
 }
 
-function MiniNumberInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+function DepthSelector({
+  bidDepth,
+  setBidDepth,
+  selectedDepth,
+}: {
+  bidDepth: BidDepth;
+  setBidDepth: (depth: BidDepth) => void;
+  selectedDepth: (typeof BID_DEPTHS)[number];
+}) {
   return (
-    <div>
-      <p className="mb-1 text-[9px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
-      <input value={value} onChange={(event) => onChange(Number(event.target.value || 0))} type="number"
-        className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-right font-mono text-[11px] font-bold text-orange-300 outline-none"
-      />
+    <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-[#0f0f0f] px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="mr-2 text-[11px] text-zinc-500">Quantities from</span>
+        {BID_DEPTHS.map((depth) => {
+          const active = depth.key === bidDepth;
+          return (
+            <button
+              key={depth.key}
+              onClick={() => setBidDepth(depth.key)}
+              className={`rounded-lg border px-3.5 py-1.5 text-[11px] font-bold transition ${
+                active
+                  ? "border-orange-500/60 bg-orange-500/10 text-orange-300"
+                  : "border-zinc-800 bg-black text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+              }`}
+            >
+              {depth.title}
+            </button>
+          );
+        })}
+      </div>
+      <div className="text-right">
+        <p className="font-mono text-sm font-bold text-zinc-300">
+          {selectedDepth.accuracy}
+          <span className="ml-2 text-[10px] font-normal text-zinc-600">expected accuracy</span>
+        </p>
+        <p className="mt-0.5 text-[10px] text-zinc-600">{selectedDepth.feeds}</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Rental panel ─────────────────────────────────────────────────────────────
+
+function RentalPanel({
+  frames, planks, frameRate, plankRate, rentalDays, setRentalDays, rentalMonths,
+  frameRental, plankRental, consumables, updateConsumable, consumablesRevenue, rentalsRevenue,
+}: {
+  frames: number; planks: number; frameRate: number; plankRate: number;
+  rentalDays: number; setRentalDays: (days: number) => void; rentalMonths: number;
+  frameRental: number; plankRental: number;
+  consumables: ConsumableLine[];
+  updateConsumable: (id: string, field: "quantity" | "unitRate", value: number) => void;
+  consumablesRevenue: number; rentalsRevenue: number;
+}) {
+  const durationOptions = [30, 60, 90, 120];
+
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+      <div className="flex items-center justify-between gap-4">
+        <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Rental</h3>
+        <div className="flex items-center gap-1">
+          {durationOptions.map((days) => (
+            <button
+              key={days}
+              onClick={() => setRentalDays(days)}
+              className={`rounded-md border px-2.5 py-1 text-[10px] font-bold transition ${
+                rentalDays === days
+                  ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
+                  : "border-zinc-800 bg-[#0f0f0f] text-zinc-600 hover:text-zinc-400"
+              }`}
+            >
+              {days}d
+            </button>
+          ))}
+          <input
+            value={rentalDays}
+            onChange={(event) => setRentalDays(Math.max(1, Number(event.target.value || 0)))}
+            type="number"
+            className="ml-1 w-16 rounded-md border border-zinc-800 bg-[#0f0f0f] px-2 py-1 text-right font-mono text-[10px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+          />
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-4">
+        <BigQuantity
+          label="Frames"
+          quantity={frames}
+          rateLine={`$${frameRate.toFixed(2)}/ea · mo`}
+          extended={frameRental}
+        />
+        <BigQuantity
+          label="Planks"
+          quantity={planks}
+          rateLine={`$${plankRate.toFixed(2)}/ea · mo`}
+          extended={plankRental}
+        />
+      </div>
+
+      <p className="mt-3 font-mono text-[10px] text-zinc-600">
+        {rentalMonths} billing month{rentalMonths === 1 ? "" : "s"} applied
+      </p>
+
+      <div className="my-4 h-px bg-zinc-800" />
+
+      <p className="text-[11px] font-bold text-zinc-400">Consumables</p>
+      <div className="mt-2 space-y-1.5">
+        {consumables.map((line) => (
+          <div
+            key={line.id}
+            className="grid grid-cols-[1fr_72px_84px_96px] items-center gap-2 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2"
+          >
+            <span className="text-[11px] text-zinc-400">{line.label}</span>
+            <input
+              value={line.quantity}
+              onChange={(event) => updateConsumable(line.id, "quantity", Number(event.target.value || 0))}
+              type="number"
+              className="rounded-md border border-zinc-800 bg-black px-2 py-1 text-right font-mono text-[11px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+            />
+            <div className="flex items-center gap-1 rounded-md border border-zinc-800 bg-black px-2 py-1">
+              <span className="font-mono text-[10px] text-zinc-600">$</span>
+              <input
+                value={line.unitRate}
+                onChange={(event) => updateConsumable(line.id, "unitRate", Number(event.target.value || 0))}
+                type="number"
+                step="0.01"
+                className="w-full min-w-0 bg-transparent text-right font-mono text-[11px] font-bold text-zinc-300 outline-none"
+              />
+            </div>
+            <span className="text-right font-mono text-[11px] font-bold text-zinc-300">
+              {formatMoney(line.quantity * line.unitRate)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 flex items-center justify-between px-3">
+        <span className="text-[10px] text-zinc-600">Consumables subtotal</span>
+        <span className="font-mono text-[11px] font-bold text-zinc-400">
+          {formatMoney(consumablesRevenue)}
+        </span>
+      </div>
+
+      <div className="my-4 h-px bg-zinc-800" />
+
+      <PanelTotal label={`Rental revenue · ${rentalDays} days`} value={rentalsRevenue} />
+    </section>
+  );
+}
+
+function BigQuantity({
+  label,
+  quantity,
+  rateLine,
+  extended,
+}: {
+  label: string;
+  quantity: number;
+  rateLine: string;
+  extended: number;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-[#0f0f0f] p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[11px] text-zinc-400">{label}</span>
+        <span className="font-mono text-[11px] font-bold text-zinc-400">{formatMoney(extended)}</span>
+      </div>
+      <p className="mt-1.5 font-mono text-[28px] font-black leading-none text-orange-400">
+        {quantity.toLocaleString()}
+      </p>
+      <p className="mt-1.5 font-mono text-[10px] text-zinc-600">{rateLine}</p>
+    </div>
+  );
+}
+
+// ── Labor panel ──────────────────────────────────────────────────────────────
+
+function LaborPanel({
+  erectHours, dismantleHours, travelHours, setTravelHours,
+  erectRate, setErectRate, travelRate, setTravelRate,
+  erectCost, dismantleCost, travelCost, laborCost, dismantlePercent,
+}: {
+  erectHours: number; dismantleHours: number; travelHours: number;
+  setTravelHours: (hours: number) => void;
+  erectRate: number; setErectRate: (rate: number) => void;
+  travelRate: number; setTravelRate: (rate: number) => void;
+  erectCost: number; dismantleCost: number; travelCost: number; laborCost: number;
+  dismantlePercent: number;
+}) {
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+      <div className="flex items-center justify-between gap-4">
+        <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Labor</h3>
+        <div className="flex items-center gap-1 rounded-md border border-zinc-800 bg-[#0f0f0f] px-2 py-1">
+          <span className="font-mono text-[10px] text-zinc-600">$</span>
+          <input
+            value={erectRate}
+            onChange={(event) => setErectRate(Math.max(0, Number(event.target.value || 0)))}
+            type="number"
+            className="w-14 bg-transparent text-right font-mono text-[11px] font-bold text-zinc-300 outline-none"
+          />
+          <span className="text-[10px] text-zinc-600">/hr</span>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-1.5">
+        <LaborLine label="Stock in" deferred note="Set by Korban Review" />
+        <LaborLine label="Stock out" deferred note="Set by Korban Review" />
+      </div>
+
+      <div className="my-3 h-px bg-zinc-800" />
+
+      <div className="space-y-1.5">
+        <LaborLine label="Erect" hours={erectHours} rate={erectRate} cost={erectCost} />
+        <LaborLine
+          label="Dismantle"
+          hours={dismantleHours}
+          rate={erectRate}
+          cost={dismantleCost}
+          readOnly
+          note={`${dismantlePercent}% of erect · from backend settings`}
+        />
+      </div>
+
+      <div className="my-3 h-px bg-zinc-800" />
+
+      <div className="space-y-1.5">
+        <LaborLine
+          label="Travel"
+          hours={travelHours}
+          rate={travelRate}
+          cost={travelCost}
+          onHoursChange={setTravelHours}
+          onRateChange={setTravelRate}
+        />
+      </div>
+
+      <div className="my-4 h-px bg-zinc-800" />
+
+      <PanelTotal label="Labor cost" value={laborCost} />
+    </section>
+  );
+}
+
+function LaborLine({
+  label, hours, rate, cost, onHoursChange, onRateChange, readOnly, deferred, note,
+}: {
+  label: string;
+  hours?: number;
+  rate?: number;
+  cost?: number;
+  onHoursChange?: (hours: number) => void;
+  onRateChange?: (rate: number) => void;
+  readOnly?: boolean;
+  deferred?: boolean;
+  note?: string;
+}) {
+  if (deferred) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-900 bg-[#0d0d0d] px-3 py-2.5">
+        <span className="text-[11px] text-zinc-600">{label}</span>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[10px] text-zinc-700">{note}</span>
+          <span className="font-mono text-[11px] text-zinc-700">—</span>
+        </div>
+      </div>
+    );
+  }
+
+  const dim = readOnly ? "text-zinc-500" : "text-zinc-300";
+
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className={`text-[11px] ${readOnly ? "text-zinc-500" : "text-zinc-300"}`}>{label}</span>
+
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[10px] text-zinc-600">
+            {onHoursChange ? (
+              <input
+                value={hours ?? 0}
+                onChange={(event) => onHoursChange(Math.max(0, Number(event.target.value || 0)))}
+                type="number"
+                className="w-14 rounded-md border border-zinc-800 bg-black px-1.5 py-0.5 text-right font-mono text-[10px] text-zinc-400 outline-none focus:border-orange-500/40"
+              />
+            ) : (
+              (hours ?? 0).toLocaleString()
+            )}
+            <span className="mx-1">hrs ×</span>
+            {onRateChange ? (
+              <input
+                value={rate ?? 0}
+                onChange={(event) => onRateChange(Math.max(0, Number(event.target.value || 0)))}
+                type="number"
+                className="w-12 rounded-md border border-zinc-800 bg-black px-1.5 py-0.5 text-right font-mono text-[10px] text-zinc-400 outline-none focus:border-orange-500/40"
+              />
+            ) : (
+              `$${rate ?? 0}`
+            )}
+          </span>
+          <span className={`w-24 text-right font-mono text-[12px] font-bold ${dim}`}>
+            {formatMoney(cost ?? 0)}
+          </span>
+        </div>
+      </div>
+      {note && <p className="mt-1 font-mono text-[10px] text-zinc-600">{note}</p>}
+    </div>
+  );
+}
+
+// ── Production panel ─────────────────────────────────────────────────────────
+
+function ProductionPanel({
+  productionKey, setProductionKey, crewSize, setCrewSize, phaseModeOn, setPhaseModeOn,
+  phases, updatePhase, renamePhase, addPhase, removePhase,
+  selectedProductionDays, phaseDays, erectHours, dismantleHours, dismantlePercent,
+}: {
+  productionKey: ProductionKey;
+  setProductionKey: (key: ProductionKey) => void;
+  crewSize: number;
+  setCrewSize: (size: number) => void;
+  phaseModeOn: boolean;
+  setPhaseModeOn: (on: boolean) => void;
+  phases: ProductionPhase[];
+  updatePhase: (id: number, field: "days" | "crews" | "menPerCrew", value: number) => void;
+  renamePhase: (id: number, name: string) => void;
+  addPhase: () => void;
+  removePhase: (id: number) => void;
+  selectedProductionDays: number;
+  phaseDays: number;
+  erectHours: number;
+  dismantleHours: number;
+  dismantlePercent: number;
+}) {
+  const overBudget = phaseDays > selectedProductionDays;
+
+  return (
+    <section className="mt-4 rounded-2xl border border-zinc-800 bg-black p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="mr-2 text-xs font-bold tracking-[0.18em] text-zinc-300">Production</h3>
+          {PRODUCTION_TYPES.map((type) => {
+            const active = type.key === productionKey;
+            return (
+              <button
+                key={type.key}
+                onClick={() => setProductionKey(type.key)}
+                title={type.note}
+                className={`rounded-lg border px-3.5 py-1.5 text-[11px] font-bold transition ${
+                  active
+                    ? "border-white/30 bg-white/[0.06] text-white shadow-[0_0_16px_rgba(255,255,255,0.12)]"
+                    : "border-zinc-800 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                }`}
+              >
+                {type.title}
+                <span className="ml-2 font-mono font-normal text-zinc-500">{type.days}d</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          onClick={() => setPhaseModeOn(!phaseModeOn)}
+          className={`flex items-center gap-2.5 rounded-lg border px-3 py-1.5 text-[11px] font-bold transition ${
+            phaseModeOn
+              ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
+              : "border-zinc-800 bg-[#0f0f0f] text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          <span
+            className={`h-3.5 w-6 rounded-full border transition ${
+              phaseModeOn ? "border-zinc-400 bg-zinc-300" : "border-zinc-700 bg-zinc-800"
+            }`}
+          >
+            <span
+              className={`block h-2.5 w-2.5 translate-y-[1px] rounded-full bg-black transition ${
+                phaseModeOn ? "translate-x-[11px]" : "translate-x-[2px]"
+              }`}
+            />
+          </span>
+          Phase production
+        </button>
+      </div>
+
+      {!phaseModeOn ? (
+        <div className="mt-4 flex flex-wrap items-end gap-6 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-4 py-4">
+          <p className="font-mono text-[22px] font-bold leading-none text-zinc-200">
+            {selectedProductionDays} days
+            <span className="mx-2 text-zinc-700">·</span>
+            <span className="inline-flex items-baseline gap-1.5">
+              <input
+                value={crewSize}
+                onChange={(event) => setCrewSize(Math.max(1, Number(event.target.value || 1)))}
+                type="number"
+                className="w-14 rounded-md border border-zinc-800 bg-black px-2 py-0.5 text-right font-mono text-[20px] font-bold text-zinc-200 outline-none focus:border-orange-500/40"
+              />
+              <span className="text-[13px] font-normal text-zinc-500">laborers</span>
+            </span>
+          </p>
+          <div className="ml-auto text-right">
+            <p className="font-mono text-[11px] text-zinc-500">
+              {erectHours.toLocaleString()} erect hrs
+            </p>
+            <p className="mt-0.5 font-mono text-[10px] text-zinc-600">
+              + {dismantleHours.toLocaleString()} dismantle hrs at {dismantlePercent}%
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4">
+          <div className="grid grid-cols-[1fr_72px_72px_96px_110px_40px] gap-2 px-3 pb-1.5">
+            {["Phase", "Days", "Crews", "Men per crew", "Man-hours", ""].map((heading) => (
+              <span key={heading} className="text-[10px] tracking-[0.1em] text-zinc-600">
+                {heading}
+              </span>
+            ))}
+          </div>
+
+          <div className="space-y-1.5">
+            {phases.map((row) => {
+              const manHours = row.days * row.crews * row.menPerCrew * HOURS_PER_DAY;
+              return (
+                <div
+                  key={row.id}
+                  className="grid grid-cols-[1fr_72px_72px_96px_110px_40px] items-center gap-2 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2"
+                >
+                  <input
+                    value={row.phase}
+                    onChange={(event) => renamePhase(row.id, event.target.value)}
+                    className="rounded-md border border-transparent bg-transparent px-1 py-1 text-[11px] text-zinc-300 outline-none focus:border-zinc-800 focus:bg-black"
+                  />
+                  <PhaseNumber value={row.days} onChange={(value) => updatePhase(row.id, "days", value)} />
+                  <PhaseNumber value={row.crews} onChange={(value) => updatePhase(row.id, "crews", value)} />
+                  <PhaseNumber value={row.menPerCrew} onChange={(value) => updatePhase(row.id, "menPerCrew", value)} />
+                  <span className="text-right font-mono text-[11px] font-bold text-zinc-300">
+                    {manHours.toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => removePhase(row.id)}
+                    className="text-center text-[10px] font-bold text-zinc-700 hover:text-red-400"
+                    aria-label={`Remove ${row.phase}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-2 flex items-center justify-between gap-4 px-3">
+            <button
+              onClick={addPhase}
+              className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-3 py-1.5 text-[11px] font-bold text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+            >
+              Add phase
+            </button>
+            <div className="text-right">
+              <p className={`font-mono text-[12px] font-bold ${overBudget ? "text-red-400" : "text-zinc-300"}`}>
+                {phaseDays} of {selectedProductionDays} days
+              </p>
+              <p className="mt-0.5 font-mono text-[10px] text-zinc-600">
+                {erectHours.toLocaleString()} erect hrs · dismantle derives at {dismantlePercent}%
+              </p>
+            </div>
+          </div>
+
+          {overBudget && (
+            <p className="mt-2 px-3 font-mono text-[10px] text-red-400">
+              Phases exceed the day budget for this production type.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PhaseNumber({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <input
+      value={value}
+      onChange={(event) => onChange(Number(event.target.value || 0))}
+      type="number"
+      className="rounded-md border border-zinc-800 bg-black px-2 py-1 text-right font-mono text-[11px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+    />
+  );
+}
+
+// ── Revision history ─────────────────────────────────────────────────────────
+
+function RevisionHistory({
+  bidRoundPhase,
+  setBidRoundPhase,
+  activeRevision,
+}: {
+  bidRoundPhase: BidRoundPhase;
+  setBidRoundPhase: (phase: BidRoundPhase) => void;
+  activeRevision: { phase: BidRoundPhase; date: string; amount: number; note: string };
+}) {
+  return (
+    <section className="mt-4 rounded-2xl border border-zinc-800 bg-black p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Revision history</h3>
+        <span className="font-mono text-[10px] text-zinc-600">
+          {activeRevision.date} · {activeRevision.note}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {revisionHistory.map((revision) => {
+          const active = revision.phase === bidRoundPhase;
+          return (
+            <button
+              key={revision.phase}
+              onClick={() => setBidRoundPhase(revision.phase)}
+              title={revision.note}
+              className={`rounded-lg border px-3 py-1.5 text-[10px] transition ${
+                active
+                  ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
+                  : "border-zinc-800 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+              }`}
+            >
+              <span className="font-bold">{revision.phase}</span>
+              <span className="ml-2 font-mono">{formatMoney(revision.amount)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ── Partial exterior (kept, collapsed) ───────────────────────────────────────
+
+function PartialExteriorAccordion({
+  completeExteriorCost,
+  elevationPricing,
+  partialExteriorMarkupPercent,
+}: {
+  completeExteriorCost: number;
+  elevationPricing: {
+    rows: { elevation: string; approxLinearFeet: number; sharePercent: number; baseShare: number; partialPrice: number }[];
+    totalPartialCost: number;
+    hasData: boolean;
+  };
+  partialExteriorMarkupPercent: number;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <section className="mt-4 rounded-2xl border border-zinc-800 bg-black">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left"
+      >
+        <span className="text-xs font-bold tracking-[0.18em] text-zinc-400">
+          Complete vs partial exterior
+        </span>
+        <span className="flex items-center gap-3">
+          <span className="font-mono text-[10px] text-zinc-600">+{partialExteriorMarkupPercent}% partial markup</span>
+          <span className="text-[11px] text-zinc-600">{open ? "−" : "+"}</span>
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-zinc-900 p-4">
+          <p className="text-[11px] leading-5 text-zinc-500">
+            Partial pricing reflects the added cost of mobilizing elevation by elevation instead of
+            as one complete exterior job.
+          </p>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            <div className="rounded-xl border border-zinc-900 bg-[#0f0f0f] p-3">
+              <p className="text-[10px] text-zinc-600">Complete exterior</p>
+              <p className="mt-1 font-mono text-lg font-bold text-zinc-200">
+                {formatMoney(completeExteriorCost)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-zinc-900 bg-[#0f0f0f] p-3">
+              <p className="text-[10px] text-zinc-600">Partial exterior</p>
+              <p className="mt-1 font-mono text-lg font-bold text-zinc-200">
+                {elevationPricing.hasData ? formatMoney(elevationPricing.totalPartialCost) : "—"}
+              </p>
+              {!elevationPricing.hasData && (
+                <p className="mt-1 text-[10px] text-zinc-600">
+                  Enter approximate LF per elevation in Takeoff Workspace to see this.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {elevationPricing.hasData && (
+            <div className="mt-3 space-y-1.5">
+              {elevationPricing.rows.map((row) => (
+                <div
+                  key={row.elevation}
+                  className="grid grid-cols-[80px_1fr_100px_110px] items-center gap-3 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2 text-[11px]"
+                >
+                  <span className="font-bold text-zinc-300">{row.elevation}</span>
+                  <span className="font-mono text-zinc-600">
+                    {row.approxLinearFeet.toLocaleString()} LF · {row.sharePercent.toFixed(0)}%
+                  </span>
+                  <span className="text-right font-mono text-zinc-600">{formatMoney(row.baseShare)}</span>
+                  <span className="text-right font-mono font-bold text-zinc-300">
+                    {formatMoney(row.partialPrice)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proposal tab — carried over from the old page, to be completed in Phase 4
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ProposalTab({
+  estimate, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
+  miscRevenue, setMiscRevenue, alternateRevenue, finalBid,
+  approvedAlternates, toggleAlternate, proposalNotes, setProposalNotes,
+  proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
+}: {
+  estimate: EstimateData;
+  rentalDays: number;
+  rentalMonths: number;
+  rentalsRevenue: number;
+  laborRevenue: number;
+  miscRevenue: number;
+  setMiscRevenue: (value: number) => void;
+  alternateRevenue: number;
+  finalBid: number;
+  approvedAlternates: number[];
+  toggleAlternate: (id: number) => void;
+  proposalNotes: string;
+  setProposalNotes: (notes: string) => void;
+  proposalStatus: ProposalStatus;
+  setProposalStatus: (status: ProposalStatus) => void;
+  bidRoundPhase: BidRoundPhase;
+  setBidRoundPhase: (phase: BidRoundPhase) => void;
+}) {
+  return (
+    <div className="rounded-b-[1.25rem] rounded-tr-[1.25rem] border border-t-0 border-zinc-800 bg-[#0b0b0b] p-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+        <div className="space-y-4">
+          <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+            <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Project and customer</h3>
+            <div className="mt-4 grid gap-x-8 gap-y-2 md:grid-cols-2">
+              <InfoRow label="Project" value={estimate.projectName} />
+              <InfoRow label="Customer" value={estimate.customer} />
+              <InfoRow label="Address" value={estimate.projectAddress} />
+              <InfoRow label="Contact" value={estimate.contactName} />
+              <InfoRow label="Scaffold type" value={estimate.projectType} />
+              <InfoRow label="Email" value={estimate.contactEmail} />
+              <InfoRow label="Estimator" value={estimate.estimator} />
+              <InfoRow label="Phone" value={estimate.contactPhone} />
+              <InfoRow label="Union status" value={estimate.unionStatus} />
+              <InfoRow label="Bid date" value={estimate.bidDate} />
+              <InfoRow label="Coverage" value={`${estimate.totalLinearFeet.toLocaleString()} LF`} />
+              <InfoRow label="Rental" value={`${rentalDays} days · ${rentalMonths} mo.`} />
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+            <div className="flex items-baseline justify-between gap-4">
+              <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Add alternates</h3>
+              <p className="text-[10px] text-zinc-600">Excluded unless selected. Priced separately.</p>
+            </div>
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {addAlternates.map((alternate) => {
+                const included = approvedAlternates.includes(alternate.id);
+                return (
+                  <button
+                    key={alternate.id}
+                    onClick={() => toggleAlternate(alternate.id)}
+                    className={`rounded-xl border p-3 text-left transition ${
+                      included
+                        ? "border-orange-500/50 bg-orange-500/[0.07]"
+                        : "border-zinc-900 bg-[#0f0f0f] hover:border-zinc-700"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] font-bold text-zinc-200">{alternate.title}</p>
+                        <p className="mt-1 text-[10px] leading-4 text-zinc-500">{alternate.description}</p>
+                      </div>
+                      <span className="font-mono text-[11px] font-bold text-zinc-300">
+                        {formatMoney(alternate.value)}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+            <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Proposal notes</h3>
+            <textarea
+              value={proposalNotes}
+              onChange={(event) => setProposalNotes(event.target.value)}
+              className="mt-3 min-h-28 w-full resize-none rounded-xl border border-zinc-900 bg-[#0f0f0f] p-3 text-[12px] leading-6 text-zinc-300 outline-none focus:border-orange-500/40"
+            />
+          </section>
+        </div>
+
+        <aside className="space-y-4">
+          <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+            <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Price to client</h3>
+            <div className="mt-4 space-y-2">
+              <FigureRow label="Rental" value={rentalsRevenue} />
+              <FigureRow label="Labor" value={laborRevenue} />
+              <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2">
+                <span className="text-[11px] text-zinc-500">Misc</span>
+                <input
+                  value={miscRevenue}
+                  onChange={(event) => setMiscRevenue(Number(event.target.value || 0))}
+                  type="number"
+                  className="w-28 rounded-md border border-zinc-800 bg-black px-2 py-1 text-right font-mono text-[11px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+                />
+              </div>
+              <FigureRow label="Alternates" value={alternateRevenue} />
+            </div>
+            <div className="my-4 h-px bg-zinc-800" />
+            <PanelTotal label="Proposal total" value={finalBid} />
+          </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-black p-5">
+            <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Status</h3>
+            <div className="mt-3 grid gap-1.5">
+              {(["Draft", "Internal Review", "Ready To Send", "Submitted"] as ProposalStatus[]).map(
+                (status) => (
+                  <button
+                    key={status}
+                    onClick={() => setProposalStatus(status)}
+                    className={`rounded-lg border px-3 py-2 text-left text-[11px] font-bold transition ${
+                      proposalStatus === status
+                        ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
+                        : "border-zinc-900 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                    }`}
+                  >
+                    {status}
+                  </button>
+                )
+              )}
+            </div>
+
+            <div className="my-4 h-px bg-zinc-800" />
+
+            <h3 className="text-xs font-bold tracking-[0.18em] text-zinc-300">Bid round</h3>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {bidRoundPhases.map((phase) => (
+                <button
+                  key={phase}
+                  onClick={() => setBidRoundPhase(phase)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${
+                    bidRoundPhase === phase
+                      ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
+                      : "border-zinc-900 bg-[#0f0f0f] text-zinc-600 hover:text-zinc-400"
+                  }`}
+                >
+                  {phase}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-5 grid gap-2">
+              <button className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-4 py-2.5 text-[12px] font-bold text-zinc-400 hover:border-zinc-600 hover:text-zinc-200">
+                Export PDF
+              </button>
+              <button
+                onClick={() => setProposalStatus("Ready To Send")}
+                className="rounded-lg bg-orange-500 px-4 py-2.5 text-[12px] font-bold text-black hover:bg-orange-400"
+              >
+                Send proposal
+              </button>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared pieces
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PanelTotal({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4">
+      <span className="text-[11px] text-zinc-500">{label}</span>
+      <span
+        className="text-[24px] font-bold leading-none text-orange-400"
+        style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+      >
+        {formatMoney(value)}
+      </span>
     </div>
   );
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-2 last:border-b-0">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="text-right text-xs font-semibold text-zinc-300">{value}</span>
+    <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-1.5">
+      <span className="text-[11px] text-zinc-600">{label}</span>
+      <span className="text-right text-[11px] font-semibold text-zinc-300">{value}</span>
     </div>
   );
 }
 
-function QuantityRow({ label, value, highlight = false }: { label: string; value: number; highlight?: boolean }) {
+function FigureRow({ label, value }: { label: string; value: number }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-2 last:border-b-0">
-      <span className={highlight ? "text-xs font-bold text-zinc-200" : "text-xs text-zinc-500"}>{label}</span>
-      <span className={highlight ? "font-mono text-sm font-black text-orange-300" : "font-mono text-xs font-bold text-zinc-300"}>{formatNumber(value)}</span>
+    <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-[#0f0f0f] px-3 py-2">
+      <span className="text-[11px] text-zinc-500">{label}</span>
+      <span className="font-mono text-[11px] font-bold text-zinc-300">{formatMoney(value)}</span>
     </div>
   );
 }
 
-function ProposalCostRow({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-3">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <input value={value} onChange={(event) => onChange(Number(event.target.value || 0))} type="number"
-        className="w-36 rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
-      />
-    </div>
-  );
-}
-
-function PercentRow({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-3">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <div className="flex items-center gap-2">
-        <input value={value} onChange={(event) => onChange(Number(event.target.value || 0))} type="number"
-          className="w-24 rounded-xl border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-sm font-bold text-orange-300 outline-none focus:border-orange-500/40"
-        />
-        <span className="text-sm font-bold text-zinc-500">%</span>
-      </div>
-    </div>
-  );
-}
-
-function StaticMoneyRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-900 bg-black p-3">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="font-mono text-sm font-bold text-zinc-300">{formatMoney(value)}</span>
-    </div>
-  );
-}
-
-function RevenuePanel({ rentalRevenue, baseMonthlyRentalRevenue, laborRevenue, setLaborRevenue, miscRevenue, setMiscRevenue, alternateRevenue, materialCost, laborCost, miscCost, projectedLaborProfit, projectedLaborMargin, finalBid, rentalMonths }: {
-  rentalRevenue: number; baseMonthlyRentalRevenue: number; laborRevenue: number; setLaborRevenue: (v: number) => void; miscRevenue: number; setMiscRevenue: (v: number) => void; alternateRevenue: number; materialCost: number; laborCost: number; miscCost: number; projectedLaborProfit: number; projectedLaborMargin: number; finalBid: number; rentalMonths: number;
-}) {
-  return (
-    <section className="rounded-[2rem] border border-orange-500/25 bg-orange-500/10 p-5 shadow-2xl">
-      <h2 className="px-1 text-[11px] font-bold uppercase tracking-[0.2em] text-orange-300">Revenue Review</h2>
-      <div className="mt-3 rounded-2xl border border-orange-500/25 bg-black p-3">
-        <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">Output</p>
-        <p className="mt-1 text-[10px] leading-4 text-orange-200/55">Internal revenue and profit snapshot.</p>
-      </div>
-      <div className="mt-3 space-y-2">
-        <RevenueStatic label={`Rental (${rentalMonths} Mo.)`} value={rentalRevenue} />
-        <RevenueStatic label="Monthly Base" value={baseMonthlyRentalRevenue} muted />
-        <RevenueInput label="Labor Rev." value={laborRevenue} onChange={setLaborRevenue} />
-        <RevenueInput label="Misc Rev." value={miscRevenue} onChange={setMiscRevenue} />
-        <RevenueStatic label="Alt. Rev." value={alternateRevenue} />
-        <div className="my-3 h-px bg-orange-500/30" />
-        <RevenueStatic label="Material Cost" value={materialCost} muted />
-        <RevenueStatic label="Labor Cost" value={laborCost} muted />
-        <RevenueStatic label="Misc Cost" value={miscCost} muted />
-        <div className="my-3 h-px bg-orange-500/30" />
-        <div className="rounded-2xl border border-orange-500/35 bg-black p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">Labor Profit</p>
-          <p className="mt-1 font-mono text-lg font-bold text-orange-400">{formatMoney(projectedLaborProfit)}</p>
-        </div>
-        <div className="grid gap-2">
-          <div className="rounded-2xl border border-orange-500/25 bg-black p-3">
-            <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">Margin</p>
-            <p className="mt-1 font-mono text-base font-bold text-orange-400">{projectedLaborMargin.toFixed(1)}%</p>
-          </div>
-          <div className="rounded-2xl border border-orange-500/25 bg-black p-3">
-            <p className="text-[10px] uppercase tracking-[0.16em] text-orange-300/70">Final Bid</p>
-            <p className="mt-1 font-mono text-base font-bold text-orange-400">{formatMoney(finalBid)}</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function RevenueInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="rounded-2xl border border-orange-500/20 bg-black p-3">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-orange-300/70">{label}</p>
-      <div className="mt-2 flex items-center rounded-xl border border-orange-500/20 bg-orange-500/10 px-2">
-        <span className="font-mono text-xs font-bold text-orange-300">$</span>
-        <input value={value} onChange={(event) => onChange(Number(event.target.value || 0))} type="number"
-          className="w-full bg-transparent px-2 py-2 text-right font-mono text-xs font-bold text-orange-300 outline-none"
-        />
-      </div>
-    </div>
-  );
-}
-
-function RevenueStatic({ label, value, muted = false }: { label: string; value: number; muted?: boolean }) {
-  return (
-    <div className="rounded-2xl border border-orange-500/20 bg-black p-3">
-      <span className={`block text-[10px] leading-4 ${muted ? "text-orange-200/45" : "text-orange-300/70"}`}>{label}</span>
-      <span className="mt-1 block font-mono text-xs font-bold text-orange-400">{formatMoney(value)}</span>
-    </div>
-  );
-}
-
-function InternalReviewCard({ rentalDays, rentalMonths, proposalStatus, approvedAlternateCount, finalBid, activeRevision, bidRoundPhase, setBidRoundPhase, blendedLaborRate, productionType }: {
-  rentalDays: number; rentalMonths: number; proposalStatus: ProposalStatus; approvedAlternateCount: number; finalBid: number;
-  activeRevision: { phase: BidRoundPhase; date: string; amount: number; note: string };
-  bidRoundPhase: BidRoundPhase; setBidRoundPhase: (phase: BidRoundPhase) => void;
-  blendedLaborRate: number; productionType: ProductionType;
-}) {
-  return (
-    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
-      <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Internal Review</h2>
-      <div className="mt-4 space-y-3">
-        <InternalReviewRow label="Rental Duration" value={`${rentalDays} Days`} />
-        <InternalReviewRow label="Billing Months" value={String(rentalMonths)} />
-        <InternalReviewRow label="Proposal Status" value={proposalStatus} />
-        <InternalReviewRow label="Approved Alternates" value={String(approvedAlternateCount)} />
-        <InternalReviewRow label="Production Type" value={productionType} />
-        <InternalReviewRow label="Blended Labor Rate" value={`${formatMoney(blendedLaborRate)} / hr`} />
-        <InternalReviewRow label="Final Bid" value={formatMoney(finalBid)} />
-        <InternalReviewRow label="Current Round Amount" value={formatMoney(activeRevision.amount)} />
-        <div className="rounded-2xl border border-zinc-800 bg-black p-3">
-          <p className="text-xs text-zinc-500">Bid Round Phase</p>
-          <div className="mt-3 grid gap-2">
-            {bidRoundPhases.map((phase) => (
-              <button key={phase} onClick={() => setBidRoundPhase(phase)}
-                className={`rounded-xl border px-3 py-2 text-left text-[10px] font-bold transition ${bidRoundPhase === phase ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-orange-500/40"}`}
-              >
-                {phase}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function InternalReviewRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-black p-3">
-      <span className="text-xs text-zinc-500">{label}</span>
-      <span className="text-right font-mono text-xs font-bold text-zinc-300">{value}</span>
-    </div>
-  );
-}
-
-function ProposalActionCard({ proposalStatus, setProposalStatus, approveProposal, submitPrice }: {
-  proposalStatus: ProposalStatus; setProposalStatus: (status: ProposalStatus) => void;
-  approveProposal: () => void; submitPrice: () => void;
-}) {
-  return (
-    <section className="rounded-[2rem] border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
-      <h2 className="text-sm font-bold uppercase tracking-[0.25em] text-orange-400">Proposal Output</h2>
-      <div className="mt-4 grid gap-2">
-        {(["Draft", "Internal Review", "Ready To Send", "Submitted"] as ProposalStatus[]).map((status) => (
-          <button key={status} onClick={() => setProposalStatus(status)}
-            className={`rounded-xl border px-4 py-3 text-left text-xs font-bold transition ${proposalStatus === status ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-800 bg-black text-zinc-500 hover:border-orange-500/40"}`}
-          >
-            {status}
-          </button>
-        ))}
-      </div>
-      <div className="mt-5 grid gap-3">
-        <button onClick={approveProposal} className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20">Generate Proposal Preview</button>
-        <button className="rounded-xl border border-zinc-800 bg-black px-4 py-3 text-sm font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">Export PDF</button>
-        <button onClick={submitPrice} className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-black hover:bg-orange-400">Send Proposal</button>
-      </div>
-    </section>
-  );
-}
-
-function StatusBadge({ status }: { status: ProposalStatus }) {
-  return (
-    <div className="rounded-xl border border-white/20 bg-white/5 px-4 py-3 shadow-[0_0_20px_rgba(255,255,255,0.15)]">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Status</p>
-      <p className="mt-1 text-xs font-bold text-white">{status}</p>
-    </div>
-  );
-}
-
-function formatNumber(value: number) { return value.toLocaleString(); }
 function formatMoney(value: number) {
-  return value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  return value.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
 }
