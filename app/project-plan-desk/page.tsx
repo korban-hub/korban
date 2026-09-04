@@ -111,7 +111,7 @@ function ScaffoldModel3D({ elevation }: { elevation: ProjectElevation }) {
 
     // ── Build geometry from elevation data ──────────────────────────────────
     const rawPoints = elevation?.overlayGeometry?.fullOverlayRows?.[0]?.points ?? [];
-    const scale = elevation?.scale?.pageUnitsPerFoot ?? 18;
+        const scale = (elevation?.scale as { pageUnitsPerFoot?: number } | null)?.pageUnitsPerFoot ?? 18;
     const wallH = elevation?.wallHeight ?? 38;
     const scaffoldW = elevation?.scaffoldInput?.scaffoldWidth ?? 3;
     const frameTall = elevation?.quantityEngine?.frameTall ?? 6;

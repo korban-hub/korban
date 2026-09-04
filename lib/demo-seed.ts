@@ -108,8 +108,8 @@ export function seedDemo() {
     { category: "Material", description: "Guard Rail System",              qty: 189,  unit: "EA",  rate: 14,   amount: 2646  },
     { category: "Material", description: "Base Plates & Screw Jacks",      qty: 128,  unit: "EA",  rate: 4,    amount: 512   },
     { category: "Equipment","description": "Delivery & Pickup",            qty: 2,    unit: "EA",  rate: 1800, amount: 3600  },
-    { category: "Other",    description: "Insurance & Overhead (12%)",     qty: 1,    unit: "LS",  rate: 10,179, amount: 10179},
-    { category: "Other",    description: "Profit (15%)",                   qty: 1,    unit: "LS",  rate: 14,138, amount: 14138},
+    { category: "Other",    description: "Insurance & Overhead (12%)",     qty: 1,    unit: "LS",  rate: 10179, amount: 10179},
+    { category: "Other",    description: "Profit (15%)",                   qty: 1,    unit: "LS",  rate: 14138, amount: 14138},
   ];
   // Total ≈ $108,662 + markup ≈ $125,000
 
