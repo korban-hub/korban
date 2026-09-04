@@ -260,9 +260,9 @@ export type ProjectLevel = {
  * - straight-cost: adds floor plans, so plan geometry and layout exist.
  * - complex:       everything — 3D, section views, recommendations.
  */
-export type EstimateDepth = "quick-bid" | "straight-cost" | "complex";
+export type EstimateDepth = "quick-bid" | "full-bid" | "korban-bid";
 
-export const DEPTH_ORDER: EstimateDepth[] = ["quick-bid", "straight-cost", "complex"];
+export const DEPTH_ORDER: EstimateDepth[] = ["quick-bid", "full-bid", "korban-bid"];
 
 /** True when the project's depth includes the required tier or higher. */
 export function depthAtLeast(current: EstimateDepth, required: EstimateDepth): boolean {
@@ -277,7 +277,7 @@ export type ProjectRecord = {
   estimator: string;
   updatedAt: string;
   schemaVersion: number;
-  /** Estimate depth — see EstimateDepth. Defaults to complex for
+  /** Estimate depth — see EstimateDepth. Defaults to korban-bid for
    *  projects created before depth tiers existed, so nothing that was
    *  already accessible becomes hidden on upgrade. */
   estimateDepth: EstimateDepth;
@@ -299,7 +299,7 @@ const defaultScaffoldInput: ScaffoldInput = {
   scaffoldWidth: 3,
   standardBayLength: 10,
   frameHeight: 6 + 4 / 12,
-  plankCountPerBay: 2,
+  plankCountPerBay: 0,
   bracePattern: "Every Bay",
   wallOffset: 1,
 };
@@ -767,7 +767,7 @@ function createDemoProject(): ProjectRecord {
     estimator: "H. Pierre",
     updatedAt: nowIso(),
     schemaVersion: 1,
-    estimateDepth: "complex",
+    estimateDepth: "korban-bid",
     takeoff: {
       levels: [
         {
@@ -871,7 +871,7 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     schemaVersion: asNumber(record.schemaVersion, 1),
     estimateDepth: DEPTH_ORDER.includes(record.estimateDepth as EstimateDepth)
       ? (record.estimateDepth as EstimateDepth)
-      : "complex",
+      : "korban-bid",
     takeoff: {
       levels: normalizedLevels.length ? normalizedLevels : fallback.takeoff.levels,
     },
@@ -1067,9 +1067,9 @@ export function setEstimateDepth(depth: EstimateDepth) {
 
 export function getEstimateDepth(): EstimateDepth {
   try {
-    return getActiveProject().estimateDepth ?? "complex";
+    return getActiveProject().estimateDepth ?? "korban-bid";
   } catch {
-    return "complex";
+    return "korban-bid";
   }
 }
 
@@ -1195,31 +1195,31 @@ export function buildPhaseReport(elevation: ProjectElevation | null, depth: Esti
         "Where legs land in plan, so there's no layout drawing to hand a foreman.",
       ] : [],
       nextStep: t.areaCount > 0
-        ? "Straight Cost sorts that out. It needs a floor plan traced — the elevation work you've already done carries straight over."
+        ? "Full Bid sorts that out. It needs a floor plan traced — the elevation work you've already done carries straight over."
         : "",
     };
   }
 
-  if (depth === "straight-cost") {
+  if (depth === "full-bid") {
     return {
-      headline: "Straight Cost",
+      headline: "Full Bid",
       covered: tracedLevels > 0
         ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced against ${t.areaCount} gripped area${t.areaCount === 1 ? "" : "s"}, ${t.linearFeet.toLocaleString()} LF. Plan geometry is in, so corners and leg positions are real rather than assumed.`
-        : `Elevations are gripped but no floor plan is traced yet, so this is still running on elevation data alone. Trace at least one level to get the plan geometry this tier is for.`,
+        : `Elevations are gripped but no floor plan is traced yet, so this is still running on elevation data alone. Trace at least one level to get the plan geometry a full bid needs.`,
       gaps: [
         "Section conditions aren't drawn, so wall steps and setbacks aren't visually verified.",
         "No 3D check on the layout — worth having before a hard bid.",
         levelCount > 1 ? "Multi-level step-backs are detected from the outlines but not yet reviewed against sections." : "Only one level is traced, so nothing's known about how the building changes with height.",
       ],
-      nextStep: "Complex Package adds section views, the 3D model, and Korban's review of trouble spots.",
+      nextStep: "Korban Bid adds section views, the 3D model, and my own review of the trouble spots.",
     };
   }
 
   return {
-    headline: "Complex Package",
+    headline: "Korban Bid",
     covered: `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced, ${t.areaCount} area${t.areaCount === 1 ? "" : "s"} gripped, ${t.linearFeet.toLocaleString()} LF. Full geometry, sections, and 3D are available.`,
     gaps: [],
-    nextStep: "Everything Korban can assess is available at this depth. What's left is your judgment on the numbers.",
+    nextStep: "Everything I can assess is on the table. What's left is your judgment on the numbers.",
   };
 }
 

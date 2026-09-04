@@ -2,12 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { alignOverlayRows, getActiveElevation, getActiveProject, saveActiveElevation } from "@/lib/projectStore";
+import { alignOverlayRows, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
+import QuickBidForm from "@/components/quick-bid-form";
+import { GuidedSteps, type GuideStep } from "@/components/guided-steps";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PageTag        = "Floor Plan" | "Elevation View" | "Section View";
 type ActiveTab      = "floor" | "elevation" | "section";
+/** Top-level tabs are now bid depths; tools live as panels inside each. */
+type DepthTab       = "quick-bid" | "full-bid" | "korban-bid";
 type Pt             = { x: number; y: number };
 type ScaffoldWidth  = "3'" | "3'-6\"" | "5'";
 
@@ -159,7 +163,11 @@ function Tooltip({ text, children }: { text: string; children: React.ReactNode }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function TakeoffWorkspaceAdvancedPage() {
-  const [activeTab,      setActiveTab]      = useState<ActiveTab>("floor");
+  const [activeTab,      setActiveTab]      = useState<ActiveTab>("elevation");
+  // Which bid depth is open. Higher depths build on lower ones — work
+  // carries forward, never backward.
+  const [depthTab,       setDepthTab]       = useState<DepthTab>("quick-bid");
+  const [guideHidden,    setGuideHidden]    = useState(false);
   const [pdfDoc,         setPdfDoc]         = useState<any>(null);
   const [pdfLib,         setPdfLib]         = useState<any>(null);
   const [pdfLoading,     setPdfLoading]     = useState(false);
@@ -195,7 +203,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [dupSouth,      setDupSouth]      = useState(false);
   const [dupWest,       setDupWest]       = useState(false);
   // Courtyards — interior voids gripped like elevations but stored and
-  // totalled separately. activeZone is "building" or a courtyard id.
+  // totalled separately. activeZone is "building" (shown as
+  // "Exterior" in the UI) or a courtyard id.
   const [courtyards,    setCourtyards]    = useState<Courtyard[]>([]);
   const [activeZone,    setActiveZone]    = useState<string>("building");
   const [includeCourtyards, setIncludeCourtyards] = useState(true);
@@ -208,6 +217,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   const [projectName, setProjectName]   = useState("");
   const [backendSettings, setBackendSettings] = useState<any>(null);
+  // Estimate depth gates which tabs are available. Quick Bid is
+  // elevations-only; floor plans and sections unlock further up.
+  const [estimateDepth, setEstimateDepthState] = useState<EstimateDepth>("korban-bid");
   const fileRef  = useRef<HTMLInputElement>(null);
   const imgRef   = useRef<HTMLImageElement>(null);
   const viewerRef= useRef<HTMLDivElement>(null);
@@ -215,6 +227,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
   useEffect(() => {
     try {
       setProjectName(getActiveProject().projectName||"");
+      const depth = getEstimateDepth();
+      setEstimateDepthState(depth);
+      setDepthTab(depth as DepthTab);
+      try{ setGuideHidden(localStorage.getItem("korbanGuideHidden")==="1"); }catch{}
+      setActiveTab(depth === "quick-bid" ? "elevation" : "floor");
       const bs = getBackendSettings();
       setBackendSettings(bs);
       const wallOff = bs?.scaffold?.wallOffset ?? 1;
@@ -508,7 +525,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   // ── Store ─────────────────────────────────────────────────────────────────
   function ensureBase() {
     if (!localStorage.getItem("korbanProjectData_v1")) {
-      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:3, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
+      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:0, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
       localStorage.setItem("korbanProjectData_v1",JSON.stringify({"KRB-260614-001":base}));
       localStorage.setItem("korbanActiveProjectId","KRB-260614-001");
       localStorage.setItem("korbanActiveElevationId","north-elevation");
@@ -703,23 +720,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
         actions={
           <>
             <button onClick={storeAll} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/10">Store All</button>
-            <a href="/set-scaffold-v2" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Set Scaffold →</a>
+            <a href="/korban-review" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Review Estimate →</a>
           </>
         }
       />
 
-      {/* Tabs */}
+      {/* Depth tabs — the bid type you're working at. All three are always
+          visible; a depth you haven't worked yet simply opens with its
+          inputs blank. Work carries forward to deeper tiers, never back. */}
       <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2">
-        {([{id:"floor",label:"Floor Plan",icon:"⊞"},{id:"elevation",label:"Elevations",icon:"↕"},{id:"section",label:"Section View",icon:"✂"}] as {id:ActiveTab;label:string;icon:string}[]).map(tab=>{
-          const active = activeTab===tab.id;
+        {([
+          {id:"quick-bid",  label:"Quick Bid",  tools:["elevation"] as ActiveTab[]},
+          {id:"full-bid",   label:"Full Bid",   tools:["floor","elevation"] as ActiveTab[]},
+          {id:"korban-bid", label:"Korban Bid", tools:["floor","elevation","section"] as ActiveTab[]},
+        ] as {id:DepthTab;label:string;tools:ActiveTab[]}[]).map(d=>{
+          const active = depthTab===d.id;
           return (
-          <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
-            className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-5 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active?"text-white border-zinc-700":"text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
+          <button key={d.id} onClick={()=>{
+              setDepthTab(d.id);
+              if(!d.tools.includes(activeTab)) setActiveTab(d.tools[0]);
+              // Opening a deeper tier promotes the project; going back to a
+              // shallower tab is just viewing, so the depth is left alone.
+              if(DEPTH_ORDER.indexOf(d.id as EstimateDepth) > DEPTH_ORDER.indexOf(estimateDepth)){
+                try{ setEstimateDepth(d.id as EstimateDepth); setEstimateDepthState(d.id as EstimateDepth); }catch{}
+              }
+            }}
+            className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active?"text-white border-zinc-700":"text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
             style={{ background: active ? "#1a1a1a" : "#0b0b0b" }}>
-            <span>{tab.icon}</span>{tab.label}
-            {extractedPages.filter(p=>p.tag===TAB_TAGS[tab.id]).length>0&&(
-              <span className="ml-1 rounded-full bg-white/20 px-1.5 py-0.5 text-[8px] font-bold">{extractedPages.filter(p=>p.tag===TAB_TAGS[tab.id]).length}</span>
-            )}
+            {d.label}
             {active && (
               <span className="absolute left-1/2 -translate-x-1/2 bottom-0 h-[2px] w-6 rounded-full bg-white/80 shadow-[0_0_4px_1px_rgba(255,255,255,0.35)]" />
             )}
@@ -731,6 +759,68 @@ export default function TakeoffWorkspaceAdvancedPage() {
         </div>
       </div>
 
+      {/* Tools available at this depth — Quick Bid is a form, so it has none.
+          Sub-tabs carry a light grey tint to sit below the depth tabs
+          without competing with the orange accent. */}
+      {depthTab!=="quick-bid" && (
+      <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0f0f0f] px-6 py-1.5">
+        {([{id:"floor",label:"Floor Plan",icon:"⊞"},{id:"elevation",label:"Elevations",icon:"↕"},{id:"section",label:"Section View",icon:"✂"}] as {id:ActiveTab;label:string;icon:string}[])
+          .filter(tool=>{
+            if(depthTab==="full-bid")   return tool.id!=="section";
+            return true;
+          })
+          .map(tool=>{
+          const active = activeTab===tool.id;
+          const count = extractedPages.filter(p=>p.tag===TAB_TAGS[tool.id]).length;
+          return (
+          <button key={tool.id} onClick={()=>setActiveTab(tool.id)}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[10px] font-bold transition ${active?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
+            <span>{tool.icon}</span>{tool.label}
+            {count>0&&(
+              <span className={`rounded-full px-1.5 text-[8px] font-bold ${active?"bg-black/20":"bg-white/15"}`}>{count}</span>
+            )}
+          </button>
+          );
+        })}
+        <span className="ml-auto text-[9.5px] text-zinc-600">
+          {depthTab==="full-bid"   && "Guided capture — Korban traces, you confirm."}
+          {depthTab==="korban-bid" && "Full manual control, plus section views."}
+        </span>
+      </div>
+      )}
+
+      {depthTab==="full-bid" && (() => {
+        const anyTraced = floorLevels.some(l=>l.tracePoints.length>=3);
+        const allRefs   = floorLevels.length>0 && floorLevels.every(l=>l.refPoint);
+        const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
+        const steps: GuideStep[] = [
+          { id:"upload", title:"Load the plans", anchor:"upload",
+            body:"Upload the PDF set for this job. You'll pull the floor plan and elevation sheets out of it as you go.",
+            done: Boolean(viewerUrl) },
+          { id:"scale", title:"Set the scale", anchor:"scale",
+            body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
+            why:"Nothing measured on this sheet means anything until Korban knows how big a foot is.",
+            done: scale.locked },
+          { id:"trace", title:"Trace the floor outline",
+            body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
+            done: anyTraced },
+          { id:"ref", title:"Set reference points", anchor:"reference-point",
+            body:"Pick the same fixed feature on each level — a column or grid intersection that appears on every sheet.",
+            why:"This is what stacks the floors correctly. Without it Korban can't tell a real step-back from a shaky trace.",
+            done: allRefs },
+          { id:"grip", title:"Grip the elevations",
+            body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
+            why:"The grip measures height. Height is what decides how many frames go in each leg.",
+            done: anyGrip },
+          { id:"store", title:"Store the work",
+            body:"Store Overlay on the floor plan, Store Elevations on the elevations. Then Review Estimate.",
+            done: overlayStored || elevStored },
+        ];
+        return <GuidedSteps steps={steps} hidden={guideHidden}
+          onToggleHidden={h=>{setGuideHidden(h); try{localStorage.setItem("korbanGuideHidden",h?"1":"0");}catch{}}} />;
+      })()}
+
+      {depthTab==="quick-bid" ? <QuickBidForm /> : (
       <div className="flex flex-1 overflow-hidden">
 
         {/* Left panel */}
@@ -766,7 +856,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         <section className="flex flex-1 flex-col overflow-hidden">
           {/* Toolbar */}
           <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-wrap">
-            <button onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading…":"Upload Plans"}</button>
+            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading…":"Upload Plans"}</button>
             <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
 
             {totalPages>1&&(
@@ -808,7 +898,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             {/* Scale */}
             {!scale.locked?(
               <>
-                <button onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
+                <button data-guide="scale" onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
                   className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
                   ⟷ Scale {scale.pickingPoint?`— pt ${scale.pickingPoint}`:""}
                 </button>
@@ -1035,6 +1125,41 @@ export default function TakeoffWorkspaceAdvancedPage() {
           {activeTab==="floor"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
+                {/* Reference point — its own step. It's an anchor shared
+                    across levels, not a property of any one outline, so it
+                    sits above the level list rather than inside a tile. */}
+                <div data-guide="reference-point" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Reference Point</p>
+                    <span className="text-[9px] text-zinc-600">
+                      {floorLevels.filter(l=>l.refPoint).length}/{floorLevels.length} set
+                    </span>
+                  </div>
+                  <p className="mb-2 text-[10px] leading-relaxed text-zinc-500">
+                    Pick the same fixed feature on every level — a column, a grid intersection, a corner.
+                    It&apos;s what lines the floors up with each other.
+                  </p>
+                  <div className="space-y-1">
+                    {floorLevels.map(level=>(
+                      <div key={level.id} className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{background:level.color}} />
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-zinc-400">{level.levelName}</span>
+                        <span className={`text-[8px] font-mono ${level.refPoint?"text-yellow-400":"text-zinc-700"}`}>
+                          {level.refPoint?"set":"—"}
+                        </span>
+                        <button onClick={()=>{setActiveLevel(level.id);setRefPickLevelId(refPickLevelId===level.id?null:level.id);}}
+                          className={`rounded-lg border px-2 py-0.5 text-[9px] font-bold transition ${refPickLevelId===level.id?"animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300":"border-zinc-700 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"}`}>
+                          {refPickLevelId===level.id?"Click plan…":level.refPoint?"Redo":"Pick"}
+                        </button>
+                        {level.refPoint&&(
+                          <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,refPoint:null}:l))}
+                            className="text-[9px] text-zinc-700 hover:text-red-400">✕</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Floor Levels</p>
                 {floorLevels.map((level,i)=>{
                   const isActive=level.id===activeLevel;
@@ -1075,27 +1200,6 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         </span>
                       </button>
 
-                      {/* Reference point — the anchor that lets this level
-                          stack correctly against the others */}
-                      <div onClick={e=>e.stopPropagation()} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-[9px] text-zinc-600">Reference Pt</label>
-                          <span className={`text-[8px] font-mono ${level.refPoint?"text-yellow-400":"text-zinc-700"}`}>
-                            {level.refPoint?`${Math.round(level.refPoint.x)}, ${Math.round(level.refPoint.y)}`:"Not set"}
-                          </span>
-                        </div>
-                        <div className="flex gap-1">
-                          <button onClick={()=>{setActiveLevel(level.id);setRefPickLevelId(refPickLevelId===level.id?null:level.id);}}
-                            className={`flex-1 rounded-lg border px-2 py-1 text-[9px] font-bold transition ${refPickLevelId===level.id?"animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300":"border-zinc-700 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"}`}>
-                            {refPickLevelId===level.id?"Click on plan…":"Pick"}
-                          </button>
-                          <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,refPoint:null}:l))}
-                            disabled={!level.refPoint}
-                            className="rounded-lg border border-zinc-800 px-2 py-1 text-[9px] text-zinc-600 hover:border-red-500/30 hover:text-red-400 disabled:opacity-30">
-                            Clear
-                          </button>
-                        </div>
-                      </div>
 
                       {/* Start / Close / Store per level */}
                       <div className="flex gap-1.5" onClick={e=>e.stopPropagation()}>
@@ -1203,7 +1307,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   <div className="flex gap-1 flex-wrap">
                     <button onClick={()=>{setActiveZone("building");setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
                       className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone==="building"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
-                      Building
+                      Exterior
                     </button>
                     {courtyards.map(cy=>(
                       <button key={cy.id} onClick={()=>{setActiveZone(cy.id);setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
@@ -1268,16 +1372,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </div>
                 )}
 
-                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev} — Coverage Areas</p>
+                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " — Coverage Areas" : " Elevation"}</p>
 
-                {currentElevData.areas.map((area,aIdx)=>{
+                {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
                   const hasData=area.rect&&area.lf>0;
                   const isSelected=selectedArea===area.areaIndex;
                   return (
                     <div key={area.id} onClick={()=>setSelectedArea(area.areaIndex)}
                       className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                       <div className="flex items-center justify-between mb-2">
-                        <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>Area {area.areaIndex}</span>
+                        <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>{depthTab==="korban-bid" ? `Area ${area.areaIndex}` : `${selectedElev} Elevation`}</span>
                         {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">✕ Clear</button>}
                       </div>
 
@@ -1362,7 +1466,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   );
                 })}
 
-                {/* Add Area button after last area */}
+                {/* Multiple areas per elevation are a Korban Bid capability.
+                    Full Bid keeps it to one grip per elevation. */}
+                {depthTab==="korban-bid" ? (
                 <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
                   ...ed,
                   areas:[...ed.areas,newElevArea(ed.areas.length+1,selectedElev)],
@@ -1370,6 +1476,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
                   + Add Area
                 </button>
+                ) : (
+                <p className="rounded-xl border border-dashed border-zinc-900 py-2 text-center text-[9.5px] text-zinc-700">
+                  One grip per elevation at this depth. Korban Bid adds multiple areas.
+                </p>
+                )}
 
                 {/* Summary */}
                 <div className="rounded-xl border border-zinc-800 bg-black p-3">
@@ -1497,6 +1608,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           )}
         </aside>
       </div>
+      )}
     </main>
   );
 }

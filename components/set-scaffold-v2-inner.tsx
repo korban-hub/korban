@@ -660,7 +660,7 @@ function SectionViewPanel({
       <div className="flex-1 flex items-center justify-center bg-zinc-950 p-2 overflow-hidden relative">
         {!hasWallTrace && (
           <p className="absolute inset-x-3 top-2 text-[8.5px] text-zinc-600 text-center leading-relaxed z-10">
-            No wall outline traced yet — trace the wall in Takeoff's Section View tab to render the real profile here. Showing scaffold only.
+            No wall outline traced yet — trace the wall in Takeoff&apos;s Section View tab to render the real profile here. Showing scaffold only.
           </p>
         )}
         <svg
@@ -712,7 +712,7 @@ function SectionViewPanel({
                   fontSize="3.6" fill="#a1a1aa" fontFamily="monospace">{levelLabel}</text>
                 {/* frame height dimension — right */}
                 <text x={scaffX + widthPx + 4} y={y + frameHPx / 2} dominantBaseline="middle"
-                  fontSize="3.4" fill="#71717a" fontFamily="monospace">{FRAME_H_FT.toFixed(2)}'</text>
+                  fontSize="3.4" fill="#71717a" fontFamily="monospace">{FRAME_H_FT.toFixed(2)}&apos;</text>
               </g>
             );
           })}
@@ -740,7 +740,7 @@ function SectionViewPanel({
 
           {/* Section cut label */}
           <text x={scaffX} y={totalH + 32} fontSize="5" fill="#f97316" fontFamily="monospace" fontWeight="bold">{sectionType}</text>
-          <text x={scaffX + widthPx / 2} y={totalH + 42} textAnchor="middle" fontSize="4" fill="#2563eb" fontFamily="monospace">{scaffoldWidthFt}' wide</text>
+          <text x={scaffX + widthPx / 2} y={totalH + 42} textAnchor="middle" fontSize="4" fill="#2563eb" fontFamily="monospace">{scaffoldWidthFt}&apos; wide</text>
 
           {/* Wall offset dimension */}
           {hasWallTrace && (
@@ -754,7 +754,7 @@ function SectionViewPanel({
               <text
                 x={((scaffoldSide === "left" ? scaffX + widthPx : wallDrawX0) +
                     (scaffoldSide === "left" ? wallDrawX0 : scaffX)) / 2}
-                y={totalH + 18} textAnchor="middle" fontSize="3.6" fill="#f97316" fontFamily="monospace">{wallOffset}' offset</text>
+                y={totalH + 18} textAnchor="middle" fontSize="3.6" fill="#f97316" fontFamily="monospace">{wallOffset}&apos; offset</text>
             </>
           )}
         </svg>
@@ -838,7 +838,7 @@ function FrameConfigOptions({
                 {opt.screwJackExtensionIn > 0.05 && (
                   <div className="flex justify-between text-[9px]">
                     <span className="text-zinc-600">Screw Jack</span>
-                    <span className="font-mono text-zinc-300">{opt.screwJackExtensionIn.toFixed(1)}"</span>
+                    <span className="font-mono text-zinc-300">{opt.screwJackExtensionIn.toFixed(1)}&quot;</span>
                   </div>
                 )}
                 <div className="flex justify-between text-[9px]">
@@ -847,7 +847,7 @@ function FrameConfigOptions({
                 </div>
                 <div className="flex justify-between text-[9px]">
                   <span className="text-zinc-600">Width</span>
-                  <span className="font-mono text-zinc-300">{scaffoldWidthFt}'</span>
+                  <span className="font-mono text-zinc-300">{scaffoldWidthFt}&apos;</span>
                 </div>
               </div>
             </div>
@@ -870,7 +870,7 @@ export default function SetScaffoldV2Inner() {
   const [sectionExpanded, setSectionExpanded] = useState(false);
   // Estimate depth gates which views are available here. Quick Bid shows
   // counts and frame config only — no layout, no 3D, no sections.
-  const [estimateDepth, setEstimateDepthState] = useState<EstimateDepth>("complex");
+  const [estimateDepth, setEstimateDepthState] = useState<EstimateDepth>("korban-bid");
   const [selectedLegKey, setSelectedLegKey] = useState<string | null>(null);
   const [deletedLegKeys, setDeletedLegKeys] = useState<Set<string>>(new Set());
   const [overriddenFC,   setOverriddenFC]   = useState<Record<string, number>>({});
@@ -892,7 +892,7 @@ export default function SetScaffoldV2Inner() {
   // Material rules come from backend settings so each company can encode
   // its own standard; the defaults are standard practice.
   const MATERIAL_RULES = useMemo(() => {
-    const sc = getBackendSettings()?.scaffold ?? {};
+    const sc = (getBackendSettings()?.scaffold ?? {}) as Record<string, number | undefined>;
     return {
       crossBracesPerBayPerLift: sc.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift,
       guardrailTopPerBay: sc.guardrailTopPerBay ?? MATERIAL_RULE_DEFAULTS.guardrailTopPerBay,
@@ -980,7 +980,7 @@ export default function SetScaffoldV2Inner() {
 
   // Quick Bid derives everything from gripped elevation areas — no plan
   // geometry exists at that depth, so the tick/perimeter path can't run.
-  const isQuickBid = !depthAtLeast(estimateDepth, "straight-cost");
+  const isQuickBid = !depthAtLeast(estimateDepth, "full-bid");
   const quickTotals = useMemo(
     () => computeElevationOnlyTotals(elevation, {
       bayLengthFt: bayLengthFt,
@@ -1438,7 +1438,7 @@ export default function SetScaffoldV2Inner() {
                 <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-zinc-800 pt-3.5">
                   <p className="flex-1 text-[12.5px] leading-relaxed text-zinc-400">{phaseReport.nextStep}</p>
                   <a href="/estimate-depth" className="rounded-xl bg-orange-500 px-4 py-2 text-[11px] font-bold text-black transition hover:bg-orange-400">
-                    Move to Straight Cost
+                    Move to Full Bid
                   </a>
                 </div>
               )}
@@ -1453,7 +1453,7 @@ export default function SetScaffoldV2Inner() {
               { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
               { id: "section", label: "Section View", icon: "✂" },
             ] as { id: typeof activeMainTab; label: string; icon: string }[])
-              .filter(tab => tab.id !== "section" || depthAtLeast(estimateDepth, "complex"))
+              .filter(tab => tab.id !== "section" || depthAtLeast(estimateDepth, "korban-bid"))
               .map(tab => {
               const active = activeMainTab === tab.id;
               return (
@@ -1676,7 +1676,7 @@ export default function SetScaffoldV2Inner() {
                         <Fragment key={i}>
                           {i > 0 && <span className="w-px h-2 bg-zinc-700" />}
                           <span className="text-[7px] font-mono font-bold text-orange-300 whitespace-nowrap">
-                            {Math.floor(d.feet)}'-{Math.round((d.feet % 1) * 12)}"
+                            {Math.floor(d.feet)}&apos;-{Math.round((d.feet % 1) * 12)}&quot;
                           </span>
                         </Fragment>
                       ))}
@@ -1698,7 +1698,7 @@ export default function SetScaffoldV2Inner() {
                 <label className="text-[9px] text-zinc-600 block mb-1">Width</label>
                 <select value={scaffoldWidth} onChange={e => { setScaffoldWidth(e.target.value as ScaffoldWidth); saveConfig({ scaffoldWidth: parseFt(e.target.value) }); }}
                   className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none">
-                  <option>3'</option><option>3'-6"</option><option>5'</option>
+                  <option>3&apos;</option><option>3&apos;-6&quot;</option><option>5&apos;</option>
                 </select>
               </div>
               <div>
@@ -1825,7 +1825,7 @@ export default function SetScaffoldV2Inner() {
         {/* ── Persistent right column — 3D model, always mounted & rotating,
               with the Total Project Material List beneath it ─────────── */}
         <div className="flex flex-col flex-shrink-0 overflow-hidden" style={{ width: "30%" }}>
-          {depthAtLeast(estimateDepth, "complex") && (
+          {depthAtLeast(estimateDepth, "korban-bid") && (
           <div className="flex flex-col flex-shrink-0" style={{ height: "55%" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
