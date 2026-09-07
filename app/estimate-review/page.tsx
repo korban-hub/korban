@@ -1891,7 +1891,7 @@ function AlternateTile({
   onHover: (active: boolean) => void;
 }) {
   const hasControls =
-    id === "shrink-wrap" || id === "toe-boards" || id === "hoist-landing";
+    id === "shrink-wrap" || id === "toe-boards" || id === "hoist-landing" || id === "stair-tower";
 
   return (
     <div
@@ -1951,6 +1951,47 @@ function AlternateTile({
                   value={settings.toeBoardSide}
                   onChange={(value) => updateSettings({ toeBoardSide: value as ToeBoardSide })}
                 />
+              )}
+
+              {id === "stair-tower" && (
+                <div className="grid gap-2">
+                  <button
+                    onClick={() =>
+                      updateSettings({ stairTowerParapet: !settings.stairTowerParapet })
+                    }
+                    className="flex items-center gap-2 text-left"
+                  >
+                    <span
+                      className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border transition ${
+                        settings.stairTowerParapet
+                          ? "border-orange-400 bg-orange-500 text-black"
+                          : "border-orange-400/40 bg-black"
+                      }`}
+                    >
+                      {settings.stairTowerParapet && (
+                        <span className="font-mono text-[9px] font-bold leading-none">&#10003;</span>
+                      )}
+                    </span>
+                    <span className="font-mono text-[10px] text-orange-200/80">
+                      Up and over parapet
+                    </span>
+                    <span className="font-mono text-[9px] text-zinc-600">2&ndash;4&apos; parapet</span>
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-orange-300/70">
+                      Walkoffs
+                    </span>
+                    <MiniInput
+                      value={settings.stairTowerWalkoffs}
+                      onChange={(value) => updateSettings({ stairTowerWalkoffs: Math.max(0, value) })}
+                      width="w-14"
+                    />
+                    <span className="font-mono text-[9px] text-zinc-600">
+                      decks accessing floor levels
+                    </span>
+                  </div>
+                </div>
               )}
 
               {id === "hoist-landing" && (

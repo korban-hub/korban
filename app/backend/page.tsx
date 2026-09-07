@@ -367,41 +367,70 @@ export default function BackendPage() {
           <div className="grid grid-cols-3 gap-3">
             <FieldRow label="Levels per mob"><NumberInput value={alternates.stairTowerLevelsPerMobilization} onChange={(v) => setAlternates({ ...alternates, stairTowerLevelsPerMobilization: v })} /></FieldRow>
             <FieldRow label="Hours per mob"><NumberInput value={alternates.stairTowerHoursPerMobilization} onChange={(v) => setAlternates({ ...alternates, stairTowerHoursPerMobilization: v })} suffix="hrs" /></FieldRow>
-            <FieldRow label="Dismantle"><PercentInput value={alternates.stairTowerDismantlePercent} onChange={(v) => setAlternates({ ...alternates, stairTowerDismantlePercent: v })} /></FieldRow>
+            <FieldRow label="Dismantle" hint="Above threshold only"><PercentInput value={alternates.stairTowerDismantlePercent} onChange={(v) => setAlternates({ ...alternates, stairTowerDismantlePercent: v })} /></FieldRow>
           </div>
-          <FieldRow label="Crew by Building Height" hint="Applies below the tall threshold. Add or edit rows to match how your crews actually scale.">
+          <FieldRow label="Travel" hint="Applied to every stair tower, at any height">
+            <NumberInput value={alternates.stairTowerTravelHours} onChange={(v) => setAlternates({ ...alternates, stairTowerTravelHours: v })} suffix="hrs" />
+          </FieldRow>
+          <p className="mt-1 mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Stair Tower Options</p>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Parapet - install" hint="Up and over, 2-4' parapet">
+              <NumberInput value={alternates.stairTowerParapetInstallHours} onChange={(v) => setAlternates({ ...alternates, stairTowerParapetInstallHours: v })} suffix="hrs" />
+            </FieldRow>
+            <FieldRow label="Parapet - dismantle">
+              <NumberInput value={alternates.stairTowerParapetDismantleHours} onChange={(v) => setAlternates({ ...alternates, stairTowerParapetDismantleHours: v })} suffix="hrs" />
+            </FieldRow>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <FieldRow label="Walkoff - install" hint="Per walkoff deck">
+              <NumberInput value={alternates.stairTowerWalkoffInstallHours} onChange={(v) => setAlternates({ ...alternates, stairTowerWalkoffInstallHours: v })} suffix="hrs" />
+            </FieldRow>
+            <FieldRow label="Walkoff - dismantle">
+              <NumberInput value={alternates.stairTowerWalkoffDismantleHours} onChange={(v) => setAlternates({ ...alternates, stairTowerWalkoffDismantleHours: v })} suffix="hrs" />
+            </FieldRow>
+            <FieldRow label="Walkoff - travel">
+              <NumberInput value={alternates.stairTowerWalkoffTravelHours} onChange={(v) => setAlternates({ ...alternates, stairTowerWalkoffTravelHours: v })} suffix="hrs" />
+            </FieldRow>
+          </div>
+          <FieldRow label="Hours by Building Height" hint="Applies below the tall threshold. Crew scaling steps rather than climbing smoothly, so each band is stated outright.">
             <div className="space-y-1.5">
-              {alternates.stairTowerCrewBands.map((band, index) => (
-                <div key={index} className="grid grid-cols-[1fr_1fr_28px] items-center gap-2">
-                  <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
-                    <span className="font-mono text-[10px] text-zinc-600">to</span>
-                    <input
-                      value={band.throughFt}
-                      type="number"
-                      onChange={(e) => {
-                        const next = [...alternates.stairTowerCrewBands];
-                        next[index] = { ...band, throughFt: Number(e.target.value || 0) };
-                        setAlternates({ ...alternates, stairTowerCrewBands: next });
-                      }}
-                      className="w-full bg-transparent text-right font-mono text-xs font-bold text-orange-300 outline-none"
-                    />
-                    <span className="font-mono text-[10px] text-zinc-600">ft</span>
-                  </div>
-                  <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
-                    <input
-                      value={band.men}
-                      type="number"
-                      onChange={(e) => {
-                        const next = [...alternates.stairTowerCrewBands];
-                        next[index] = { ...band, men: Number(e.target.value || 0) };
-                        setAlternates({ ...alternates, stairTowerCrewBands: next });
-                      }}
-                      className="w-full bg-transparent text-right font-mono text-xs font-bold text-orange-300 outline-none"
-                    />
-                    <span className="font-mono text-[10px] text-zinc-600">men</span>
-                  </div>
+              <div className="grid grid-cols-[1fr_1fr_1fr_28px] gap-2 px-1">
+                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">Through</span>
+                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">Install</span>
+                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">Dismantle</span>
+                <span />
+              </div>
+              {alternates.stairTowerHourBands.map((band, index) => (
+                <div key={index} className="grid grid-cols-[1fr_1fr_1fr_28px] items-center gap-2">
+                  <BandCell
+                    value={band.throughFt}
+                    suffix="ft"
+                    onChange={(v) => {
+                      const next = [...alternates.stairTowerHourBands];
+                      next[index] = { ...band, throughFt: v };
+                      setAlternates({ ...alternates, stairTowerHourBands: next });
+                    }}
+                  />
+                  <BandCell
+                    value={band.installHours}
+                    suffix="hrs"
+                    onChange={(v) => {
+                      const next = [...alternates.stairTowerHourBands];
+                      next[index] = { ...band, installHours: v };
+                      setAlternates({ ...alternates, stairTowerHourBands: next });
+                    }}
+                  />
+                  <BandCell
+                    value={band.dismantleHours}
+                    suffix="hrs"
+                    onChange={(v) => {
+                      const next = [...alternates.stairTowerHourBands];
+                      next[index] = { ...band, dismantleHours: v };
+                      setAlternates({ ...alternates, stairTowerHourBands: next });
+                    }}
+                  />
                   <button
-                    onClick={() => setAlternates({ ...alternates, stairTowerCrewBands: alternates.stairTowerCrewBands.filter((_, i) => i !== index) })}
+                    onClick={() => setAlternates({ ...alternates, stairTowerHourBands: alternates.stairTowerHourBands.filter((_, i) => i !== index) })}
                     className="text-center font-mono text-[11px] text-zinc-700 hover:text-red-400"
                     aria-label="Remove band"
                   >
@@ -411,12 +440,12 @@ export default function BackendPage() {
               ))}
               <button
                 onClick={() => {
-                  const last = alternates.stairTowerCrewBands[alternates.stairTowerCrewBands.length - 1];
+                  const last = alternates.stairTowerHourBands[alternates.stairTowerHourBands.length - 1];
                   setAlternates({
                     ...alternates,
-                    stairTowerCrewBands: [
-                      ...alternates.stairTowerCrewBands,
-                      { throughFt: (last?.throughFt ?? 20) + 5, men: (last?.men ?? 3) + 1 },
+                    stairTowerHourBands: [
+                      ...alternates.stairTowerHourBands,
+                      { throughFt: (last?.throughFt ?? 10) + 10, installHours: (last?.installHours ?? 16) + 8, dismantleHours: (last?.dismantleHours ?? 12) + 8 },
                     ],
                   });
                 }}
@@ -513,17 +542,19 @@ function FieldRow({ label, hint, children }: { label: string; hint?: string; chi
 }
 
 function TextInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="w-full rounded-lg border border-zinc-800 bg-black px-3 py-2.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40" />;
+  return <input value={value ?? ""} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="w-full rounded-lg border border-zinc-800 bg-black px-3 py-2.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40" />;
 }
 
 function TextArea({ value, onChange, rows = 3, placeholder }: { value: string; onChange: (v: string) => void; rows?: number; placeholder?: string }) {
-  return <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={rows} placeholder={placeholder} className="w-full resize-none rounded-lg border border-zinc-800 bg-black px-3 py-2.5 text-xs leading-5 text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40" />;
+  return <textarea value={value ?? ""} onChange={(e) => onChange(e.target.value)} rows={rows} placeholder={placeholder} className="w-full resize-none rounded-lg border border-zinc-800 bg-black px-3 py-2.5 text-xs leading-5 text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40" />;
 }
 
 function NumberInput({ value, onChange, suffix }: { value: number; onChange: (v: number) => void; suffix?: string }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-black px-3 py-2.5">
-      <input value={value} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
+      {/* Guarded so a settings record written before this field existed
+          can't flip the input from uncontrolled to controlled. */}
+      <input value={Number.isFinite(value) ? value : 0} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
       {suffix && <span className="shrink-0 font-mono text-[10px] text-zinc-600">{suffix}</span>}
     </div>
   );
@@ -533,7 +564,7 @@ function MoneyInput({ value, onChange, suffix }: { value: number; onChange: (v: 
   return (
     <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-3 py-2.5">
       <span className="font-mono text-sm font-bold text-zinc-600">$</span>
-      <input value={value} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" step="0.01" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
+      <input value={Number.isFinite(value) ? value : 0} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" step="0.01" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
       {suffix && <span className="shrink-0 font-mono text-[10px] text-zinc-600">{suffix}</span>}
     </div>
   );
@@ -542,7 +573,7 @@ function MoneyInput({ value, onChange, suffix }: { value: number; onChange: (v: 
 function PercentInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-3 py-2.5">
-      <input value={value} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
+      <input value={Number.isFinite(value) ? value : 0} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
       <span className="font-mono text-sm font-bold text-zinc-600">%</span>
     </div>
   );
@@ -551,7 +582,7 @@ function PercentInput({ value, onChange }: { value: number; onChange: (v: number
 function FeetInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-3 py-2.5">
-      <input value={value} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
+      <input value={Number.isFinite(value) ? value : 0} onChange={(e) => onChange(Number(e.target.value || 0))} type="number" className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none" />
       <span className="font-mono text-sm font-bold text-zinc-600">ft</span>
     </div>
   );
@@ -562,7 +593,7 @@ function InchesInput({ value, onChange, min = 1, max = 18 }: { value: number; on
     <div className="space-y-2">
       <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-black px-3 py-2.5">
         <input
-          value={value}
+          value={Number.isFinite(value) ? value : min}
           onChange={(e) => onChange(Math.min(max, Math.max(min, Number(e.target.value || min))))}
           type="number" min={min} max={max}
           className="w-full bg-transparent font-mono text-sm font-bold text-orange-300 outline-none"
@@ -570,7 +601,7 @@ function InchesInput({ value, onChange, min = 1, max = 18 }: { value: number; on
         <span className="font-mono text-sm font-bold text-zinc-600">&quot;</span>
       </div>
       <div className="space-y-1">
-        <input type="range" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-orange-500" />
+        <input type="range" min={min} max={max} value={Number.isFinite(value) ? value : min} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-orange-500" />
         <div className="flex justify-between font-mono text-[9px] text-zinc-600">
           <span>1&quot; min</span>
           <span className="font-bold text-orange-400">{value}&quot; selected</span>
@@ -666,6 +697,21 @@ function MaterialRow({ item, onChange }: { item: MaterialItem; onChange: (item: 
       >
         {item.billsAsRental ? "bills" : "off"}
       </button>
+    </div>
+  );
+}
+
+/** One editable cell in the stair tower band table. */
+function BandCell({ value, suffix, onChange }: { value: number; suffix: string; onChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+      <input
+        value={Number.isFinite(value) ? value : 0}
+        type="number"
+        onChange={(e) => onChange(Number(e.target.value || 0))}
+        className="w-full min-w-0 bg-transparent text-right font-mono text-xs font-bold text-orange-300 outline-none"
+      />
+      <span className="shrink-0 font-mono text-[10px] text-zinc-600">{suffix}</span>
     </div>
   );
 }

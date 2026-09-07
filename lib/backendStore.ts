@@ -145,9 +145,23 @@ export type AlternateRateDefaults = {
   stairTowerTallThresholdFt: number;
   stairTowerLevelsPerMobilization: number;
   stairTowerHoursPerMobilization: number;
+  /** Only applies above the tall threshold; below it dismantle is explicit. */
   stairTowerDismantlePercent: number;
-  /** Crew by building height, in 5' bands, up to the tall threshold. */
-  stairTowerCrewBands: { throughFt: number; men: number }[];
+  /** Travel hours per stair tower, at any height. */
+  stairTowerTravelHours: number;
+  /** Up-and-over a parapet, typically 2-4' tall. Added when selected. */
+  stairTowerParapetInstallHours: number;
+  stairTowerParapetDismantleHours: number;
+  /** Walkoffs - decks that access a floor level. Per walkoff. */
+  stairTowerWalkoffInstallHours: number;
+  stairTowerWalkoffDismantleHours: number;
+  stairTowerWalkoffTravelHours: number;
+  /**
+   * Install and dismantle hours by building height, up to the tall threshold.
+   * Bands are explicit rather than derived, because crew scaling on a stair
+   * tower isn't linear - it steps.
+   */
+  stairTowerHourBands: { throughFt: number; installHours: number; dismantleHours: number }[];
 
   toeBoardPerLinearFootPerJump: number;
 };
@@ -278,14 +292,17 @@ export const DEFAULT_ALTERNATE_RATES: AlternateRateDefaults = {
   stairTowerLevelsPerMobilization: 2,
   stairTowerHoursPerMobilization: 24,
   stairTowerDismantlePercent: 75,
-  stairTowerCrewBands: [
-    { throughFt: 25, men: 3 },
-    { throughFt: 30, men: 4 },
-    { throughFt: 35, men: 4 },
-    { throughFt: 40, men: 5 },
-    { throughFt: 45, men: 5 },
-    { throughFt: 50, men: 6 },
-    { throughFt: 55, men: 6 },
+  stairTowerTravelHours: 6,
+  stairTowerParapetInstallHours: 16,
+  stairTowerParapetDismantleHours: 8,
+  stairTowerWalkoffInstallHours: 8,
+  stairTowerWalkoffDismantleHours: 8,
+  stairTowerWalkoffTravelHours: 2,
+  stairTowerHourBands: [
+    { throughFt: 19, installHours: 16, dismantleHours: 12 },
+    { throughFt: 29, installHours: 24, dismantleHours: 16 },
+    { throughFt: 39, installHours: 40, dismantleHours: 32 },
+    { throughFt: 55, installHours: 48, dismantleHours: 40 },
   ],
 
   toeBoardPerLinearFootPerJump: 2.85,
@@ -592,16 +609,17 @@ function normalizePricing(value: unknown): PricingDefaults {
 function normalizeAlternates(value: unknown): AlternateRateDefaults {
   const r = isRecord(value) ? value : {};
   const d = DEFAULT_ALTERNATE_RATES;
-  const bands = Array.isArray(r.stairTowerCrewBands) && r.stairTowerCrewBands.length
-    ? (r.stairTowerCrewBands as unknown[])
+  const bands = Array.isArray(r.stairTowerHourBands) && r.stairTowerHourBands.length
+    ? (r.stairTowerHourBands as unknown[])
         .filter(isRecord)
         .map((row) => ({
           throughFt: asNumber(row.throughFt, 0),
-          men: asNumber(row.men, 1),
+          installHours: asNumber(row.installHours, 0),
+          dismantleHours: asNumber(row.dismantleHours, 0),
         }))
         .filter((row) => row.throughFt > 0)
         .sort((a, b) => a.throughFt - b.throughFt)
-    : d.stairTowerCrewBands;
+    : d.stairTowerHourBands;
 
   return {
     shrinkWrapPerSqFt: asNumber(r.shrinkWrapPerSqFt, d.shrinkWrapPerSqFt),
@@ -622,7 +640,13 @@ function normalizeAlternates(value: unknown): AlternateRateDefaults {
     stairTowerLevelsPerMobilization: asNumber(r.stairTowerLevelsPerMobilization, d.stairTowerLevelsPerMobilization),
     stairTowerHoursPerMobilization: asNumber(r.stairTowerHoursPerMobilization, d.stairTowerHoursPerMobilization),
     stairTowerDismantlePercent: asNumber(r.stairTowerDismantlePercent, d.stairTowerDismantlePercent),
-    stairTowerCrewBands: bands,
+    stairTowerTravelHours: asNumber(r.stairTowerTravelHours, d.stairTowerTravelHours),
+    stairTowerParapetInstallHours: asNumber(r.stairTowerParapetInstallHours, d.stairTowerParapetInstallHours),
+    stairTowerParapetDismantleHours: asNumber(r.stairTowerParapetDismantleHours, d.stairTowerParapetDismantleHours),
+    stairTowerWalkoffInstallHours: asNumber(r.stairTowerWalkoffInstallHours, d.stairTowerWalkoffInstallHours),
+    stairTowerWalkoffDismantleHours: asNumber(r.stairTowerWalkoffDismantleHours, d.stairTowerWalkoffDismantleHours),
+    stairTowerWalkoffTravelHours: asNumber(r.stairTowerWalkoffTravelHours, d.stairTowerWalkoffTravelHours),
+    stairTowerHourBands: bands,
     toeBoardPerLinearFootPerJump: asNumber(r.toeBoardPerLinearFootPerJump, d.toeBoardPerLinearFootPerJump),
   };
 }
