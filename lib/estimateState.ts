@@ -8,6 +8,8 @@
 // This is deliberately separate from projectStore/backendStore: it holds
 // estimate-session state, not project data and not company settings.
 
+import { DEFAULT_ALTERNATE_SETTINGS, type AlternateId, type AlternateSettings } from "@/lib/alternates";
+
 export type BidDepth = "quick-bid" | "full-bid" | "korban-bid";
 export type ProductionKey = "conservative" | "conventional" | "competitive";
 
@@ -73,6 +75,10 @@ export type EstimateState = {
   phaseModeOn: boolean;
   phases: ProductionPhase[];
 
+  // Add alternates
+  approvedAlternates: AlternateId[];
+  alternateSettings: AlternateSettings;
+
   // Margin assumptions (owned by /margin-review)
   laborMarkupPercent: number;
   rentalsDirectCostPercent: number;
@@ -86,7 +92,7 @@ export const DEFAULT_CONSUMABLES: ConsumableLine[] = [
   { id: "beams", label: "Beams", quantity: 0, unitRate: 0 },
   { id: "joists", label: "Joists", quantity: 0, unitRate: 0 },
   { id: "plywood", label: "Plywood", quantity: 0, unitRate: 0 },
-  { id: "two-by-four", label: "2×4", quantity: 0, unitRate: 0 },
+  { id: "two-by-four", label: "2x4", quantity: 0, unitRate: 0 },
   { id: "misc", label: "Misc", quantity: 0, unitRate: 0 },
 ];
 
@@ -112,6 +118,9 @@ export const DEFAULT_ESTIMATE_STATE: EstimateState = {
     { id: 3, phase: "South elevation", days: 2, crews: 1, menPerCrew: 4 },
   ],
 
+  approvedAlternates: [],
+  alternateSettings: DEFAULT_ALTERNATE_SETTINGS,
+
   laborMarkupPercent: 35,
   rentalsDirectCostPercent: 40,
   miscRevenue: 6800,
@@ -133,6 +142,8 @@ export function loadEstimateState(): EstimateState {
       ...parsed,
       consumables: parsed.consumables?.length ? parsed.consumables : DEFAULT_CONSUMABLES,
       phases: parsed.phases?.length ? parsed.phases : DEFAULT_ESTIMATE_STATE.phases,
+      approvedAlternates: Array.isArray(parsed.approvedAlternates) ? parsed.approvedAlternates : [],
+      alternateSettings: { ...DEFAULT_ALTERNATE_SETTINGS, ...(parsed.alternateSettings ?? {}) },
     };
   } catch {
     return DEFAULT_ESTIMATE_STATE;
@@ -146,7 +157,7 @@ export function saveEstimateState(patch: Partial<EstimateState>) {
     const next = { ...loadEstimateState(), ...patch };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   } catch {
-    // Storage unavailable — the page still works, it just won't persist.
+    // Storage unavailable - the page still works, it just won't persist.
   }
 }
 
@@ -167,7 +178,7 @@ export const BID_DEPTHS: {
   accuracy: string;
   feeds: string;
 }[] = [
-  { key: "quick-bid", title: "Quick Bid", accuracy: "±15–25%", feeds: "Elevation lengths entered by hand." },
-  { key: "full-bid", title: "Full Bid", accuracy: "±8–12%", feeds: "Traced perimeter, one grip per elevation." },
-  { key: "korban-bid", title: "Korban Bid", accuracy: "±3–6%", feeds: "Traced perimeter, multiple areas, section views." },
+  { key: "quick-bid", title: "Quick Bid", accuracy: "+/-15-25%", feeds: "Elevation lengths entered by hand." },
+  { key: "full-bid", title: "Full Bid", accuracy: "+/-8-12%", feeds: "Traced perimeter, one grip per elevation." },
+  { key: "korban-bid", title: "Korban Bid", accuracy: "+/-3-6%", feeds: "Traced perimeter, multiple areas, section views." },
 ];
