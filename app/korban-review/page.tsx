@@ -1,231 +1,468 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   buildPhaseReport, computeCourtyardTotals, computeElevationOnlyTotals,
-  getActiveElevation, getActiveProject,
+  getActiveElevation, getActiveProject, getEstimateDepth,
   type EstimateDepth, type ProjectElevation,
 } from "@/lib/projectStore";
 
 /**
- * Korban Review — three summaries of the same job, one per bid depth.
+ * Korban Review - three readings of the same job, side by side.
  *
- * Each panel reports what that depth actually knows and what it doesn't,
- * in the voice of someone who did the work reporting back. Panels for
- * depths you haven't reached say so plainly rather than showing numbers
- * that would imply more certainty than exists.
+ * The point of this page is comparison: what does this job look like if you
+ * price it from elevations alone, versus from traced plan geometry, versus
+ * from the full model? Stacking those vertically hid the comparison, so they
+ * sit horizontally now.
+ *
+ * Each tier reports from its OWN source. Quick Bid reads gripped elevation
+ * areas; Full Bid and Korban Bid read the quantity engine, which only has
+ * anything in it once a plan is traced. Showing the same counts under all
+ * three - which is what this did before - implied depth buys nothing.
+ *
+ * Korban's own read is set apart from the numbers deliberately. Counts are
+ * measurements; the commentary is a judgement, and the two should never be
+ * mistaken for each other.
  */
 
 type DepthMeta = {
   id: EstimateDepth;
   name: string;
   blurb: string;
+  accuracy: string;
+  source: string;
 };
 
 const DEPTHS: DepthMeta[] = [
-  { id: "quick-bid",  name: "Quick Bid",  blurb: "Elevation coverage only" },
-  { id: "full-bid",   name: "Full Bid",   blurb: "Plan geometry and layout" },
-  { id: "korban-bid", name: "Korban Bid", blurb: "Sections, 3D, and my review" },
+  { id: "quick-bid",  name: "Quick Bid",  blurb: "Elevation coverage only",   accuracy: "+/-15-25%", source: "Gripped elevation areas" },
+  { id: "full-bid",   name: "Full Bid",   blurb: "Plan geometry and layout",  accuracy: "+/-8-12%",  source: "Traced perimeter" },
+  { id: "korban-bid", name: "Korban Bid", blurb: "Sections, 3D and my review", accuracy: "+/-3-6%",   source: "Perimeter and sections" },
 ];
 
-const ORDER: EstimateDepth[] = ["quick-bid", "full-bid", "korban-bid"];
+const DEPTH_RANK: Record<EstimateDepth, number> = {
+  "quick-bid": 0,
+  "full-bid": 1,
+  "korban-bid": 2,
+};
+
+// -----------------------------------------------------------------------------
+// Motion - the same vocabulary as Estimate Review
+// -----------------------------------------------------------------------------
+
+function useRollingNumber(value: number, durationMs = 260) {
+  const [display, setDisplay] = useState(value);
+  const settled = useRef(value);
+
+  useEffect(() => {
+    const from = settled.current;
+    if (from === value) return;
+    let frame = 0;
+    const start = performance.now();
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - start) / durationMs);
+      setDisplay(from + (value - from) * (1 - Math.pow(1 - progress, 3)));
+      if (progress < 1) frame = requestAnimationFrame(step);
+      else { settled.current = value; setDisplay(value); }
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [value, durationMs]);
+
+  return display;
+}
+
+function KorbanMotionStyles() {
+  return (
+    <style>{`
+      @keyframes korban-scan {
+        0% { transform: translateX(-40%); opacity: 0.5; }
+        85% { opacity: 0.5; }
+        100% { transform: translateX(320%); opacity: 0; }
+      }
+      .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
+      @media (prefers-reduced-motion: reduce) {
+        .korban-scan { animation: none; opacity: 0; }
+      }
+    `}</style>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Page
+// -----------------------------------------------------------------------------
 
 export default function KorbanReviewPage() {
   const router = useRouter();
   const [elevation, setElevation] = useState<ProjectElevation | null>(null);
   const [projectName, setProjectName] = useState("");
+  const [proposalNumber, setProposalNumber] = useState("");
   const [depth, setDepth] = useState<EstimateDepth>("quick-bid");
-  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     try {
-      const e = getActiveElevation();
-      const p = getActiveProject();
-      setElevation(e);
-      setProjectName(p.projectName || "Untitled project");
-      const d = p.estimateDepth ?? "quick-bid";
-      setDepth(d);
-      // Open the depth the job is actually at; the others stay collapsed.
-      setOpen({ [d]: true });
-    } catch { /* storage unavailable */ }
+      const activeElevation = getActiveElevation();
+      const project = getActiveProject();
+      setElevation(activeElevation);
+      setProjectName(project.projectName || "Untitled project");
+      setProposalNumber(project.projectId || "");
+      setDepth(getEstimateDepth());
+    } catch {
+      // Storage unavailable - the page still renders, everything reads empty.
+    }
     setMounted(true);
   }, []);
 
-  const totals = useMemo(() => computeElevationOnlyTotals(elevation), [elevation]);
+  const elevationTotals = useMemo(() => computeElevationOnlyTotals(elevation), [elevation]);
   const courtyards = useMemo(() => computeCourtyardTotals(elevation), [elevation]);
 
   const tracedLevels = (elevation?.overlayGeometry?.fullOverlayRows ?? [])
-    .filter(r => r.points.length >= 3).length;
+    .filter((row) => row.points.length >= 3).length;
   const hasSections = (elevation?.sectionView?.wallOutline?.length ?? 0) >= 2;
 
   /** A depth is reached when the work it depends on actually exists. */
-  function reached(d: EstimateDepth): boolean {
-    if (d === "quick-bid")  return totals.areaCount > 0;
-    if (d === "full-bid")   return totals.areaCount > 0 && tracedLevels > 0;
-    return totals.areaCount > 0 && tracedLevels > 0 && hasSections;
+  function reached(id: EstimateDepth): boolean {
+    if (id === "quick-bid") return elevationTotals.areaCount > 0;
+    if (id === "full-bid") return elevationTotals.areaCount > 0 && tracedLevels > 0;
+    return elevationTotals.areaCount > 0 && tracedLevels > 0 && hasSections;
+  }
+
+  /**
+   * Counts for a tier, from that tier's own source. Quick Bid can only know
+   * what the grips measured; the deeper tiers read the quantity engine, which
+   * is populated from traced geometry. They genuinely differ, and should.
+   */
+  function countsFor(id: EstimateDepth) {
+    if (id === "quick-bid") {
+      return {
+        linearFeet: elevationTotals.linearFeet,
+        frames: elevationTotals.frameCount,
+        planks: elevationTotals.plankCount,
+        bays: elevationTotals.bayCount,
+        legs: elevationTotals.legCount,
+      };
+    }
+    const engine = elevation?.quantityEngine;
+    return {
+      linearFeet: elevation?.linearFeet ?? 0,
+      frames: engine?.frameCount ?? 0,
+      planks: engine?.plankCount ?? 0,
+      bays: engine?.bayCount ?? 0,
+      legs: engine?.legCount ?? 0,
+    };
   }
 
   if (!mounted) {
-    return <main className="flex min-h-screen items-center justify-center bg-[#070604]">
-      <p className="text-xs text-zinc-600">Loading review…</p>
-    </main>;
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#070604]">
+        <p className="font-mono text-[11px] text-zinc-600">Loading review...</p>
+      </main>
+    );
   }
 
   return (
     <main className="min-h-screen bg-[#070604] text-white">
-      <header className="sticky top-0 z-20 border-b border-white/8 bg-[#070604]/95 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[1000px] items-center gap-4 px-6 py-3">
-          <button onClick={() => router.push("/dashboard")} className="flex items-center gap-2.5">
-            <svg width="20" height="20" viewBox="0 0 44 44">
+      <KorbanMotionStyles />
+
+      {/* Header - two ways back, one way forward */}
+      <header className="sticky top-0 z-20 border-b border-zinc-900 bg-[#070604]/95 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 px-5 py-3">
+          <button onClick={() => router.push("/dashboard")} className="flex shrink-0 items-center gap-2.5">
+            <svg width="20" height="20" viewBox="0 0 44 44" aria-hidden>
               <defs>
                 <linearGradient id="kRev" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#FDBA74" /><stop offset="100%" stopColor="#F97316" />
+                  <stop offset="0%" stopColor="#FDBA74" />
+                  <stop offset="100%" stopColor="#F97316" />
                 </linearGradient>
               </defs>
               <path d="M22 4 L40 38 L4 38 Z" fill="url(#kRev)" />
               <path d="M22 4 L40 38 L22 38 Z" fill="#000" opacity="0.18" />
             </svg>
-            <span className="uppercase text-[#F97316]"
-              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "22px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}>
+            <span
+              className="uppercase text-[#F97316]"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "22px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
+            >
               Korban
             </span>
           </button>
-          <span className="text-[12px] text-zinc-500">Review</span>
-          <div className="ml-auto flex items-center gap-3">
-            <button onClick={() => router.push("/takeoff-workspace-advanced")}
-              className="text-[12px] text-zinc-400 transition hover:text-white">← Takeoff</button>
-            <button onClick={() => router.push("/estimate-review")}
-              className="rounded-xl bg-[#F97316] px-4 py-2 text-[11px] font-bold text-black transition hover:bg-[#fb923c]">
-              Complete bid →
+
+          <div className="min-w-0">
+            <p className="truncate font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-300">
+              Review
+            </p>
+            <p className="truncate font-mono text-[10px] text-zinc-600">
+              {projectName}
+              {proposalNumber && <span className="ml-2 text-zinc-700">{proposalNumber}</span>}
+            </p>
+          </div>
+
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => router.push("/takeoff-workspace-advanced")}
+              className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+            >
+              Takeoff
+            </button>
+            <button
+              onClick={() => router.push("/set-scaffold-v2")}
+              className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+            >
+              Set Scaffold
+            </button>
+            <button
+              onClick={() => router.push("/estimate-review")}
+              className="rounded-lg bg-orange-500 px-4 py-2 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
+            >
+              Complete bid
             </button>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-[1000px] px-6 py-6">
-        <h1 className="text-white" style={{ fontFamily: "Geist, sans-serif", fontSize: "22px", fontWeight: 600 }}>
-          {projectName}
-        </h1>
-        <p className="mt-1 text-[14px] text-zinc-400">
-          Three ways to read this job. Expand whichever you&apos;re pricing from.
-        </p>
+      {/* Workspace */}
+      <div className="relative mx-auto w-full max-w-[1500px] px-5 py-5">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.022]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
+            backgroundSize: "26px 26px",
+          }}
+        />
 
-        <div className="mt-6 space-y-3">
-          {DEPTHS.map(d => {
-            const isOpen = Boolean(open[d.id]);
-            const isReached = reached(d.id);
-            const isCurrent = d.id === depth;
-            const report = buildPhaseReport(elevation, d.id, totals);
+        <div className="relative">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h1
+                className="text-[30px] font-semibold uppercase leading-none tracking-[0.04em] text-white"
+                style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+              >
+                {projectName}
+              </h1>
+              <p className="mt-1.5 text-[12px] text-zinc-500">
+                The same job read three ways. What each depth knows, and what it doesn&apos;t.
+              </p>
+            </div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-600">
+              Currently at{" "}
+              <span className="text-orange-400">
+                {DEPTHS.find((item) => item.id === depth)?.name ?? depth}
+              </span>
+            </p>
+          </div>
 
-            return (
-              <section key={d.id}
-                className={`overflow-hidden rounded-xl border transition ${
-                  isCurrent ? "border-[#F97316]/40 bg-[#F97316]/[0.03]" : "border-white/10 bg-white/[0.02]"
-                }`}>
-                <button onClick={() => setOpen(o => ({ ...o, [d.id]: !o[d.id] }))}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]">
-                  <span className={`h-2 w-2 flex-shrink-0 rounded-full ${
-                    isReached ? "bg-[#F97316]" : "bg-zinc-700"
-                  }`} />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2">
-                      <span className="text-[15px] font-semibold text-white">{d.name}</span>
-                      {isCurrent && (
-                        <span className="rounded-full border border-[#F97316]/40 bg-[#F97316]/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-orange-300">
-                          current
-                        </span>
-                      )}
-                    </span>
-                    <span className="block text-[11.5px] text-zinc-500">{d.blurb}</span>
-                  </span>
-                  {isReached ? (
-                    <span className="hidden text-right sm:block">
-                      <span className="block text-[15px] font-semibold text-orange-300" style={{ fontFamily: "ui-monospace, monospace" }}>
-                        {totals.linearFeet.toLocaleString()}
-                      </span>
-                      <span className="block text-[10px] text-zinc-600">LF</span>
-                    </span>
-                  ) : (
-                    <span className="hidden text-[11px] text-zinc-600 sm:block">not reached</span>
-                  )}
-                  <span className={`text-zinc-600 transition ${isOpen ? "rotate-90" : ""}`}
-                    style={{ fontFamily: "ui-monospace, monospace" }}>›</span>
-                </button>
+          {/* Three tiers, side by side, so they can actually be compared */}
+          <div className="mt-5 grid items-start gap-3 lg:grid-cols-3">
+            {DEPTHS.map((meta) => (
+              <DepthPanel
+                key={meta.id}
+                meta={meta}
+                counts={countsFor(meta.id)}
+                report={buildPhaseReport(elevation, meta.id, elevationTotals)}
+                reached={reached(meta.id)}
+                isCurrent={meta.id === depth}
+                isBelowCurrent={DEPTH_RANK[meta.id] < DEPTH_RANK[depth]}
+                courtyardCount={courtyards.courtyardCount}
+                courtyardLinearFeet={courtyards.linearFeet}
+                onGo={() => router.push("/takeoff-workspace-advanced")}
+              />
+            ))}
+          </div>
 
-                {isOpen && (
-                  <div className="border-t border-white/8 px-4 py-4">
-                    {!isReached ? (
-                      <div>
-                        <p className="text-[13px] leading-relaxed text-zinc-400">
-                          {d.id === "full-bid"
-                            ? "No floor plan traced yet, so there's no plan geometry to review. A full bid needs at least one level traced."
-                            : d.id === "korban-bid"
-                              ? "No section views drawn yet. Sections are what let me check wall steps and setbacks against the layout."
-                              : "Nothing gripped yet. Grip the areas that need coverage on each elevation and this fills in."}
-                        </p>
-                        <button onClick={() => router.push("/takeoff-workspace-advanced")}
-                          className="mt-3 rounded-lg border border-white/15 px-3 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-[#F97316]/50 hover:text-[#F97316]">
-                          Go do that →
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <p className="text-[13px] leading-relaxed text-zinc-300">{report.covered}</p>
-
-                        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                          {[
-                            ["Frames", totals.frameCount], ["Planks", totals.plankCount],
-                            ["Bays", totals.bayCount], ["Legs", totals.legCount],
-                          ].map(([l, v]) => (
-                            <div key={l as string} className="rounded-lg border border-white/8 bg-black/40 px-3 py-2">
-                              <p className="text-[9px] uppercase tracking-wider text-zinc-600">{l}</p>
-                              <p className="mt-0.5 text-[16px] font-semibold text-zinc-100" style={{ fontFamily: "ui-monospace, monospace" }}>
-                                {Number(v).toLocaleString()}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-
-                        {courtyards.courtyardCount > 0 && (
-                          <p className="mt-2 text-[11px] text-zinc-500">
-                            Includes {courtyards.courtyardCount} courtyard{courtyards.courtyardCount > 1 ? "s" : ""} · {courtyards.linearFeet.toLocaleString()} LF
-                          </p>
-                        )}
-
-                        {report.gaps.length > 0 && (
-                          <div className="mt-4">
-                            <p className="text-[12px] text-zinc-400">What I don&apos;t know yet:</p>
-                            <ul className="mt-1.5 space-y-1.5">
-                              {report.gaps.map((g, i) => (
-                                <li key={i} className="flex gap-2 text-[12.5px] leading-relaxed text-zinc-400">
-                                  <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-amber-500/70" />
-                                  {g}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {report.nextStep && (
-                          <p className="mt-4 border-t border-white/8 pt-3 text-[12.5px] leading-relaxed text-zinc-400">
-                            {report.nextStep}
-                          </p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-              </section>
-            );
-          })}
+          <p className="mt-6 font-mono text-[10px] leading-5 tracking-[0.06em] text-zinc-700">
+            Deeper tiers reuse everything from the ones below. Nothing is entered twice.
+          </p>
         </div>
-
-        <p className="mt-8 text-zinc-700" style={{ fontFamily: "ui-monospace, monospace", fontSize: "10.5px", letterSpacing: ".06em" }}>
-          Deeper tiers reuse everything from the ones below — nothing is entered twice.
-        </p>
       </div>
     </main>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Tier panel
+// -----------------------------------------------------------------------------
+
+type Counts = {
+  linearFeet: number;
+  frames: number;
+  planks: number;
+  bays: number;
+  legs: number;
+};
+
+function DepthPanel({
+  meta, counts, report, reached, isCurrent, isBelowCurrent,
+  courtyardCount, courtyardLinearFeet, onGo,
+}: {
+  meta: DepthMeta;
+  counts: Counts;
+  report: { covered: string; gaps: string[]; nextStep?: string };
+  reached: boolean;
+  isCurrent: boolean;
+  isBelowCurrent: boolean;
+  courtyardCount: number;
+  courtyardLinearFeet: number;
+  onGo: () => void;
+}) {
+  return (
+    <section
+      className={`relative rounded-lg border p-3 transition ${
+        isCurrent
+          ? "border-orange-500/45 bg-orange-500/[0.04]"
+          : reached
+          ? "border-zinc-800 bg-[#0b0b0b]"
+          : "border-zinc-900 bg-[#080706]"
+      }`}
+    >
+      {/* Corner ticks read as instrumentation - only on tiers that hold data */}
+      {reached && (
+        <>
+          <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+          <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
+        </>
+      )}
+      {isCurrent && (
+        <span
+          aria-hidden
+          className="korban-scan pointer-events-none absolute -top-px left-0 h-px w-[36%]"
+          style={{ background: "linear-gradient(90deg,transparent,#F97316,transparent)" }}
+        />
+      )}
+
+      {/* Head */}
+      <div className="flex items-start justify-between gap-2 pb-2.5">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${reached ? "bg-orange-500" : "bg-zinc-700"}`}
+            />
+            <h2
+              className="text-[19px] font-semibold uppercase leading-none tracking-[0.05em] text-white"
+              style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+            >
+              {meta.name}
+            </h2>
+            {isCurrent && (
+              <span className="rounded border border-orange-400/45 bg-orange-400/10 px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-[0.14em] text-orange-200">
+                current
+              </span>
+            )}
+            {isBelowCurrent && (
+              <span className="font-mono text-[8px] uppercase tracking-[0.14em] text-zinc-700">
+                superseded
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-[10.5px] text-zinc-500">{meta.blurb}</p>
+        </div>
+        <div className="shrink-0 text-right">
+          <p className="font-mono text-[12px] font-bold text-zinc-300">{meta.accuracy}</p>
+          <p className="font-mono text-[8px] uppercase tracking-[0.14em] text-zinc-700">accuracy</p>
+        </div>
+      </div>
+
+      {!reached ? (
+        <div className="rounded border border-zinc-900 bg-black px-3 py-4">
+          <p className="text-[11.5px] leading-[1.6] text-zinc-500">
+            {meta.id === "full-bid"
+              ? "No floor plan traced yet, so there's no plan geometry to read. A full bid needs at least one level traced."
+              : meta.id === "korban-bid"
+              ? "No section views drawn yet. Sections are what let me check wall steps and setbacks against the layout."
+              : "Nothing gripped yet. Grip the areas that need coverage on each elevation and this fills in."}
+          </p>
+          <button
+            onClick={onGo}
+            className="mt-3 rounded border border-zinc-800 bg-[#0f0f0f] px-3 py-1.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300"
+          >
+            Go do that
+          </button>
+        </div>
+      ) : (
+        <div className="rounded border border-zinc-900 bg-black p-2.5">
+          {/* Measurements. Plain, tabular, no commentary. */}
+          <div className="flex items-baseline justify-between gap-3 border-b border-zinc-900 pb-2">
+            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+              Coverage
+            </span>
+            <span className="font-mono text-[24px] font-bold leading-none text-orange-400">
+              <RollingCount value={counts.linearFeet} />
+              <span className="ml-1.5 text-[11px] font-normal text-zinc-600">LF</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-3">
+            <CountRow label="Frames" value={counts.frames} />
+            <CountRow label="Planks" value={counts.planks} />
+            <CountRow label="Bays" value={counts.bays} />
+            <CountRow label="Legs" value={counts.legs} />
+          </div>
+
+          <p className="mt-1.5 border-t border-zinc-900 pt-1.5 font-mono text-[9px] text-zinc-700">
+            From: {meta.source}
+          </p>
+
+          {courtyardCount > 0 && (
+            <p className="mt-1 font-mono text-[9px] text-zinc-600">
+              Includes {courtyardCount} courtyard{courtyardCount > 1 ? "s" : ""} -{" "}
+              {courtyardLinearFeet.toLocaleString()} LF
+            </p>
+          )}
+
+          {/* Korban's read. Set apart on purpose - the counts above are
+              measurements, this is a judgement, and they shouldn't blur. */}
+          <div className="mt-3 rounded border-l-2 border-orange-500 bg-orange-500/[0.05] px-2.5 py-2">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <svg width="9" height="9" viewBox="0 0 44 44" aria-hidden>
+                <path d="M22 4 L40 38 L4 38 Z" fill="#F97316" />
+              </svg>
+              <span className="font-mono text-[8px] font-bold uppercase tracking-[0.18em] text-orange-400">
+                Korban reads it
+              </span>
+            </div>
+            <p className="text-[11.5px] leading-[1.55] text-zinc-300">{report.covered}</p>
+
+            {report.gaps.length > 0 && (
+              <>
+                <p className="mt-2.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+                  What I don&apos;t know yet
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {report.gaps.map((gap) => (
+                    <li key={gap} className="flex gap-1.5 text-[11px] leading-[1.5] text-zinc-400">
+                      <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-amber-500/70" />
+                      {gap}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {report.nextStep && (
+              <p className="mt-2.5 border-t border-orange-500/20 pt-2 text-[11px] leading-[1.5] text-zinc-400">
+                {report.nextStep}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RollingCount({ value }: { value: number }) {
+  const rolled = useRollingNumber(value);
+  return <>{Math.round(rolled).toLocaleString()}</>;
+}
+
+function CountRow({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-baseline justify-between border-b border-zinc-900/70 py-1">
+      <span className="text-[10.5px] text-zinc-500">{label}</span>
+      <span className="font-mono text-[12px] font-bold text-zinc-200">
+        {value > 0 ? value.toLocaleString() : <span className="text-zinc-700">-</span>}
+      </span>
+    </div>
   );
 }
