@@ -1,1895 +1,1688 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { KorbanButton, KorbanHeader, KorbanHeaderMeta, KorbanPanel, KorbanEngineeringWorkspace, KorbanWorkspaceHud, KorbanWorkspaceGrid, KorbanStatusPill, type KorbanMenuLink } from "@/components/korban";
-import {
-  calculateQuantityEngine,
-  getActiveElevation,
-  getActiveProject,
-  getActiveProjectId,
-  saveActiveElevation,
-  saveActiveProject,
-  saveElevationBreakdown,
-  setActiveProjectId,
-  type ProjectElevation,
-  type StoredElevationBreakdownRow,
-} from "@/lib/projectStore";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import { alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
+import QuickBidForm from "@/components/quick-bid-form";
+import { GuidedSteps, type GuideStep } from "@/components/guided-steps";
 
-type Point = { x: number; y: number };
-type PickTarget =
-  | { type: "full"; id: number }
-  | { type: "heightOverall"; elevation: ElevationName }
-  | null;
-type ElevationName = "North" | "South" | "East" | "West";
+// -- Types --------------------------------------------------------------------
+type PageTag        = "Floor Plan" | "Elevation View" | "Section View";
+type ActiveTab      = "floor" | "elevation" | "section";
+/** Top-level tabs are now bid depths; tools live as panels inside each. */
+type DepthTab       = "quick-bid" | "full-bid" | "korban-bid";
+type Pt             = { x: number; y: number };
+type ScaffoldWidth  = "3'" | "3'-6\"" | "5'";
 
-type FullOverlayType = "Level" | "Roof" | "Penthouse" | "Basement";
-
-type FullOverlayRow = {
-  id: number;
-  isKeyFloor: boolean;
-  overlayType: FullOverlayType;
-  level: string;
-  points: Point[];
-  closed: boolean;
-  linealFeet: number;
-  color: string;
-  pageNumber: number;
+type ScaleState = {
+  locked: boolean; label: string; pageUnitsPerFoot: number | null;
+  point1: Pt|null; point2: Pt|null; pickingPoint: 1|2|null; measurementInput: string;
 };
 
-type ElevationHeight = {
-  elevation: ElevationName;
-  overallHeightInput: string;
-  belowGradeEnabled: boolean;
-  belowGradeInput: string;
+type ExtractedPage = { id: string; pageNumber: number; tag: PageTag; thumbnail: string; scale: ScaleState; };
+
+type FloorLevel = {
+  id: string; levelName: string; isKeyFloor: boolean;
+  linealFeet: number; color: string;
+  tracePoints: Pt[]; traceClosed: boolean; traceMode: boolean; stored: boolean;
+  /**
+   * Per-level anchor point - a fixed feature (column, corner, grid
+   * intersection) that appears on every level's sheet. All levels get
+   * shifted so their reference points coincide, which is what makes
+   * floors traced from different pages stack correctly.
+   */
+  refPoint: Pt | null;
 };
 
-const elevationOptions: ElevationName[] = ["North", "East", "South", "West"];
-const overlayColors = [
-  // Row 1 — original 8 defaults
-  "#0ea5e9", "#22c55e", "#e879f9", "#facc15",
-  "#ef4444", "#14b8a6", "#8b5cf6", "#f97316",
-  // Row 2
-  "#06b6d4", "#84cc16", "#f43f5e", "#fb923c",
-  "#a3e635", "#34d399", "#818cf8", "#fbbf24",
-  // Row 3
-  "#38bdf8", "#4ade80", "#c084fc", "#fb7185",
-  "#2dd4bf", "#fde047", "#60a5fa", "#f9a8d4",
-  // Row 4
-  "#ffffff", "#d4d4d4", "#a1a1aa", "#71717a",
-  "#52525b", "#3f3f46", "#1e1e2e", "#f472b6",
-];
-const tolerancePercent = 0.08;
+type ElevGripArea = {
+  id: string; areaIndex: number;
+  rect: { x:number; y:number; w:number; h:number }|null;
+  lf: number; heightFt: number; frameTall: number; legs: number; bayCount: number;
+  stored: boolean;
+  /**
+   * Which floors this gripped region actually spans. The grip already
+   * measures the height; these say which levels that measurement
+   * corresponds to - the missing link that lets Korban derive a run's
+   * base elevation (e.g. a podium wall tagged From: Level 4 starts at
+   * whatever height the Level 1-4 grip measured). Null = untagged,
+   * which behaves exactly as before: ground to top of grip.
+   */
+  fromLevelId: string | null;
+  toLevelId: string | null;
+};
 
-const initialElevationHeights: ElevationHeight[] = elevationOptions.map(
-  (elevation) => ({
-    elevation,
-    overallHeightInput: "0'",
-    belowGradeEnabled: false,
-    belowGradeInput: "0'",
-  }),
-);
+type ElevationData = {
+  direction: string;
+  areas: ElevGripArea[];
+};
 
-const takeoffMenuLinks: KorbanMenuLink[] = [
-  { href: "/", label: "Bid Room" },
-  { href: "/projects", label: "Projects" },
-  { href: "/estimate-review", label: "Estimate Review" },
-  { href: "/backend", label: "Backend" },
-  { href: "/settings", label: "Settings" },
-];
+type FrameItem = { partNo: string; description: string; qty: number; };
 
-function distanceBetween(a: Point, b: Point) {
-  return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
+type SectionView = {
+  id: string; label: string;
+  /**
+   * topOfWallDistance is the WALL'S OWN HEIGHT in feet. The top working deck
+   * lands a worker's reach below it, which the frame engine subtracts. It is
+   * not a clearance measurement - naming it "distance" is a holdover.
+   */
+  wallOffset: number; topOfWallDistance: number;
+  frameWidth: ScaffoldWidth;
+  wallOutline: Pt[]; wallComplete: boolean;
+  /** Which side of the traced wall the scaffold sits on. Toggle appears once the wall outline is complete. */
+  scaffoldSide: "left" | "right";
+  frameMakeup: FrameItem[];
+  totalLF: number; totalLegs: number; totalFrames: number; totalPlanks: number;
+};
+
+type DraftPiece = { id: string; type: string; x: number; y: number; };
+
+const DEFAULT_SCALE: ScaleState = { locked:false, label:"", pageUnitsPerFoot:null, point1:null, point2:null, pickingPoint:null, measurementInput:"" };
+const SECTION_LABELS = ["A-A","B-B","C-C","D-D"];
+// Clockwise order
+const ELEVATION_DIRS = ["North","East","South","West"];
+
+const LEVEL_COLORS   = ["#f97316","#22c55e","#f59e0b","#a855f7"];
+
+function getFrameParts(width: ScaffoldWidth): FrameItem[] {
+  const framePartNo = width==="5'"?"FO6L":width==="3'-6\""?"FO6L42":"FO6L3";
+  const frame5PartNo = width==="5'"?"FM5":width==="3'-6\""?"FO5L42":"FO5L3";
+  const frame3PartNo = width==="5'"?"FM5":width==="3'-6\""?"FM342":"FM33";
+  return [
+    { partNo:framePartNo,  description:`6'-4" H Frame ${width}`,  qty:0 },
+    { partNo:frame5PartNo, description:`5' H Frame ${width}`,     qty:0 },
+    { partNo:frame3PartNo, description:`3' H Frame ${width}`,     qty:0 },
+    { partNo:"AL1S",       description:"Screw Jack w/ Base",      qty:0 },
+    { partNo:"BP1",        description:"Fixed Base Plate",        qty:0 },
+    { partNo:"B82",        description:"8x2 Cross Brace",         qty:0 },
+    { partNo:"GR8",        description:"8' Guard Rail",           qty:0 },
+    { partNo:"CPS",        description:"Coupling Pin",            qty:0 },
+    { partNo:"BR12L",      description:"12\" Side Bracket",       qty:0 },
+    { partNo:"BR20L",      description:"20\" Side Bracket",       qty:0 },
+    { partNo:"BR30S",      description:"30\" Side Bracket",       qty:0 },
+    { partNo:"WP10",       description:"10' Wood Plank",          qty:0 },
+  ];
 }
 
-function polylineLength(points: Point[], closed: boolean) {
-  if (points.length < 2) return 0;
+function newElevArea(areaIndex: number, direction: string): ElevGripArea {
+  return { id:`${direction}-${areaIndex}-${Date.now()}`, areaIndex, rect:null, lf:0, heightFt:0, frameTall:0, legs:0, bayCount:0, stored:false, fromLevelId:null, toLevelId:null };
+}
 
+function makeElevData(dirs: string[]): ElevationData[] {
+  return dirs.map(d => ({ direction:d, areas:[1,2,3].map(i=>newElevArea(i,d)) }));
+}
+
+/**
+ * A courtyard reuses the exact same shape as building elevations, so all
+ * the existing grip/tag logic works on it unchanged - it's just stored
+ * and totalled separately. Faces default to N/E/S/W but the estimator
+ * decides which are actually used; three walls and an open side is
+ * common, so unused faces simply never get gripped.
+ */
+type Courtyard = { id: string; name: string; faces: ElevationData[] };
+
+function makeCourtyard(index: number): Courtyard {
+  const id = `courtyard-${index}-${Date.now()}`;
+  return {
+    id,
+    name: `Courtyard ${index}`,
+    faces: ELEVATION_DIRS.map(d => ({ direction: d, areas: [1,2,3].map(i => newElevArea(i, `${id}-${d}`)) })),
+  };
+}
+
+const TAB_TAGS: Record<ActiveTab,PageTag> = { floor:"Floor Plan", elevation:"Elevation View", section:"Section View" };
+
+const menuLinks: KorbanMenuLink[] = [
+  { href:"/takeoff-workspace",        label:"Standard Takeoff"  },
+  { href:"/takeoff-workspace-aerial", label:"Aerial Takeoff"    },
+  { href:"/set-scaffold-v2",          label:"Set Scaffold"      },
+];
+
+/** Turns a width label into feet. "3'-6"" is 3.5, "5'" is 5. */
+function parseFt(v: string): number {
+  const feetInches = v.match(/(\d+)['\u2032]\s*-?\s*(\d+)/);
+  if (feetInches) return parseInt(feetInches[1]) + parseInt(feetInches[2]) / 12;
+  const n = parseFloat(v.replace(/[^0-9.]/g, ""));
+  return isFinite(n) ? n : 0;
+}
+
+// Haversine-style pixel perimeter calculation
+function calcPerimeterFt(pts: Pt[], puf: number): number {
+  if (pts.length < 2 || puf <= 0) return 0;
   let total = 0;
-  for (let index = 1; index < points.length; index += 1) {
-    total += distanceBetween(points[index - 1], points[index]);
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i+1)%pts.length];
+    total += Math.sqrt((b.x-a.x)**2 + (b.y-a.y)**2);
   }
-
-  if (closed && points.length > 2) {
-    total += distanceBetween(points[points.length - 1], points[0]);
-  }
-
-  return total;
+  return parseFloat((total / puf).toFixed(1));
 }
 
-function parseFeetInches(input: string): number | null {
-  const value = input.trim();
-  if (!value || value === "--") return null;
-
-  const normalized = value
-    .toLowerCase()
-    .replace(/feet|foot|ft/g, "'")
-    .replace(/inches|inch|in/g, '"')
-    .replace(/\s+/g, "")
-    .replace(/[–—]/g, "-");
-
-  // Handle fractional inches like 6-1/2" or 3-1/4" (no feet, just inches with fraction)
-  // Pattern: digits-digits/digits"  e.g. 6-1/2" or 3-1/4"
-  const inchFractionOnly = normalized.match(/^(\d+(?:\.\d+)?)-(\d+)\/(\d+)"?$/);
-  if (inchFractionOnly) {
-    const wholeIn = Number(inchFractionOnly[1]);
-    const num = Number(inchFractionOnly[2]);
-    const den = Number(inchFractionOnly[3]);
-    if (!Number.isNaN(wholeIn) && !Number.isNaN(num) && den !== 0) {
-      return (wholeIn + num / den) / 12;
-    }
-  }
-
-  // Handle feet + fractional inches: e.g. 6'-1/2" or 10'-3-1/4"
-  const feetWithFractionalInch = normalized.match(/^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?)-(\d+)\/(\d+))?(?:")?$/);
-  if (feetWithFractionalInch) {
-    const feet = Number(feetWithFractionalInch[1]);
-    const wholeIn = Number(feetWithFractionalInch[2] || 0);
-    const num = Number(feetWithFractionalInch[3] || 0);
-    const den = Number(feetWithFractionalInch[4] || 1);
-    if (!Number.isNaN(feet)) {
-      return feet + (wholeIn + (den !== 0 ? num / den : 0)) / 12;
-    }
-  }
-
-  // Standard: feet'inches" e.g. 10'-6" or 10'6"
-  const footMarkMatch = normalized.match(
-    /^(-?\d+(?:\.\d+)?)'(?:-?(\d+(?:\.\d+)?))?(?:")?$/,
+// -- Tooltip component --------------------------------------------------------
+function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  const [show, setShow] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>|null>(null);
+  return (
+    <div className="relative flex-1 min-w-0"
+      onMouseEnter={()=>{ timer.current=setTimeout(()=>setShow(true),900); }}
+      onMouseLeave={()=>{ if(timer.current)clearTimeout(timer.current); setShow(false); }}>
+      {children}
+      {show&&(
+        <div className="absolute left-0 bottom-full mb-1 z-50 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-[9px] text-zinc-300 shadow-xl whitespace-nowrap pointer-events-none">
+          {text}
+        </div>
+      )}
+    </div>
   );
-  if (footMarkMatch) {
-    const feet = Number(footMarkMatch[1]);
-    const inches = Number(footMarkMatch[2] || 0);
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
-
-  // Dash format: 10-6" = 10ft 6in
-  const dashMatch = normalized.match(/^(-?\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)"?$/);
-  if (dashMatch) {
-    const feet = Number(dashMatch[1]);
-    const inches = Number(dashMatch[2]);
-    if (Number.isNaN(feet) || Number.isNaN(inches)) return null;
-    return feet + inches / 12;
-  }
-
-  // Plain number (feet decimal)
-  const plain = Number(normalized.replace(/"/g, ""));
-  return Number.isNaN(plain) ? null : plain;
 }
 
-function formatFeetInches(decimalFeet: number) {
-  const safeFeet = Math.max(0, decimalFeet);
-  let feet = Math.floor(safeFeet);
-  let inches = Math.round((safeFeet - feet) * 12);
+// -- Main Page ----------------------------------------------------------------
+export default function TakeoffWorkspaceAdvancedPage() {
+  const [activeTab,      setActiveTab]      = useState<ActiveTab>("elevation");
+  // Which bid depth is open. Higher depths build on lower ones - work
+  // carries forward, never backward.
+  const [depthTab,       setDepthTab]       = useState<DepthTab>("quick-bid");
+  const [guideHidden,    setGuideHidden]    = useState(false);
+  const [pdfDoc,         setPdfDoc]         = useState<any>(null);
+  const [pdfLib,         setPdfLib]         = useState<any>(null);
+  const [pdfLoading,     setPdfLoading]     = useState(false);
+  const [currentPageNo,  setCurrentPageNo]  = useState(1);
+  const [pageNoInput,    setPageNoInput]    = useState("1");
+  const [totalPages,     setTotalPages]     = useState(0);
+  const [viewerUrl,      setViewerUrl]      = useState("");
+  const [renderingPage,  setRenderingPage]  = useState(false);
+  const [viewerZoom,     setViewerZoom]     = useState(0.65);
+  const [extractedPages, setExtractedPages] = useState<ExtractedPage[]>([]);
+  const [activeExtracted,setActiveExtracted]= useState<ExtractedPage|null>(null);
 
-  if (inches === 12) {
-    feet += 1;
-    inches = 0;
-  }
-
-  return `${feet}'-${inches}"`;
-}
-
-function getOppositeElevation(elevation: ElevationName): ElevationName | null {
-  if (elevation === "North") return "South";
-  if (elevation === "East") return "West";
-  return null;
-}
-
-function canDuplicateOpposite(elevation: ElevationName): elevation is "North" | "East" {
-  return elevation === "North" || elevation === "East";
-}
-
-function getHeightWithBelowGrade(item: ElevationHeight) {
-  const base = parseFeetInches(item.overallHeightInput) ?? 0;
-  const below = item.belowGradeEnabled ? parseFeetInches(item.belowGradeInput) ?? 0 : 0;
-  return base + below;
-}
-
-function getAverageExteriorHeight(elevationHeights: ElevationHeight[]) {
-  const values = elevationHeights
-    .map((item) => getHeightWithBelowGrade(item))
-    .filter((value) => value > 0);
-
-  if (!values.length) return 0;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function buildLevelName(type: FullOverlayType, rows: FullOverlayRow[]) {
-  const matchingNumbers = rows
-    .filter(
-      (row) =>
-        row.overlayType === type ||
-        row.level.toLowerCase().startsWith(type.toLowerCase()),
-    )
-    .map((row) => Number(row.level.replace(/[^0-9]/g, "")))
-    .filter((value) => !Number.isNaN(value) && value > 0);
-
-  const nextNumber = matchingNumbers.length
-    ? Math.max(...matchingNumbers) + 1
-    : 1;
-  return `${type} ${nextNumber}`;
-}
-
-function overlayColorFor(row: FullOverlayRow) {
-  if (row.isKeyFloor) return "#111827";
-  if (row.overlayType === "Level") return row.color || "#0ea5e9";
-  if (row.overlayType === "Roof") return row.color || "#22c55e";
-  if (row.overlayType === "Penthouse") return row.color || "#e879f9";
-  return row.color || "#facc15";
-}
-
-export default function TakeoffWorkspace() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
-  const uploadRef = useRef<HTMLInputElement | null>(null);
-
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  const [activeTool, setActiveTool] = useState("Upload PDF");
-  const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [pdfFileName, setPdfFileName] = useState("");
-  const [numPages, setNumPages] = useState(0);
-  const [pageNumber, setPageNumber] = useState(1);
-  const [pageJump, setPageJump] = useState("1");
-  const [zoom, setZoom] = useState(0.5);
-  const [pdfLoading, setPdfLoading] = useState(false);
-  const [pdfError, setPdfError] = useState("");
-
-  const [scaleMode, setScaleMode] = useState(false);
-  const [scalePoints, setScalePoints] = useState<Point[]>([]);
-  const [knownScaleFeet, setKnownScaleFeet] = useState("");
-  const [pageUnitsPerFoot, setPageUnitsPerFoot] = useState<number | null>(null);
-
-  const [overlayMode, setOverlayMode] = useState(false);
-  const [tracePoints, setTracePoints] = useState<Point[]>([]);
-  const [traceClosed, setTraceClosed] = useState(false);
-  const [overlayLockedOpen, setOverlayLockedOpen] = useState(false);
-  const [pickTarget, setPickTarget] = useState<PickTarget>(null);
-
-  const [fullOverlayRows, setFullOverlayRows] = useState<FullOverlayRow[]>([
-    {
-      id: 1,
-      isKeyFloor: true,
-      overlayType: "Level",
-      level: "Level 2",
-      points: [],
-      closed: false,
-      linealFeet: 0,
-      color: overlayColors[0],
-      pageNumber: 1,
-    },
-  ]);
-
-  const [elevationHeights, setElevationHeights] = useState<ElevationHeight[]>(
-    initialElevationHeights,
-  );
-  const [activeElevation, setActiveElevation] = useState<ElevationName>("North");
-  const [activeProjectName, setActiveProjectName] = useState("Takeoff Workspace Draft");
-  const [duplicateElevationHeights, setDuplicateElevationHeights] = useState<Record<"North" | "East", boolean>>({
-    North: false,
-    East: false,
+  const [tabScales, setTabScales] = useState<Record<ActiveTab,ScaleState>>({
+    floor:{ ...DEFAULT_SCALE }, elevation:{ ...DEFAULT_SCALE }, section:{ ...DEFAULT_SCALE },
   });
-  const [showCombinedOverlay, setShowCombinedOverlay] = useState(true);
-  const [elevationBreakdownRows, setElevationBreakdownRows] = useState<StoredElevationBreakdownRow[]>(
-    elevationOptions.map((elevation) => ({ elevation, approxLinearFeet: 0 })),
-  );
 
-  // Reference point — a single anchor point picked on the PDF that all overlays
-  // align to, so traces from different pages or sessions stack correctly
-  const [referencePoint, setReferencePoint] = useState<Point | null>(null);
-  const [referencePickMode, setReferencePickMode] = useState(false);
-  const [colorPickerOpenId, setColorPickerOpenId] = useState<number | null>(null);
+  // Floor
+  const [floorLevels,  setFloorLevels]  = useState<FloorLevel[]>([
+    { id:"main", levelName:"Level 1", isKeyFloor:true, linealFeet:0, color:"#f97316", tracePoints:[], traceClosed:false, traceMode:false, stored:false, refPoint:null },
+  ]);
+  const [activeLevel,  setActiveLevel]  = useState("main");
+  const [refPickLevelId, setRefPickLevelId] = useState<string|null>(null);
+  const [overlayStored,setOverlayStored]= useState(false);
 
-  const scalePageDistance = useMemo(() => {
-    if (scalePoints.length < 2) return 0;
-    return distanceBetween(scalePoints[0], scalePoints[1]);
-  }, [scalePoints]);
+  // Elevation
+  const [elevData,      setElevData]      = useState<ElevationData[]>(makeElevData(ELEVATION_DIRS));
+  const [selectedElev,  setSelectedElev]  = useState("North");
+  const [selectedArea,  setSelectedArea]  = useState(1);
+  const [gripMode,      setGripMode]      = useState(false);
+  const [gripStart,     setGripStart]     = useState<Pt|null>(null);
+  const [gripCurrent,   setGripCurrent]   = useState<Pt|null>(null);
+  const [elevStored,    setElevStored]    = useState(false);
+  const [dupSouth,      setDupSouth]      = useState(false);
+  const [dupWest,       setDupWest]       = useState(false);
+  // Courtyards - interior voids gripped like elevations but stored and
+  // totalled separately. activeZone is "building" (shown as
+  // "Exterior" in the UI) or a courtyard id.
+  const [courtyards,    setCourtyards]    = useState<Courtyard[]>([]);
+  const [activeZone,    setActiveZone]    = useState<string>("building");
+  const [includeCourtyards, setIncludeCourtyards] = useState(true);
 
-  const tracePageLength = useMemo(
-    () => polylineLength(tracePoints, traceClosed || overlayLockedOpen),
-    [tracePoints, traceClosed, overlayLockedOpen],
-  );
+  // Section
+  const [sections,        setSections]        = useState<SectionView[]>([]);
+  const [activeSection,   setActiveSection]   = useState("aa");
+  const [wallOutlineMode, setWallOutlineMode] = useState(false);
+  const [sectionStored,   setSectionStored]   = useState(false);
 
-  const tracedLinealFeet = useMemo(() => {
-    if (!pageUnitsPerFoot || pageUnitsPerFoot <= 0) return 0;
-    return tracePageLength / pageUnitsPerFoot;
-  }, [tracePageLength, pageUnitsPerFoot]);
-
-  const keyFloor = useMemo(
-    () => fullOverlayRows.find((row) => row.isKeyFloor) ?? fullOverlayRows[0],
-    [fullOverlayRows],
-  );
-  const keyFloorLf = keyFloor?.linealFeet ?? 0;
+  const [projectName, setProjectName]   = useState("");
+  const [backendSettings, setBackendSettings] = useState<any>(null);
+  // Estimate depth gates which tabs are available. Quick Bid is
+  // elevations-only; floor plans and sections unlock further up.
+  const [estimateDepth, setEstimateDepthState] = useState<EstimateDepth>("korban-bid");
+  const fileRef  = useRef<HTMLInputElement>(null);
+  const imgRef   = useRef<HTMLImageElement>(null);
+  const viewerRef= useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setActiveProjectId(getActiveProjectId());
-    setActiveProjectName(getActiveProject().projectName || "Takeoff Workspace Draft");
-
-    const storedElevation = getActiveElevation();
-    if (storedElevation.elevationBreakdown && storedElevation.elevationBreakdown.length > 0) {
-      setElevationBreakdownRows(storedElevation.elevationBreakdown);
+    try {
+      setProjectName(getActiveProject().projectName||"");
+      const depth = getEstimateDepth();
+      setEstimateDepthState(depth);
+      setDepthTab(depth as DepthTab);
+      try{ setGuideHidden(localStorage.getItem("korbanGuideHidden")==="1"); }catch{}
+      setActiveTab(depth === "quick-bid" ? "elevation" : "floor");
+      const bs = getBackendSettings();
+      setBackendSettings(bs);
+      const wallOff = bs?.scaffold?.wallOffset ?? 1;
+      // Top of Wall is the wall's own height. The top working deck lands a
+      // worker's reach below it, which the frame engine subtracts - seeding
+      // this with the reach height made every section one frame tall.
+      const topOfWall = getActiveElevation()?.wallHeight ?? 0;
+      const fw: ScaffoldWidth = "3'";
+      setSections([{ id:"aa", label:"A-A", wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+    } catch {
+      setSections([{ id:"aa", label:"A-A", wallOffset:1, topOfWallDistance:0, frameWidth:"3'", wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts("3'"), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     }
   }, []);
 
-  function buildWorkspaceElevation(
-    elevation: ElevationName,
-    heights: ElevationHeight[] = elevationHeights,
-    overlayRows: FullOverlayRow[] = fullOverlayRows,
-  ): ProjectElevation {
-    const height = heights.find((item) => item.elevation === elevation) ?? heights[0];
-    const levelRow = overlayRows.find((row) => row.isKeyFloor) ?? overlayRows[0];
-    const currentKeyFloorLf = levelRow?.linealFeet ?? 0;
-    const enteredWallHeight = height ? getHeightWithBelowGrade(height) : 0;
-    const linearFeet = Math.round(currentKeyFloorLf);
-    const wallHeight = enteredWallHeight || getAverageExteriorHeight(heights);
-    const backendScaffoldDefaults = getBackendSettings().scaffold;
-    const scaffoldInput = {
-      scaffoldWidth: 3,
-      standardBayLength: 10,
-      frameHeight: 6 + 4 / 12,
-      plankCountPerBay: 2,
-      bracePattern: "Every Bay",
-      wallOffset: 1,
-    };
-    const quantityEngine = calculateQuantityEngine({
-      linearFeet,
-      wallHeight,
-      ...scaffoldInput,
-      workerReachHeight: backendScaffoldDefaults.workerReachHeight,
-    });
-    const scale = {
-      keyFloorLf: currentKeyFloorLf,
-      source: "Not Set",
-      pageUnitsPerFoot,
-      scalePoints,
-      knownScaleFeet,
-    };
-    const activeFullOverlayPoints = levelRow?.points ?? [];
-    const overlayGeometry = {
-      elevationName: elevation,
-      levelName: levelRow?.level || "Main Level",
-      tracedPerimeter: activeFullOverlayPoints,
-      overlayPoints: activeFullOverlayPoints,
-      wallSegments: [],
-      referencePoints: scalePoints,
-      elevationPoints: [],
-      fullOverlayRows: overlayRows,
-      elevationRefs: [],
-      elevationHeights: heights,
-      scale,
-    };
-
-    return {
-      elevationId: `${elevation.toLowerCase()}-elevation`,
-      elevationName: elevation,
-      levelName: overlayGeometry.levelName,
-      linearFeet,
-      wallHeight,
-      phase: "Main",
-      mobilization: "Base Bid",
-      overlayGeometry,
-      scale,
-      scaffoldInput,
-      quantityEngine,
-      sectionView: {
-        frameMakeup: "5 x 6'-4\" + 1 x 5'-0\" + 1 x 3'-0\"",
-        selectedRun: `Run ${elevation.slice(0, 1)}-01`,
-        wallOffset: scaffoldInput.wallOffset,
-        sectionType: "A-A",
-      },
-    };
+  async function getPdfLib() {
+    if (pdfLib) return pdfLib;
+    const lib = await import("pdfjs-dist/legacy/build/pdf.mjs") as any;
+    lib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs",import.meta.url).toString();
+    setPdfLib(lib); return lib;
   }
 
-  function saveWorkspaceElevation(
-    elevation: ElevationName = activeElevation,
-    heights: ElevationHeight[] = elevationHeights,
-    overlayRows: FullOverlayRow[] = fullOverlayRows,
-  ) {
-    const project = getActiveProject();
-    const nextElevation = buildWorkspaceElevation(elevation, heights, overlayRows);
-    if (!nextElevation.linearFeet || nextElevation.linearFeet <= 0) {
-      console.warn("TAKEOFF SAVING LF: skipped invalid LF", nextElevation.linearFeet);
-      return;
-    }
-    console.log("TAKEOFF SAVING LF:", nextElevation.linearFeet);
-    saveActiveProject({
-      ...project,
-      projectName: project.projectName || "Takeoff Workspace Draft",
-      estimator: project.estimator || "H. Pierre",
-    });
-    saveActiveElevation(nextElevation);
-    console.log("VERIFY AFTER USER SAVE", getActiveElevation());
+  async function renderPage(pdf:any, n:number, sc:number): Promise<string> {
+    const page=await pdf.getPage(n);
+    const vp=page.getViewport({ scale:sc });
+    const canvas=document.createElement("canvas");
+    canvas.width=vp.width; canvas.height=vp.height;
+    const ctx=canvas.getContext("2d")!;
+    ctx.fillStyle="#18181b"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    await page.render({ canvasContext:ctx, viewport:vp }).promise;
+    return canvas.toDataURL("image/jpeg",0.82);
   }
 
-  async function handlePdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+  // Real fit - calculates zoom from image natural size vs container
+  function fitToViewer() {
+    if (!imgRef.current || !viewerRef.current) return;
+    const containerRect = viewerRef.current.getBoundingClientRect();
+    const vw = containerRect.width - 64, vh = containerRect.height - 64;
+    const iw = imgRef.current.naturalWidth, ih = imgRef.current.naturalHeight;
+    if (!iw || !ih || vw <= 0 || vh <= 0) { setViewerZoom(0.65); return; }
+    const fit = Math.min(vw / iw, vh / ih);
+    setViewerZoom(fit > 0 && isFinite(fit) ? fit : 0.65);
+  }
+
+  // Pages open at the 65% default; use the "Fit" button to fit manually.
+  function handleImgLoad() {}
+
+  const handleFile = useCallback(async (file:File) => {
     if (!file) return;
-
-    if (file.type !== "application/pdf") {
-      alert("Please upload a PDF file.");
-      return;
-    }
-
-    setPdfLoading(true);
-    setPdfError("");
-    setPdfFileName(file.name);
-    setPageNumber(1);
-    setPageJump("1");
-    setScalePoints([]);
-    setPageUnitsPerFoot(null);
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setShowCombinedOverlay(true);
-
+    const isImg=file.type.startsWith("image/"), isPdf=file.type==="application/pdf";
+    if (!isImg&&!isPdf) return;
+    setPdfLoading(true); setViewerUrl(""); setPdfDoc(null);
+    setExtractedPages([]); setActiveExtracted(null); setCurrentPageNo(1); setPageNoInput("1");
     try {
-      // Polyfill Promise.withResolvers for pdfjs-dist v5 compatibility
-      if (typeof Promise.withResolvers === "undefined") {
-        (Promise as any).withResolvers = function () {
-          let resolve: (value: any) => void;
-          let reject: (reason?: any) => void;
-          const promise = new Promise((res, rej) => {
-            resolve = res;
-            reject = rej;
-          });
-          return { promise, resolve: resolve!, reject: reject! };
-        };
-      }
-
-      const pdfjsLib = await import("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.legacy.min.mjs";
-
-      const arrayBuffer = await file.arrayBuffer();
-      const loadedPdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-      setPdfDoc(loadedPdf);
-      setNumPages(loadedPdf.numPages);
-      setActiveTool("Scale");
-      setScaleMode(true);
-      setOverlayMode(false);
-    } catch (error) {
-      console.error("PDF load failed:", error);
-      let message = "Unknown error";
-      if (error instanceof Error) {
-        message = `${error.name}: ${error.message}`;
-      } else if (typeof error === "string") {
-        message = error;
+      if (isImg) {
+        const url=URL.createObjectURL(file);
+        setViewerUrl(url); setTotalPages(1);
       } else {
-        try { message = JSON.stringify(error); } catch { message = String(error); }
+        const lib=await getPdfLib();
+        const buf=await file.arrayBuffer();
+        const pdf=await lib.getDocument({ data:buf }).promise;
+        setPdfDoc(pdf); setTotalPages(pdf.numPages);
+        setViewerUrl(await renderPage(pdf,1,1.2));
       }
-      setPdfError(`Could not load PDF: ${message}`);
-      setPdfDoc(null);
-    } finally {
-      setPdfLoading(false);
-    }
+    } catch(e) { console.error(e); } finally { setPdfLoading(false); }
+  },[pdfLib]);
+
+  async function goToPage(n:number) {
+    if (!pdfDoc||renderingPage) return;
+    const p=Math.max(1,Math.min(n,totalPages));
+    setCurrentPageNo(p); setPageNoInput(String(p)); setRenderingPage(true);
+    try { setViewerUrl(await renderPage(pdfDoc,p,1.2)); }
+    catch {} finally { setRenderingPage(false); }
   }
 
-  const renderTaskRef = useRef<any>(null);
-  const renderIdRef = useRef<number>(0);
-
+  // Arrow-key page navigation - left / right step through plan pages, same as
+  // the toolbar's chevron buttons. Ignored while typing in an input/textarea
+  // so it doesn't hijack normal text editing (e.g. the measurement input,
+  // level name fields).
   useEffect(() => {
-    const renderId = ++renderIdRef.current;
-
-    async function renderPdfPage() {
-      if (!pdfDoc || !canvasRef.current) return;
-
-      // Cancel any in-progress render before starting a new one
-      if (renderTaskRef.current) {
-        try { renderTaskRef.current.cancel(); } catch {}
-        renderTaskRef.current = null;
-      }
-
-      // Capture zoom/page at the time this render started
-      const renderZoom = zoom;
-      const renderPage = pageNumber;
-
-      const page = await pdfDoc.getPage(renderPage);
-
-      // Stale check — if a newer render started while we awaited getPage, abort
-      if (renderId !== renderIdRef.current) return;
-
-      const viewport = page.getViewport({ scale: renderZoom });
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const context = canvas.getContext("2d");
-      if (!context) return;
-
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      context.clearRect(0, 0, canvas.width, canvas.height);
-
-      const renderTask = page.render({ canvasContext: context, viewport });
-      renderTaskRef.current = renderTask;
-
-      try {
-        await renderTask.promise;
-      } catch (error: any) {
-        if (error?.name !== "RenderingCancelledException") {
-          console.error("PDF render error:", error);
-        }
-      } finally {
-        if (renderId === renderIdRef.current) {
-          renderTaskRef.current = null;
-        }
-      }
+    function onKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (!pdfDoc || totalPages <= 1) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); goToPage(currentPageNo + 1); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); goToPage(currentPageNo - 1); }
     }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pdfDoc, totalPages, currentPageNo, renderingPage]);
 
-    renderPdfPage();
-  }, [pdfDoc, pageNumber, zoom]);
-
-  function activateTool(tool: string) {
-    if (tool === "Set Scaffold") {
-      saveWorkspaceElevation(activeElevation);
-      window.location.href = "/set-scaffold";
-      return;
-    }
-
-    if (tool === "Frame Configuration") {
-      setActiveTool(tool);
-      setScaleMode(false);
-      setOverlayMode(false);
-      return;
-    }
-
-    setActiveTool(tool);
-    setScaleMode(tool === "Scale");
-    setOverlayMode(tool === "Overlay" && Boolean(pickTarget));
+  async function extractCurrentPage() {
+    if (!viewerUrl) return;
+    const tag=TAB_TAGS[activeTab];
+    if (extractedPages.find(p=>p.pageNumber===currentPageNo&&p.tag===tag)) return;
+    let thumb=viewerUrl;
+    if (pdfDoc) thumb=await renderPage(pdfDoc,currentPageNo,0.18);
+    const pg:ExtractedPage = { id:`${activeTab}-${currentPageNo}`, pageNumber:currentPageNo, tag, thumbnail:thumb, scale:{...tabScales[activeTab]} };
+    setExtractedPages(prev=>[...prev,pg]);
+    setActiveExtracted(pg);
   }
 
-  // FIX: Correct click coordinate calculation accounting for canvas
-  // container padding (p-4 = 16px) and scroll position
-  function getPagePointFromClick(event: React.MouseEvent<HTMLDivElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-
-    const rect = canvas.getBoundingClientRect();
-    const renderedX = event.clientX - rect.left;
-    const renderedY = event.clientY - rect.top;
-
-    if (
-      renderedX < 0 ||
-      renderedY < 0 ||
-      renderedX > rect.width ||
-      renderedY > rect.height
-    )
-      return null;
-
-    // Divide by zoom to convert from screen pixels back to PDF page units
-    return { x: renderedX / zoom, y: renderedY / zoom };
-  }
-
-  function handleWorkspaceClick(event: React.MouseEvent<HTMLDivElement>) {
-    const point = getPagePointFromClick(event);
-    if (!point) return;
-
-    // Reference point pick mode — single click sets anchor
-    if (referencePickMode) {
-      setReferencePoint(point);
-      setReferencePickMode(false);
-      return;
-    }
-
-    if (!scaleMode && !overlayMode) return;
-
-    if (scaleMode) {
-      setScalePoints((current) =>
-        current.length >= 2 ? [point] : [...current, point],
-      );
-    }
-
-    if (overlayMode && !traceClosed && !overlayLockedOpen && pickTarget) {
-      setTracePoints((current) => [...current, point]);
-    }
-  }
-
-  function calibrateScale() {
-    const feet = parseFeetInches(knownScaleFeet);
-
-    if (scalePoints.length < 2) {
-      alert("Click two points on the plan first.");
-      return;
-    }
-
-    if (!feet || feet <= 0) {
-      alert(`Enter the known length in feet and inches, like 20'-6" or 20-6.`);
-      return;
-    }
-
-    setPageUnitsPerFoot(scalePageDistance / feet);
-    setScalePoints([]);
-    setScaleMode(false);
-    setActiveTool("Overlay");
-    setOverlayMode(false);
-  }
-
-  function goToPage() {
-    const target = Number(pageJump);
-
-    if (!target || target < 1 || target > numPages) {
-      alert(`Enter a page number between 1 and ${numPages}.`);
-      return;
-    }
-
-    setPageNumber(target);
-  }
-
-  function startPick(target: PickTarget) {
-    if (!pdfDoc) {
-      alert("Upload a PDF first.");
-      return;
-    }
-
-    if (!pageUnitsPerFoot) {
-      alert("Set scale before picking points.");
-      return;
-    }
-
-    setPickTarget(target);
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setOverlayMode(true);
-    setScaleMode(false);
-    setActiveTool("Overlay");
-  }
-
-  function closePick() {
-    if (!pickTarget) return;
-
-    if (pickTarget.type === "full") {
-      if (tracePoints.length < 3) {
-        alert("Select at least 3 points before closing a full overlay.");
-        return;
-      }
-      setTraceClosed(true);
-      setOverlayLockedOpen(false);
-    }
-
-    if (pickTarget.type === "heightOverall") {
-      if (tracePoints.length < 2) {
-        alert("Select start and close points first.");
-        return;
-      }
-      setOverlayLockedOpen(true);
-      setTraceClosed(false);
-    }
-
-    setOverlayMode(false);
-    setActiveTool("Overlay");
-  }
-
-  function clearPick() {
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setOverlayMode(false);
-    setPickTarget(null);
-  }
-
-  function undoLastPoint() {
-    setTracePoints((current) => current.slice(0, -1));
-  }
-
-  function storePick() {
-    if (!pickTarget) {
-      alert("Select a dedicated start button first.");
-      return;
-    }
-
-    if (tracePoints.length < 2) {
-      alert("Pick start and close points before storing.");
-      return;
-    }
-
-    if (pickTarget.type === "full") {
-      const nextFullOverlayRows = fullOverlayRows.map((row) =>
-        row.id === pickTarget.id
-          ? {
-              ...row,
-              points: [...tracePoints],
-              closed: traceClosed,
-              linealFeet: tracedLinealFeet,
-              pageNumber,
-            }
-          : row,
-      );
-      setFullOverlayRows(nextFullOverlayRows);
-      saveWorkspaceElevation(activeElevation, elevationHeights, nextFullOverlayRows);
-    }
-
-    if (pickTarget.type === "heightOverall") {
-      const heightInput = formatFeetInches(tracedLinealFeet);
-      updateElevationHeight(pickTarget.elevation, { overallHeightInput: heightInput });
-    }
-
-    setTracePoints([]);
-    setTraceClosed(false);
-    setOverlayLockedOpen(false);
-    setOverlayMode(false);
-    setPickTarget(null);
-  }
-
-  function clearScale() {
-    setScalePoints([]);
-    setKnownScaleFeet("");
-    setPageUnitsPerFoot(null);
-  }
-
-  function updateElevationBreakdownRow(elevation: ElevationName, approxLinearFeet: number) {
-    setElevationBreakdownRows((current) =>
-      current.map((row) => (row.elevation === elevation ? { ...row, approxLinearFeet } : row)),
-    );
-  }
-
-  function storeElevationBreakdownRow(elevation: ElevationName) {
-    saveElevationBreakdown(elevationBreakdownRows);
-  }
-
-  function addFullOverlayRow(type: FullOverlayType = "Level") {
-    setFullOverlayRows((current) => [
-      ...current,
-      {
-        id: Date.now(),
-        isKeyFloor: false,
-        overlayType: type,
-        level: buildLevelName(type, current),
-        points: [],
-        closed: false,
-        linealFeet: 0,
-        color: overlayColors[current.length % overlayColors.length],
-        pageNumber,
-      },
-    ]);
-  }
-
-  function updateFullOverlayRow(id: number, updates: Partial<FullOverlayRow>) {
-    setFullOverlayRows((current) =>
-      current.map((row) => {
-        if (row.id !== id)
-          return updates.isKeyFloor ? { ...row, isKeyFloor: false } : row;
-        const nextRow = { ...row, ...updates };
-        return updates.isKeyFloor ? { ...nextRow, color: "#111827" } : nextRow;
-      }),
-    );
-  }
-
-  function removeFullOverlayRow(id: number) {
-    setFullOverlayRows((current) => {
-      if (current.length <= 1) return current;
-      const filtered = current.filter((row) => row.id !== id);
-      if (!filtered.some((row) => row.isKeyFloor)) {
-        return filtered.map((row, index) =>
-          index === 0 ? { ...row, isKeyFloor: true } : row,
-        );
-      }
-      return filtered;
-    });
-  }
-
-  function updateElevationHeight(
-    elevation: ElevationName,
-    updates: Partial<ElevationHeight>,
-  ) {
-    setElevationHeights((current) =>
-      current.map((item) =>
-        item.elevation === elevation ? { ...item, ...updates } : item,
-      ),
-    );
-  }
-
-  function storeManualOverallHeight(elevation: ElevationName) {
-    const current = elevationHeights.find((item) => item.elevation === elevation);
-    if (!current) return;
-
-    const parsed = parseFeetInches(current.overallHeightInput);
-
-    if (parsed === null || parsed < 0) {
-      alert(`Enter ${elevation} height as feet and inches, like 42'-6" or 42'6".`);
-      return;
-    }
-
-    const nextItem = { ...current, overallHeightInput: formatFeetInches(parsed) };
-    updateElevationHeight(elevation, { overallHeightInput: nextItem.overallHeightInput });
-
-    // Duplicate to opposite if checked
-    const opposite = getOppositeElevation(elevation);
-    if (
-      canDuplicateOpposite(elevation) &&
-      duplicateElevationHeights[elevation] &&
-      opposite
-    ) {
-      updateElevationHeight(opposite, {
-        overallHeightInput: nextItem.overallHeightInput,
-        belowGradeEnabled: nextItem.belowGradeEnabled,
-        belowGradeInput: nextItem.belowGradeInput,
-      });
-    }
-
-    saveWorkspaceElevation(
-      elevation,
-      elevationHeights.map((item) => (item.elevation === elevation ? nextItem : item)),
-    );
-  }
-
-  // Store All Heights — builds a complete updated heights array for all
-  // four elevations at once and saves in a single call so nothing is lost
-  function storeAllHeights() {
-    const updatedHeights: typeof elevationHeights = elevationOptions.map((elev) => {
-      const current = elevationHeights.find((item) => item.elevation === elev);
-      if (!current) return elevationHeights.find((item) => item.elevation === elev)!;
-      const parsed = parseFeetInches(current.overallHeightInput);
-      if (parsed === null || parsed < 0) return current;
-      return { ...current, overallHeightInput: formatFeetInches(parsed) };
-    });
-
-    // Apply duplicate logic
-    (["North", "East"] as const).forEach((elev) => {
-      if (duplicateElevationHeights[elev]) {
-        const opposite = getOppositeElevation(elev);
-        if (opposite) {
-          const source = updatedHeights.find((h) => h.elevation === elev);
-          if (source) {
-            const idx = updatedHeights.findIndex((h) => h.elevation === opposite);
-            if (idx >= 0) {
-              updatedHeights[idx] = {
-                ...updatedHeights[idx],
-                overallHeightInput: source.overallHeightInput,
-                belowGradeEnabled: source.belowGradeEnabled,
-                belowGradeInput: source.belowGradeInput,
-              };
-            }
-          }
-        }
-      }
-    });
-
-    setElevationHeights(updatedHeights);
-    // Save using active elevation but pass ALL updated heights so all flow downstream
-    saveWorkspaceElevation(activeElevation, updatedHeights, fullOverlayRows);
-  }
-
-  function getActivePickColor() {
-    if (pickTarget?.type === "full") {
-      const row = fullOverlayRows.find((item) => item.id === pickTarget.id);
-      return row ? overlayColorFor(row) : "#f97316";
-    }
-    if (pickTarget?.type === "heightOverall") return "#facc15";
-    return "#f97316";
-  }
-
-  function saveToEstimateReview() {
-    const payload = { keyFloorLf, elevationHeights };
-    const activeProjectId = getActiveProjectId();
-    const sharedElevation = buildWorkspaceElevation(activeElevation);
-    const totalLinearFeet = sharedElevation.linearFeet;
-    const bays = sharedElevation.quantityEngine.bayCount;
-    const legs = sharedElevation.quantityEngine.legCount;
-    const jumps = sharedElevation.quantityEngine.jumps;
-    const frames = sharedElevation.quantityEngine.frameCount;
-    const planks = sharedElevation.quantityEngine.plankCount;
-    const truckLoads = planks > 0 ? Math.ceil(planks / 150) : 0;
-    const tripCount = truckLoads > 0 ? Math.max(1, Math.ceil(truckLoads / 2)) : 0;
-    const estimateDraft = {
-      projectId: activeProjectId,
-      projectName: "Takeoff Workspace Draft",
-      projectAddress: "",
-      customer: "",
-      contactName: "",
-      contactEmail: "",
-      contactPhone: "",
-      estimator: "H. Pierre",
-      bidDate: new Date().toLocaleDateString("en-US"),
-      proposalNumber: `KRB-${Date.now()}`,
-      projectType: "Frame Scaffold",
-      unionStatus: "Union",
-      totalLinearFeet,
-      bays,
-      legs,
-      jumps,
-      frames,
-      planks,
-      crossBraces: sharedElevation.quantityEngine.crossBraceCount,
-      guardrails: sharedElevation.quantityEngine.guardrailCount,
-      basePlates: sharedElevation.quantityEngine.basePlateCount,
-      screwJacks: sharedElevation.quantityEngine.screwJackCount,
-      erectDays: 0,
-      dismantleDays: 0,
-      truckLoads,
-      deliveryTrips: tripCount,
-      pickupTrips: tripCount,
-      source: "takeoff-workspace",
-      updatedAt: new Date().toISOString(),
-      schemaVersion: 1,
-      takeoff: { ...payload, fullOverlayRows },
-    };
-
-    let storedProjectEstimates: Record<string, typeof estimateDraft> = {};
+  async function loadExtracted(pg:ExtractedPage) {
+    setActiveExtracted(pg);
+    if (!pdfDoc) return;
+    setCurrentPageNo(pg.pageNumber); setPageNoInput(String(pg.pageNumber)); setRenderingPage(true);
     try {
-      const existing = localStorage.getItem("korbanProjectEstimates_v1");
-      const parsed = existing ? JSON.parse(existing) : {};
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        storedProjectEstimates = parsed;
-      }
-    } catch {
-      storedProjectEstimates = {};
+      setViewerUrl(await renderPage(pdfDoc,pg.pageNumber,1.2));
+      // Only restore this page's saved scale if it was actually locked when
+      // extracted, and only when the tab doesn't already have a scale set.
+      // Previously this overwrote unconditionally, so clicking a thumbnail
+      // that had been extracted before scale was set would silently wipe
+      // the scale you'd just locked - the "scale doesn't persist" bug.
+      setTabScales(prev=>{
+        const current = prev[activeTab];
+        if (current?.locked) return prev;
+        if (!pg.scale?.locked) return prev;
+        return { ...prev, [activeTab]: pg.scale };
+      });
+    } catch {} finally { setRenderingPage(false); }
+  }
+
+  // -- Scale ------------------------------------------------------------------
+  const scale=tabScales[activeTab];
+  function setScale(u:Partial<ScaleState>) { setTabScales(p=>({...p,[activeTab]:{...p[activeTab],...u}})); }
+
+  function getImgPt(e:React.MouseEvent): Pt|null {
+    if (!imgRef.current) return null;
+    const r=imgRef.current.getBoundingClientRect();
+    return { x:(e.clientX-r.left)/viewerZoom, y:(e.clientY-r.top)/viewerZoom };
+  }
+
+  function lockScale() {
+    if (!scale.point1||!scale.point2||!scale.measurementInput) return;
+    const dx=scale.point2.x-scale.point1.x, dy=scale.point2.y-scale.point1.y;
+    const px=Math.sqrt(dx*dx+dy*dy);
+    const ft=parseFloat(scale.measurementInput.replace(/[^0-9.]/g,""));
+    if (!ft||ft<=0) return;
+    setScale({ locked:true, pageUnitsPerFoot:px/ft, label:scale.measurementInput, pickingPoint:null, point1:null, point2:null });
+  }
+
+  // -- Elevation grip helpers -------------------------------------------------
+  /**
+   * Derives how high off the ground a run tagged "From: <level>" starts,
+   * by summing the measured heights of grips that cover the levels below
+   * it. This is the whole point of the From/To tagging: the grips already
+   * measure heights, the tags say which floors those measurements cover,
+   * so a podium wall tagged From: Level 4 learns it starts 32' up from
+   * the Level 1-4 grip's own measurement - no height typed anywhere.
+   *
+   * Returns 0 for untagged grips or anything starting at the lowest
+   * level, which preserves today's behaviour (ground to top of grip).
+   * Returns null when a level below is referenced but never gripped -
+   * per the "no grip, no coverage" rule, that's surfaced to the user
+   * rather than guessed at.
+   */
+  function deriveRunBaseFt(area: ElevGripArea, areas: ElevGripArea[]): number | null {
+    if (!area.fromLevelId) return 0;
+    const startIdx = floorLevels.findIndex(l => l.id === area.fromLevelId);
+    if (startIdx <= 0) return 0; // lowest level (or unknown) starts at grade
+    const levelsBelow = floorLevels.slice(0, startIdx).map(l => l.id);
+    let base = 0;
+    for (const levelId of levelsBelow) {
+      // Find a gripped area whose tagged range covers this level.
+      const covering = areas.find(a => {
+        if (!a.fromLevelId || !a.toLevelId || !a.rect) return false;
+        const f = floorLevels.findIndex(l => l.id === a.fromLevelId);
+        const t = floorLevels.findIndex(l => l.id === a.toLevelId);
+        const i = floorLevels.findIndex(l => l.id === levelId);
+        return f >= 0 && t >= 0 && i >= f && i < t;
+      });
+      if (!covering) return null; // no grip covering that level - can't know
+      const span = Math.max(1,
+        floorLevels.findIndex(l => l.id === covering.toLevelId) -
+        floorLevels.findIndex(l => l.id === covering.fromLevelId));
+      base += covering.heightFt / span; // even split across the levels it spans
     }
-
-    saveWorkspaceElevation(activeElevation);
-    localStorage.setItem("korbanTakeoffHub", JSON.stringify(payload));
-    localStorage.setItem(
-      "korbanProjectEstimates_v1",
-      JSON.stringify({ ...storedProjectEstimates, [activeProjectId]: estimateDraft }),
-    );
-    window.location.href = "/set-scaffold";
+    return parseFloat(base.toFixed(2));
   }
 
-  function drawOverlayPolyline(
-    points: Point[],
-    closed: boolean,
-    color: string,
-    keyPrefix: string,
-    dashed = false,
-  ) {
-    if (points.length < 2) return null;
-    const ox = canvasRef.current?.offsetLeft ?? 32;
-    const oy = canvasRef.current?.offsetTop ?? 32;
-
-    return (
-      <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full">
-        {points.map((point, index) => {
-          if (index === 0) return null;
-          const previous = points[index - 1];
-          return (
-            <line
-              key={`${keyPrefix}-line-${index}`}
-              x1={previous.x * zoom + ox}
-              y1={previous.y * zoom + oy}
-              x2={point.x * zoom + ox}
-              y2={point.y * zoom + oy}
-              stroke={color}
-              strokeWidth="3"
-              strokeDasharray={dashed ? "10 8" : undefined}
-            />
-          );
-        })}
-        {closed && points.length > 2 && (
-          <line
-            x1={points[points.length - 1].x * zoom + ox}
-            y1={points[points.length - 1].y * zoom + oy}
-            x2={points[0].x * zoom + ox}
-            y2={points[0].y * zoom + oy}
-            stroke={color}
-            strokeWidth="3"
-            strokeDasharray={dashed ? "10 8" : undefined}
-          />
-        )}
-      </svg>
-    );
+  function calcGripArea(w:number, h:number, puf:number): Partial<ElevGripArea> {
+    const lf=parseFloat((w/puf).toFixed(1));
+    const heightFt=parseFloat((h/puf).toFixed(1));
+    const reach=backendSettings?.scaffold?.workerReachHeight??6;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
+    const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
+    // Same frame engine the rest of the app uses, so a grip can't disagree
+    // with Set Scaffold about how many frames a leg takes.
+    const makeup=computeFrameMakeup(Math.max(0, heightFt-reach), jackMax);
+    const frameTall=Math.max(1, makeup.frameTall);
+    const bayCount=Math.ceil(lf/bayLen);
+    const legs=bayCount+1;
+    return { lf, heightFt, frameTall, legs, bayCount };
   }
+
+  function duplicateElevation(from:string, to:string) {
+    const src=elevData.find(e=>e.direction===from);
+    if (!src) return;
+    const next=elevData.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:false})) }:ed);
+    setElevData(next);
+    // Persist immediately with the fresh array - duplicating and then
+    // needing a separate Store click afterward (which could read stale
+    // state) was the "have to click Store twice" bug.
+    storeElevations(next);
+  }
+
+  // -- Section auto-populate inventory ----------------------------------------
+  /**
+   * Quantities for one section, counted the way the material audit
+   * established: braces, planks, guardrails and coupling pins all repeat at
+   * every jump. Counting them once at ground level - which is what this did
+   * before - understated each by roughly the jump count.
+   *
+   * Jumps come from the same frame-makeup engine Set Scaffold and Estimate
+   * Review use, so a section can never disagree with them about how tall the
+   * run is. Rules come from Backend so each company can set its own standard.
+   */
+  function autoPopulateSectionInventory(secId:string, wallPts:Pt[], puf:number|null) {
+    if (!puf||wallPts.length<2) return;
+    let totalLF=0;
+    for (let i=0;i<wallPts.length-1;i++) {
+      totalLF+=Math.sqrt((wallPts[i+1].x-wallPts[i].x)**2+(wallPts[i+1].y-wallPts[i].y)**2)/puf;
+    }
+    const sec=sections.find(s=>s.id===secId); if(!sec) return;
+
+    const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
+    const reach=backendSettings?.scaffold?.workerReachHeight??6;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
+
+    const rules=backendSettings?.material?.rules;
+    const bracesPerBayPerJump=rules?.crossBracesPerBayPerJump??2;
+    const railTop=rules?.guardrailTopPerBay??4;
+    const railMid=rules?.guardrailIntermediatePerBay??2;
+    const pinsPerFrame=rules?.couplingPinsPerFrame??2;
+
+    const bayCount=Math.max(1,Math.ceil(totalLF/bayLen));
+    const legs=bayCount+1;
+
+    // Planks per deck follow scaffold width, not a hardcoded 3.
+    const plankPB=planksPerBayForWidth(parseFt(sec.frameWidth));
+
+    // Top of Wall is the wall height; the top deck sits a worker's reach below.
+    const wallHeight=sec.topOfWallDistance||0;
+    const makeup=computeFrameMakeup(Math.max(0, wallHeight-reach), jackMax);
+    const frameTall=Math.max(1, makeup.frameTall);
+
+    const totalFrames=legs*frameTall;
+    const totalPlanks=bayCount*plankPB*frameTall;
+    const totalBraces=bayCount*frameTall*bracesPerBayPerJump;
+    // Top jump gets the full set; every jump below gets the intermediate rail.
+    const totalRails=bayCount*(railTop+Math.max(0,frameTall-1)*railMid);
+    // Every frame joint takes pins except the topmost - guardrail posts
+    // occupy those sockets instead.
+    const totalPins=legs*Math.max(0,frameTall-1)*pinsPerFrame;
+
+    setSections(prev=>prev.map(s=>s.id===secId?{
+      ...s,
+      totalLF:parseFloat(totalLF.toFixed(1)),
+      totalLegs:legs, totalFrames, totalPlanks,
+      frameMakeup:s.frameMakeup.map((f,i)=>{
+        if(i===0) return {...f,qty:totalFrames};
+        if(f.partNo==="AL1S") return {...f,qty:legs};
+        if(f.partNo==="BP1")  return {...f,qty:legs};
+        if(f.partNo==="B82")  return {...f,qty:totalBraces};
+        if(f.partNo==="GR8")  return {...f,qty:totalRails};
+        if(f.partNo==="CPS")  return {...f,qty:totalPins};
+        if(f.partNo==="WP10") return {...f,qty:totalPlanks};
+        return f;
+      }),
+    }:s));
+  }
+
+  // -- Viewer mouse handlers --------------------------------------------------
+  function handleViewerMouseDown(e:React.MouseEvent<HTMLDivElement>) {
+    const pt=getImgPt(e); if(!pt) return;
+    // Reference-point pick takes priority over every other mode - one
+    // click sets the anchor for that level and exits pick mode.
+    if (refPickLevelId) {
+      setFloorLevels(prev=>prev.map(l=>l.id===refPickLevelId?{...l,refPoint:pt,stored:false}:l));
+      setRefPickLevelId(null);
+      return;
+    }
+    if (scale.pickingPoint&&!scale.locked) {
+      if(scale.pickingPoint===1) setScale({point1:pt,pickingPoint:2});
+      else setScale({point2:pt,pickingPoint:null});
+      return;
+    }
+    const lvl=floorLevels.find(l=>l.id===activeLevel);
+    if (lvl?.traceMode&&!lvl.traceClosed) {
+      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,tracePoints:[...l.tracePoints,pt]}:l));
+      return;
+    }
+    if (gripMode) { setGripStart(pt); setGripCurrent(pt); return; }
+    const sec=sections.find(s=>s.id===activeSection);
+    if (wallOutlineMode&&sec&&!sec.wallComplete) {
+      setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[...s.wallOutline,pt]}:s));
+    }
+  }
+
+  function handleViewerMouseMove(e:React.MouseEvent<HTMLDivElement>) {
+    if (!gripMode||!gripStart) return;
+    const pt=getImgPt(e); if(pt) setGripCurrent(pt);
+  }
+
+  function handleViewerMouseUp(e:React.MouseEvent<HTMLDivElement>) {
+    if (!gripMode||!gripStart||!gripCurrent) return;
+    const puf=tabScales.elevation.pageUnitsPerFoot;
+    if (!puf||puf<=0) { setGripStart(null); setGripCurrent(null); return; }
+    const x=Math.min(gripStart.x,gripCurrent.x), y=Math.min(gripStart.y,gripCurrent.y);
+    const w=Math.abs(gripCurrent.x-gripStart.x), h=Math.abs(gripCurrent.y-gripStart.y);
+    if(w<5||h<5) { setGripStart(null); setGripCurrent(null); return; }
+    const calc=calcGripArea(w,h,puf);
+    updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
+      ...ed,
+      areas:ed.areas.map(a=>a.areaIndex===selectedArea?{ ...a, rect:{x,y,w,h}, ...calc }:a),
+    }:ed));
+    setGripStart(null); setGripCurrent(null); setGripMode(false);
+  }
+
+  function handleViewerDblClick(e:React.MouseEvent) {
+    const lvl=floorLevels.find(l=>l.id===activeLevel);
+    if(lvl?.traceMode&&lvl.tracePoints.length>=3) {
+      e.preventDefault();
+      const puf=tabScales.floor.pageUnitsPerFoot;
+      const lf=puf?calcPerimeterFt(lvl.tracePoints,puf):0;
+      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,traceClosed:true,traceMode:false,linealFeet:lf}:l));
+    }
+  }
+
+  // -- Store ------------------------------------------------------------------
+  function ensureBase() {
+    if (!localStorage.getItem("korbanProjectData_v1")) {
+      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:0, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
+      localStorage.setItem("korbanProjectData_v1",JSON.stringify({"KRB-260614-001":base}));
+      localStorage.setItem("korbanActiveProjectId","KRB-260614-001");
+      localStorage.setItem("korbanActiveElevationId","north-elevation");
+    }
+  }
+
+  function storeOverlay() {
+    try {
+      ensureBase();
+      const elev=getActiveElevation();
+      const key=floorLevels.find(l=>l.isKeyFloor);
+      const lf=key?.linealFeet||0;
+      const rawRows=floorLevels.map((level,i)=>({
+        id: i+1,
+        isKeyFloor: level.isKeyFloor,
+        overlayType: "Level",
+        level: level.levelName,
+        points: level.tracePoints,
+        closed: level.traceClosed,
+        linealFeet: level.linealFeet,
+        color: level.color,
+        pageNumber: currentPageNo,
+        refPoint: level.refPoint,
+        alignedPoints: level.tracePoints,
+      }));
+      // Shift every level so its reference point coincides with the
+      // anchor level's - this is what makes floors traced on different
+      // pages stack into one correct building.
+      const rows = alignOverlayRows(rawRows);
+      const keyRow = rows.find(r=>r.isKeyFloor) ?? rows[0];
+      const keyPts = keyRow?.alignedPoints ?? [];
+      const puf=tabScales.floor.pageUnitsPerFoot;
+      saveActiveElevation({ ...elev, linearFeet:lf,
+        scale:puf?{ pageUnitsPerFoot:puf }:elev.scale,
+        overlayGeometry:{ ...(elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], elevationRefs:[], elevationHeights:[], scale:null }), fullOverlayRows:rows, tracedPerimeter:keyPts, overlayPoints:keyPts, scale:puf?{ pageUnitsPerFoot:puf }:null },
+      });
+      setOverlayStored(true);
+      setFloorLevels(prev=>prev.map(l=>({...l,stored:true})));
+      setTimeout(()=>setOverlayStored(false),3000);
+    } catch(e) { console.error(e); }
+  }
+
+  function storeElevations(sourceElevData?: typeof elevData) {
+    // Guard: this is sometimes wired straight to onClick, which would
+    // pass React's click event in as the first argument. Only accept a
+    // real array; anything else falls back to current state.
+    const src = Array.isArray(sourceElevData) ? sourceElevData : elevData;
+    try {
+      ensureBase();
+      const elev=getActiveElevation();
+      // Build elevation heights from grips - each area contributes
+      const elevationHeights=src.map(ed=>{
+        const filled=ed.areas.filter(a=>a.rect&&a.heightFt>0);
+        const avgH=filled.length?filled.reduce((s,a)=>s+a.heightFt,0)/filled.length:0;
+        const totalLF=filled.reduce((s,a)=>s+a.lf,0);
+        const totalLegs=filled.reduce((s,a)=>s+a.legs,0);
+        const avgFrameTall=filled.length?Math.round(filled.reduce((s,a)=>s+a.frameTall,0)/filled.length):7;
+        return {
+          elevation:ed.direction,
+          overallHeightInput:avgH?`${avgH.toFixed(1)}'`:"",
+          belowGradeEnabled:false, belowGradeInput:"",
+          multipleHeights:filled.length>1,
+          totalLF, totalLegs, avgFrameTall,
+          areas:filled.map(a=>({ areaIndex:a.areaIndex, lf:a.lf, heightFt:a.heightFt, frameTall:a.frameTall, legs:a.legs, bayCount:a.bayCount, fromLevelId:a.fromLevelId, toLevelId:a.toLevelId, baseElevationFt:deriveRunBaseFt(a, ed.areas) })),
+        };
+      });
+      // Also update quantityEngine from elevation data
+      const northData=src.find(e=>e.direction==="North");
+      const totalBays=northData?.areas.reduce((s,a)=>s+(a.bayCount||0),0)||elev.quantityEngine.bayCount;
+      const totalLegs=(totalBays||0)+1;
+      const maxFrameTall=Math.max(...src.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
+      const puf=tabScales.elevation.pageUnitsPerFoot;
+      const existing=elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], fullOverlayRows:[], elevationRefs:[], scale:null };
+      // Courtyards - same per-face summary as building elevations, but
+      // stored under their own key so totals can include or exclude them.
+      const storedCourtyards = courtyards.map(cy=>({
+        id: cy.id,
+        name: cy.name,
+        faces: cy.faces.map(face=>{
+          const filled=face.areas.filter(a=>a.rect&&a.heightFt>0);
+          return {
+            face: face.direction,
+            totalLF: parseFloat(filled.reduce((s,a)=>s+a.lf,0).toFixed(1)),
+            totalLegs: filled.reduce((s,a)=>s+a.legs,0),
+            avgFrameTall: filled.length?Math.round(filled.reduce((s,a)=>s+a.frameTall,0)/filled.length):0,
+            areas: filled.map(a=>({ areaIndex:a.areaIndex, lf:a.lf, heightFt:a.heightFt, frameTall:a.frameTall, legs:a.legs, bayCount:a.bayCount, fromLevelId:a.fromLevelId, toLevelId:a.toLevelId })),
+          };
+        }).filter(f=>f.totalLF>0),
+      })).filter(cy=>cy.faces.length>0);
+
+      saveActiveElevation({
+        ...elev,
+        wallHeight:src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
+        overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
+        quantityEngine:{ ...elev.quantityEngine, bayCount:totalBays, legCount:totalLegs, frameTall:maxFrameTall, frameCount:totalLegs*maxFrameTall },
+        courtyards: storedCourtyards,
+        includeCourtyards,
+      });
+      setElevStored(true); setTimeout(()=>setElevStored(false),3000);
+    } catch(e) { console.error(e); }
+  }
+
+  // Converts a traced wall outline from raw page/image pixels into
+  // feet-space points - x = linear footage along the wall, y = height in
+  // feet, both relative to the outline's own lowest-left point. Doing the
+  // conversion once here (using whichever scale was actually active when
+  // the trace was made) means Set Scaffold V2 never has to guess which
+  // scale applies to a given section's wall trace.
+  function wallOutlineToFeet(pts: Pt[], puf: number): Pt[] {
+    const baselineY = Math.max(...pts.map(p => p.y));
+    const minX = Math.min(...pts.map(p => p.x));
+    return pts.map(p => ({ x: (p.x - minX) / puf, y: (baselineY - p.y) / puf }));
+  }
+
+  function storeSection() {
+    try {
+      ensureBase();
+      const elev=getActiveElevation();
+      const sec=sections.find(s=>s.id===activeSection)??sections[0];
+      if(!sec) return;
+      const makeupStr=sec.frameMakeup.filter(f=>f.qty>0).map(f=>`${f.qty} x ${f.description}`).join("\n");
+
+      // Use whichever scale was actually used to trace this section's
+      // wall outline - the Section tab's own scale if set, otherwise
+      // fall back to the Floor Plan scale (matches autoPopulateSectionInventory).
+      const tracePuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
+      const wallOutlineFt = (sec.wallOutline.length >= 2 && tracePuf && tracePuf > 0)
+        ? wallOutlineToFeet(sec.wallOutline, tracePuf)
+        : elev.sectionView.wallOutline;
+
+      saveActiveElevation({
+        ...elev,
+        sectionView: {
+          ...elev.sectionView,
+          frameMakeup: makeupStr,
+          selectedRun: "Run N-01",
+          wallOffset: sec.wallOffset,
+          sectionType: sec.label,
+          wallOutline: wallOutlineFt,
+          scaffoldSide: sec.scaffoldSide,
+        },
+      });
+      setSectionStored(true); setTimeout(()=>setSectionStored(false),3000);
+    } catch(e) { console.error(e); }
+  }
+
+  function storeAll() { storeOverlay(); storeElevations(); storeSection(); }
+
+  function addSection() {
+    if(sections.length>=4) return;
+    const label=SECTION_LABELS[sections.length];
+    const id=label.replace("-","").toLowerCase();
+    const wallOff=backendSettings?.scaffold?.wallOffset??1;
+    // Wall height, not worker reach - see the note on SectionView.
+    const topOfWall=getActiveElevation()?.wallHeight??0;
+    const fw:ScaffoldWidth="3'";
+    setSections(prev=>[...prev,{ id, label, wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+    setActiveSection(id);
+  }
+
+  const tabPages=extractedPages.filter(p=>p.tag===TAB_TAGS[activeTab]);
+  const activeSec=sections.find(s=>s.id===activeSection)??sections[0];
+  // Zone-aware face list: either the building's elevations or the active
+  // courtyard's faces. Everything downstream (grips, tagging, rendering)
+  // works off this, so courtyards reuse the identical UI and logic.
+  const activeCourtyard = courtyards.find(c=>c.id===activeZone) ?? null;
+  const activeFaces: ElevationData[] = activeCourtyard ? activeCourtyard.faces : elevData;
+
+  /** Routes a face-list update to the building or the active courtyard. */
+  function updateActiveFaces(updater:(faces:ElevationData[])=>ElevationData[]) {
+    if (activeCourtyard) {
+      setCourtyards(prev=>prev.map(c=>c.id===activeCourtyard.id?{...c,faces:updater(c.faces)}:c));
+    } else {
+      setElevData(prev=>updater(prev));
+    }
+  }
+
+  const currentElevData=activeFaces.find(e=>e.direction===selectedElev)??activeFaces[0];
+  const liveGrip=gripStart&&gripCurrent?{ x:Math.min(gripStart.x,gripCurrent.x), y:Math.min(gripStart.y,gripCurrent.y), w:Math.abs(gripCurrent.x-gripStart.x), h:Math.abs(gripCurrent.y-gripStart.y) }:null;
+  const allLevelPoints=floorLevels.filter(l=>l.tracePoints.length>=2);
+  const activeLvl=floorLevels.find(l=>l.id===activeLevel);
+
+  // Cursor logic
+  const isCapturing=scale.pickingPoint||gripMode||activeLvl?.traceMode||wallOutlineMode||Boolean(refPickLevelId);
 
   return (
-    <main className="min-h-screen overflow-hidden bg-korban-base text-white">
+    <main className="flex h-screen flex-col overflow-hidden bg-[#080604] text-white">
       <KorbanHeader
         title="Takeoff Workspace"
-        subtitle="Scale, overlays, elevations, and height references"
-        menuLinks={takeoffMenuLinks}
-        menuOpen={menuOpen}
-        onMenuToggle={() => setMenuOpen((current) => !current)}
-        menuWidthClass="w-56"
-        actionsClassName="gap-4"
+        subtitle={projectName||"Advanced Takeoff"}
+        menuLinks={menuLinks}
+        actionsAlwaysVisible
         actions={
           <>
-            <KorbanHeaderMeta label="Project" value={activeProjectName} />
-            <KorbanButton as="a" href="/project-plan-desk" variant="ghost">
-              Project Plan Desk
-            </KorbanButton>
-            <KorbanButton variant="primary" onClick={() => { saveWorkspaceElevation(activeElevation); window.location.href = "/set-scaffold"; }}>
-              Save & Continue
-            </KorbanButton>
+            <button onClick={storeAll} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/10">Store All</button>
+            <a href="/korban-review" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Review Estimate &rarr;</a>
           </>
         }
       />
 
-      <KorbanEngineeringWorkspace
-        canvas={
-          <>
-            <KorbanWorkspaceGrid />
-
-            <KorbanWorkspaceHud position="top-left">
-              <KorbanButton
-                as="label"
-                variant={activeTool === "Upload PDF" ? "tool-active" : "tool-inactive"}
-              >
-                Upload PDF
-                <input
-                  ref={uploadRef}
-                  type="file"
-                  accept="application/pdf"
-                  onChange={handlePdfUpload}
-                  className="hidden"
-                />
-              </KorbanButton>
-
-              {/* Set Scaffold is now BEFORE Frame Configuration */}
-              {[
-                "Scale",
-                "Overlay",
-                "Set Scaffold",
-                "Frame Configuration",
-                "Create Section View",
-                "Edit Takeoff",
-              ].map((tool) => (
-                <KorbanButton
-                  key={tool}
-                  variant={activeTool === tool ? "tool-active" : "tool-inactive"}
-                  onClick={() => activateTool(tool)}
-                >
-                  {tool}
-                </KorbanButton>
-              ))}
-
-              <ActiveElevationMini
-                activeElevation={activeElevation}
-                setActiveElevation={setActiveElevation}
-              />
-
-              <KorbanStatusPill
-                label="Scale"
-                value={pageUnitsPerFoot ? "Locked" : "Not Set"}
-                active={Boolean(pageUnitsPerFoot)}
-              />
-
-              {scaleMode && (
-                <>
-                  <input
-                    value={knownScaleFeet}
-                    onChange={(event) => setKnownScaleFeet(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") calibrateScale();
-                    }}
-                    placeholder={`ex: 20'-6"`}
-                    className="w-32 rounded-lg border border-zinc-800 bg-black px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-orange-500"
-                  />
-                  <KorbanButton variant="primary" className="px-3 py-1.5" onClick={calibrateScale}>
-                    Set
-                  </KorbanButton>
-                  <KorbanButton variant="ghost" className="px-3 py-1.5" onClick={clearScale}>
-                    Clear
-                  </KorbanButton>
-                  <KorbanStatusPill label="Points" value={`${scalePoints.length}/2`} />
-                </>
-              )}
-
-              {overlayMode && pickTarget && (
-                <KorbanStatusPill
-                  label="Pick"
-                  value={
-                    pickTarget.type === "heightOverall"
-                      ? `${pickTarget.elevation} Height`
-                      : "Full Overlay"
-                  }
-                  active
-                />
-              )}
-            </KorbanWorkspaceHud>
-
-            {/* PDF controls - single row always, scrolls horizontally before wrapping */}
-            <KorbanWorkspaceHud
-              position="bottom-center"
-              className="rounded-2xl border border-orange-500/20 bg-black/80 px-2 py-1.5 backdrop-blur"
-              style={{ flexWrap: "nowrap", overflowX: "auto", maxWidth: "calc(100% - 2rem)", gap: "4px" }}
-            >
-              <span className="w-28 shrink-0 truncate rounded-full border border-orange-500/20 bg-black px-2 py-1 text-[9px] text-zinc-400">
-                {pdfFileName || "No PDF"}
-              </span>
-
-              <KorbanButton
-                variant="ghost"
-                className="shrink-0 px-2 py-1 text-[9px]"
-                disabled={!pdfDoc || pageNumber <= 1}
-                onClick={() => { const p = Math.max(1, pageNumber - 1); setPageNumber(p); setPageJump(String(p)); }}
-              >
-                ‹
-              </KorbanButton>
-
-              <div className="flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-black px-1.5 py-0.5 text-[9px]">
-                <input
-                  value={pageJump}
-                  onChange={(e) => setPageJump(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") goToPage(); }}
-                  className="w-8 rounded bg-zinc-950 px-1 py-0.5 text-center text-zinc-200 outline-none"
-                />
-                <span className="text-zinc-500">/{numPages || 0}</span>
-                <button disabled={!pdfDoc} onClick={goToPage} className="rounded bg-zinc-900 px-1 py-0.5 text-zinc-300 disabled:opacity-40">Go</button>
-              </div>
-
-              <KorbanButton
-                variant="ghost"
-                className="shrink-0 px-2 py-1 text-[9px]"
-                disabled={!pdfDoc || pageNumber >= numPages}
-                onClick={() => { const p = Math.min(numPages, pageNumber + 1); setPageNumber(p); setPageJump(String(p)); }}
-              >
-                ›
-              </KorbanButton>
-
-              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom((c) => Math.max(0.1, c - 0.1))}>−</KorbanButton>
-              <span className="shrink-0 rounded-lg border border-zinc-800 bg-black/80 px-2 py-1 text-[9px] font-bold text-orange-300">{Math.round(zoom * 100)}%</span>
-              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom((c) => Math.min(3, c + 0.1))}>+</KorbanButton>
-              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom(0.25)}>Fit</KorbanButton>
-              <KorbanButton variant="ghost" className="shrink-0 px-2 py-1 text-[9px]" disabled={!pdfDoc} onClick={() => setZoom(0.5)}>Width</KorbanButton>
-            </KorbanWorkspaceHud>
-
-            <div className="absolute inset-0 overflow-auto pb-24 pt-16">
-              {pdfLoading && (
-                <div className="relative z-10 flex h-full items-center justify-center text-sm text-zinc-500">
-                  Loading PDF...
-                </div>
-              )}
-              {pdfError && (
-                <div className="relative z-10 flex h-full items-center justify-center text-sm text-red-400">
-                  {pdfError}
-                </div>
-              )}
-
-              {!pdfDoc && !pdfLoading && !pdfError && (
-                <button
-                  onClick={() => uploadRef.current?.click()}
-                  className="relative z-10 flex h-full w-full cursor-pointer items-center justify-center"
-                >
-                  <div className="rounded-[2rem] border border-zinc-800 bg-[#050505] p-12 text-center shadow-2xl">
-                    <div className="mx-auto mb-5 flex h-24 w-24 items-center justify-center rounded-3xl border border-orange-500/30 bg-orange-500/10 text-5xl text-orange-500">
-                      +
-                    </div>
-                    <h2 className="text-lg font-semibold">Upload Plan PDF</h2>
-                    <p className="mt-3 max-w-md text-xs leading-5 text-zinc-500">
-                      Full-screen takeoff workspace for scale, overlays, elevations, and height references.
-                    </p>
-                  </div>
-                </button>
-              )}
-
-              {pdfDoc && (
-                <div className="relative z-10 flex min-h-full min-w-max justify-center p-10">
-                  <div
-                    ref={canvasContainerRef}
-                    onClick={handleWorkspaceClick}
-                    className={`relative h-fit rounded-[2rem] border border-zinc-800 bg-[#050505] p-4 shadow-2xl ${
-                      referencePickMode ? "cursor-crosshair ring-2 ring-yellow-400/40" :
-                      scaleMode || overlayMode ? "cursor-crosshair" : ""
-                    }`}
-                  >
-                    <div className="overflow-hidden rounded-[1.25rem] bg-white p-4 shadow-inner">
-                      <canvas ref={canvasRef} />
-                    </div>
-
-                    {!pageUnitsPerFoot && scalePoints.map((point, index) => (
-                      <Marker
-                        key={`scale-${index}`}
-                        point={point}
-                        label={`S${index + 1}`}
-                        zoom={zoom}
-                        canvasRef={canvasRef}
-                      />
-                    ))}
-
-                    {!pageUnitsPerFoot && scalePoints.length === 2 && (
-                      <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full">
-                        <line
-                          x1={scalePoints[0].x * zoom + (canvasRef.current?.offsetLeft ?? 32)}
-                          y1={scalePoints[0].y * zoom + (canvasRef.current?.offsetTop ?? 32)}
-                          x2={scalePoints[1].x * zoom + (canvasRef.current?.offsetLeft ?? 32)}
-                          y2={scalePoints[1].y * zoom + (canvasRef.current?.offsetTop ?? 32)}
-                          stroke="#f97316"
-                          strokeWidth="3"
-                          strokeDasharray="8 8"
-                        />
-                      </svg>
-                    )}
-
-                    {tracePoints.map((point, index) => (
-                      <Marker
-                        key={`trace-${index}`}
-                        point={point}
-                        label={String(index + 1)}
-                        zoom={zoom}
-                        canvasRef={canvasRef}
-                      />
-                    ))}
-
-                    {drawOverlayPolyline(
-                      tracePoints,
-                      traceClosed || overlayLockedOpen,
-                      getActivePickColor(),
-                      "current",
-                      pickTarget?.type !== "full",
-                    )}
-
-                    {/* Reference point marker — crosshair with yellow glow */}
-                    {referencePoint && (() => {
-                      const ox = canvasRef.current?.offsetLeft ?? 32;
-                      const oy = canvasRef.current?.offsetTop ?? 32;
-                      const rx = referencePoint.x * zoom + ox;
-                      const ry = referencePoint.y * zoom + oy;
-                      return (
-                        <svg className="pointer-events-none absolute inset-0 z-30 h-full w-full">
-                          <line x1={rx - 12} y1={ry} x2={rx + 12} y2={ry} stroke="#facc15" strokeWidth="1.5" opacity="0.9" />
-                          <line x1={rx} y1={ry - 12} x2={rx} y2={ry + 12} stroke="#facc15" strokeWidth="1.5" opacity="0.9" />
-                          <circle cx={rx} cy={ry} r="4" fill="none" stroke="#facc15" strokeWidth="1.5" opacity="0.9" />
-                        </svg>
-                      );
-                    })()}
-                  </div>
-                </div>
-              )}
-            </div>
-          </>
-        }
-        rail={
-          <TakeoffHub
-            fullOverlayRows={fullOverlayRows}
-            updateFullOverlayRow={updateFullOverlayRow}
-            addFullOverlayRow={addFullOverlayRow}
-            removeFullOverlayRow={removeFullOverlayRow}
-            startPick={startPick}
-            closePick={closePick}
-            storePick={storePick}
-            clearPick={clearPick}
-            activeElevation={activeElevation}
-            setActiveElevation={setActiveElevation}
-            elevationHeights={elevationHeights}
-            duplicateElevationHeights={duplicateElevationHeights}
-            setDuplicateElevationHeights={setDuplicateElevationHeights}
-            updateElevationHeight={updateElevationHeight}
-            storeManualOverallHeight={storeManualOverallHeight}
-            storeAllHeights={storeAllHeights}
-            keyFloorLf={keyFloorLf}
-            tolerancePercent={tolerancePercent}
-            pickTarget={pickTarget}
-            tracePoints={tracePoints}
-            tracedLinealFeet={tracedLinealFeet}
-            traceClosed={traceClosed}
-            overlayLockedOpen={overlayLockedOpen}
-            scaleReady={Boolean(pageUnitsPerFoot)}
-            setShowCombinedOverlay={setShowCombinedOverlay}
-            showCombinedOverlay={showCombinedOverlay}
-            saveToEstimateReview={saveToEstimateReview}
-            elevationBreakdownRows={elevationBreakdownRows}
-            updateElevationBreakdownRow={updateElevationBreakdownRow}
-            storeElevationBreakdownRow={storeElevationBreakdownRow}
-            referencePoint={referencePoint}
-            setReferencePoint={setReferencePoint}
-            referencePickMode={referencePickMode}
-            setReferencePickMode={setReferencePickMode}
-            undoLastPoint={undoLastPoint}
-            colorPickerOpenId={colorPickerOpenId}
-            setColorPickerOpenId={setColorPickerOpenId}
-          />
-        }
-      />
-    </main>
-  );
-}
-
-function TakeoffHub({
-  fullOverlayRows,
-  updateFullOverlayRow,
-  addFullOverlayRow,
-  removeFullOverlayRow,
-  startPick,
-  closePick,
-  storePick,
-  clearPick,
-  activeElevation,
-  setActiveElevation,
-  elevationHeights,
-  duplicateElevationHeights,
-  setDuplicateElevationHeights,
-  updateElevationHeight,
-  storeManualOverallHeight,
-  storeAllHeights,
-  keyFloorLf,
-  tolerancePercent,
-  pickTarget,
-  tracePoints,
-  tracedLinealFeet,
-  traceClosed,
-  overlayLockedOpen,
-  scaleReady,
-  setShowCombinedOverlay,
-  showCombinedOverlay,
-  saveToEstimateReview,
-  elevationBreakdownRows,
-  updateElevationBreakdownRow,
-  storeElevationBreakdownRow,
-  referencePoint,
-  setReferencePoint,
-  referencePickMode,
-  setReferencePickMode,
-  undoLastPoint,
-  colorPickerOpenId,
-  setColorPickerOpenId,
-}: {
-  fullOverlayRows: FullOverlayRow[];
-  updateFullOverlayRow: (id: number, updates: Partial<FullOverlayRow>) => void;
-  addFullOverlayRow: (type?: FullOverlayType) => void;
-  removeFullOverlayRow: (id: number) => void;
-  startPick: (target: PickTarget) => void;
-  closePick: () => void;
-  storePick: () => void;
-  clearPick: () => void;
-  activeElevation: ElevationName;
-  setActiveElevation: (elevation: ElevationName) => void;
-  elevationHeights: ElevationHeight[];
-  duplicateElevationHeights: Record<"North" | "East", boolean>;
-  setDuplicateElevationHeights: React.Dispatch<React.SetStateAction<Record<"North" | "East", boolean>>>;
-  updateElevationHeight: (elevation: ElevationName, updates: Partial<ElevationHeight>) => void;
-  storeManualOverallHeight: (elevation: ElevationName) => void;
-  storeAllHeights: () => void;
-  keyFloorLf: number;
-  tolerancePercent: number;
-  pickTarget: PickTarget;
-  tracePoints: Point[];
-  tracedLinealFeet: number;
-  traceClosed: boolean;
-  overlayLockedOpen: boolean;
-  scaleReady: boolean;
-  setShowCombinedOverlay: (value: boolean) => void;
-  showCombinedOverlay: boolean;
-  saveToEstimateReview: () => void;
-  elevationBreakdownRows: StoredElevationBreakdownRow[];
-  updateElevationBreakdownRow: (elevation: ElevationName, approxLinearFeet: number) => void;
-  storeElevationBreakdownRow: (elevation: ElevationName) => void;
-  referencePoint: Point | null;
-  setReferencePoint: (point: Point | null) => void;
-  referencePickMode: boolean;
-  setReferencePickMode: (mode: boolean) => void;
-  undoLastPoint: () => void;
-  colorPickerOpenId: number | null;
-  setColorPickerOpenId: (id: number | null) => void;
-}) {
-  return (
-    <div className="space-y-4">
-      <KorbanPanel title="Take Off Hub" compact className="border-orange-500/20">
-        <div className="mb-3 flex justify-end">
-          <KorbanButton variant="ghost" className="px-3 py-1 text-[10px]" onClick={() => setShowCombinedOverlay(!showCombinedOverlay)}>
-            {showCombinedOverlay ? "Hide Preview" : "Show Preview"}
-          </KorbanButton>
+      {/* Depth tabs - the bid type you're working at. All three are always
+          visible; a depth you haven't worked yet simply opens with its
+          inputs blank. Work carries forward to deeper tiers, never back. */}
+      <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2">
+        {([
+          {id:"quick-bid",  label:"Quick Bid",  tools:["elevation"] as ActiveTab[]},
+          {id:"full-bid",   label:"Full Bid",   tools:["floor","elevation"] as ActiveTab[]},
+          {id:"korban-bid", label:"Korban Bid", tools:["floor","elevation","section"] as ActiveTab[]},
+        ] as {id:DepthTab;label:string;tools:ActiveTab[]}[]).map(d=>{
+          const active = depthTab===d.id;
+          return (
+          <button key={d.id} onClick={()=>{
+              setDepthTab(d.id);
+              if(!d.tools.includes(activeTab)) setActiveTab(d.tools[0]);
+              // Opening a deeper tier promotes the project; going back to a
+              // shallower tab is just viewing, so the depth is left alone.
+              if(DEPTH_ORDER.indexOf(d.id as EstimateDepth) > DEPTH_ORDER.indexOf(estimateDepth)){
+                try{ setEstimateDepth(d.id as EstimateDepth); setEstimateDepthState(d.id as EstimateDepth); }catch{}
+              }
+            }}
+            className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active?"text-white border-zinc-700":"text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
+            style={{ background: active ? "#1a1a1a" : "#0b0b0b" }}>
+            {d.label}
+            {active && (
+              <span className="absolute left-1/2 -translate-x-1/2 bottom-0 h-[2px] w-6 rounded-full bg-white/80 shadow-[0_0_4px_1px_rgba(255,255,255,0.35)]" />
+            )}
+          </button>
+          );
+        })}
+        <div className="ml-auto flex items-center gap-3 text-[10px]">
+          {scale.locked&&<span className="font-mono text-orange-400 opacity-70">[lock] {scale.label}</span>}
         </div>
+      </div>
 
-        <div
-          className={`transition ${scaleReady ? "opacity-100" : "pointer-events-none opacity-35"}`}
-          title={scaleReady ? "" : "Set scale to unlock Take Off Hub"}
-        >
-          {/* Full Overlay */}
-          <KorbanPanel title="Full Overlay" compact>
-            {/* Clickable legend — click to bring layer to front visually */}
-            <div className="mb-3 flex flex-wrap gap-2">
-              {fullOverlayRows.filter(r => r.linealFeet > 0 || r.points.length > 0).map((row) => (
-                <button
-                  key={`legend-${row.id}`}
-                  onClick={() => updateFullOverlayRow(row.id, { isKeyFloor: row.isKeyFloor })}
-                  className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-black/60 px-2 py-1 text-[9px] text-zinc-400 hover:border-orange-500/30 hover:text-zinc-200"
-                  title="Click to bring to front"
-                >
-                  <span className="h-2 w-2 rounded-full" style={{ background: overlayColorFor(row) }} />
-                  {row.level}
-                </button>
+      {/* Tools available at this depth - Quick Bid is a form, so it has none.
+          Sub-tabs carry a light grey tint to sit below the depth tabs
+          without competing with the orange accent. */}
+      {depthTab!=="quick-bid" && (
+      <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0f0f0f] px-6 py-1.5">
+        {([{id:"floor",label:"Floor Plan",icon:"\u229e"},{id:"elevation",label:"Elevations",icon:"\u2195"},{id:"section",label:"Section View",icon:"\u2702"}] as {id:ActiveTab;label:string;icon:string}[])
+          .filter(tool=>{
+            if(depthTab==="full-bid")   return tool.id!=="section";
+            return true;
+          })
+          .map(tool=>{
+          const active = activeTab===tool.id;
+          const count = extractedPages.filter(p=>p.tag===TAB_TAGS[tool.id]).length;
+          return (
+          <button key={tool.id} onClick={()=>setActiveTab(tool.id)}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[10px] font-bold transition ${active?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
+            <span>{tool.icon}</span>{tool.label}
+            {count>0&&(
+              <span className={`rounded-full px-1.5 text-[8px] font-bold ${active?"bg-black/20":"bg-white/15"}`}>{count}</span>
+            )}
+          </button>
+          );
+        })}
+        <span className="ml-auto text-[9.5px] text-zinc-600">
+          {depthTab==="full-bid"   && "Guided capture - Korban traces, you confirm."}
+          {depthTab==="korban-bid" && "Full manual control, plus section views."}
+        </span>
+      </div>
+      )}
+
+      {depthTab==="full-bid" && (() => {
+        const anyTraced = floorLevels.some(l=>l.tracePoints.length>=3);
+        const allRefs   = floorLevels.length>0 && floorLevels.every(l=>l.refPoint);
+        const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
+        const steps: GuideStep[] = [
+          { id:"upload", title:"Load the plans", anchor:"upload",
+            body:"Upload the PDF set for this job. You'll pull the floor plan and elevation sheets out of it as you go.",
+            done: Boolean(viewerUrl) },
+          { id:"scale", title:"Set the scale", anchor:"scale",
+            body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
+            why:"Nothing measured on this sheet means anything until Korban knows how big a foot is.",
+            done: scale.locked },
+          { id:"trace", title:"Trace the floor outline",
+            body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
+            done: anyTraced },
+          { id:"ref", title:"Set reference points", anchor:"reference-point",
+            body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
+            why:"This is what stacks the floors correctly. Without it Korban can't tell a real step-back from a shaky trace.",
+            done: allRefs },
+          { id:"grip", title:"Grip the elevations",
+            body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
+            why:"The grip measures height. Height is what decides how many frames go in each leg.",
+            done: anyGrip },
+          { id:"store", title:"Store the work",
+            body:"Store Overlay on the floor plan, Store Elevations on the elevations. Then Review Estimate.",
+            done: overlayStored || elevStored },
+        ];
+        return <GuidedSteps steps={steps} hidden={guideHidden}
+          onToggleHidden={h=>{setGuideHidden(h); try{localStorage.setItem("korbanGuideHidden",h?"1":"0");}catch{}}} />;
+      })()}
+
+      {depthTab==="quick-bid" ? <QuickBidForm /> : (
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* Left panel */}
+        <aside className="flex w-[140px] flex-shrink-0 flex-col border-r border-zinc-900 bg-[#080604]">
+          <div className="border-b border-zinc-900 px-3 py-2.5">
+            <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">{TAB_TAGS[activeTab]}</p>
+          </div>
+          {tabPages.length===0?(
+            <div className="flex-1 flex items-center justify-center p-3">
+              <p className="text-[8px] text-zinc-700 text-center leading-relaxed">Extract pages<br/>using toolbar</p>
+            </div>
+          ):(
+            <div className="flex-1 overflow-y-auto py-2 space-y-1.5 px-2">
+              {tabPages.map(pg=>(
+                <div key={pg.id} className="relative group">
+                  <div onClick={()=>loadExtracted(pg)} className={`w-full rounded-xl border p-1 cursor-pointer transition ${activeExtracted?.id===pg.id?"border-orange-500/60 bg-orange-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
+                    <div className="overflow-hidden rounded-lg bg-zinc-900" style={{aspectRatio:"8.5/11"}}>
+                      {pg.thumbnail&&<img src={pg.thumbnail} alt="" className="w-full h-full object-cover"/>}
+                    </div>
+                    <div className="flex items-center justify-between mt-1 px-0.5">
+                      <p className="text-[8px] font-mono text-zinc-600">Pg {pg.pageNumber}</p>
+                      {pg.scale.locked&&<span className="text-[7px] text-orange-400">[lock]</span>}
+                    </div>
+                  </div>
+                  <button onClick={()=>setExtractedPages(prev=>prev.filter(p=>p.id!==pg.id))} className="absolute top-1 right-1 hidden group-hover:flex h-4 w-4 items-center justify-center rounded-full bg-zinc-900 text-[8px] text-zinc-500 hover:text-red-400">&times;</button>
+                </div>
               ))}
             </div>
+          )}
+        </aside>
 
-            <div className="space-y-2">
-              {fullOverlayRows.map((row) => {
-                const isActiveFullPick = pickTarget?.type === "full" && pickTarget.id === row.id;
-                const hasPendingFullMeasure = isActiveFullPick && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
-                const displayLf = hasPendingFullMeasure ? tracedLinealFeet : row.linealFeet;
-                const isStored = row.linealFeet > 0 && !hasPendingFullMeasure;
-                const isColorOpen = colorPickerOpenId === row.id;
+        {/* Center viewer */}
+        <section className="flex flex-1 flex-col overflow-hidden">
+          {/* Toolbar */}
+          <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-wrap">
+            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading...":"Upload Plans"}</button>
+            <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
 
-                return (
-                  <div
-                    key={row.id}
-                    className={`rounded-xl border bg-zinc-950/80 p-3 ${hasPendingFullMeasure ? "border-yellow-300/40 shadow-[0_0_18px_rgba(234,179,8,0.20)]" : "border-zinc-800"}`}
-                  >
-                    <div className="grid grid-cols-[auto_14px_minmax(0,1fr)_104px] items-center gap-2 text-xs">
-                      <label className="flex items-center gap-1 text-zinc-500">
-                        <input
-                          type="checkbox"
-                          checked={row.isKeyFloor}
-                          disabled={row.overlayType !== "Level"}
-                          onChange={() => updateFullOverlayRow(row.id, { isKeyFloor: true })}
-                          className="accent-orange-500 disabled:opacity-30"
-                        />
-                        Main
-                      </label>
-                      {/* Color dot — click to open 32-color picker */}
-                      <button
-                        onClick={() => setColorPickerOpenId(isColorOpen ? null : row.id)}
-                        className="h-3 w-3 rounded-full border border-zinc-700 hover:scale-125 transition-transform"
-                        style={{ background: overlayColorFor(row) }}
-                        title="Change color"
-                      />
-                      <input
-                        value={row.level}
-                        onChange={(event) => updateFullOverlayRow(row.id, { level: event.target.value })}
-                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-zinc-200 outline-none focus:border-orange-500"
-                        placeholder="Level"
-                      />
-                      <span className={`whitespace-nowrap rounded-lg px-2 py-1 text-right font-mono ${hasPendingFullMeasure ? "bg-yellow-300/10 text-yellow-300 shadow-[0_0_14px_rgba(234,179,8,0.22)]" : "text-orange-400"}`}>
-                        {displayLf > 0 ? formatFeetInches(displayLf) : "--"}
-                      </span>
+            {totalPages>1&&(
+              <div className="flex items-center gap-1">
+                <button onClick={()=>goToPage(currentPageNo-1)} disabled={currentPageNo<=1||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">&lsaquo;</button>
+                <input
+                  type="text" inputMode="numeric"
+                  value={pageNoInput}
+                  onChange={e=>{
+                    const v=e.target.value.replace(/[^0-9]/g,"");
+                    setPageNoInput(v);
+                    if (v) { const n=parseInt(v); if(n>=1&&n<=totalPages) goToPage(n); }
+                  }}
+                  onBlur={()=>{ if(!pageNoInput) setPageNoInput(String(currentPageNo)); }}
+                  onKeyDown={e=>{ if(e.key==="Enter") (e.target as HTMLInputElement).blur(); }}
+                  className="w-10 rounded border border-zinc-800 bg-zinc-900 text-center text-[10px] font-mono text-zinc-300 outline-none focus:border-orange-500/50 py-0.5"
+                />
+                <span className="text-[10px] font-mono text-zinc-600">/ {totalPages}</span>
+                <button onClick={()=>goToPage(currentPageNo+1)} disabled={currentPageNo>=totalPages||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">&rsaquo;</button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-1">
+              <button onClick={()=>setViewerZoom(z=>Math.max(0.1,z-0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">&minus;</button>
+              <span className="text-[9px] font-mono text-zinc-600 w-8 text-center">{Math.round(viewerZoom*100)}%</span>
+              <button onClick={()=>setViewerZoom(z=>Math.min(4,z+0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
+              <button onClick={fitToViewer} className="rounded border border-zinc-800 px-1.5 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+            </div>
+
+            {viewerUrl&&<div className="h-4 w-px bg-zinc-800"/>}
+            {viewerUrl&&(
+              <button onClick={extractCurrentPage} className="rounded-lg border border-white/20 bg-white/5 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-white/10">
+                + Extract as {TAB_TAGS[activeTab]}
+              </button>
+            )}
+
+            {viewerUrl&&<div className="h-4 w-px bg-zinc-800"/>}
+
+            {/* Scale */}
+            {!scale.locked?(
+              <>
+                <button data-guide="scale" onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
+                  className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
+                  &#10231; Scale {scale.pickingPoint?`- pt ${scale.pickingPoint}`:""}
+                </button>
+                {scale.point1&&scale.point2&&(
+                  <div className="flex items-center gap-1">
+                    <input value={scale.measurementInput} onChange={e=>setScale({measurementInput:e.target.value})} onKeyDown={e=>e.key==="Enter"&&lockScale()}
+                      placeholder="e.g. 20'" className="w-16 rounded-lg border border-orange-500/50 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none focus:border-orange-500"/>
+                    <button onClick={lockScale} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-zinc-800">Lock</button>
+                  </div>
+                )}
+              </>
+            ):(
+              <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1 rounded-lg border border-orange-500/40 bg-orange-500/5 px-2.5 py-1.5" style={{boxShadow:"0 0 10px rgba(249,115,22,0.2)"}}>
+                  <span className="text-[10px] text-orange-500">[lock]</span>
+                  <span className="text-[10px] font-mono text-orange-300 font-bold">{scale.label}</span>
+                </div>
+                <button onClick={()=>setScale({locked:false,point1:null,point2:null,pickingPoint:null})} className="rounded-lg border border-zinc-700 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">Unlock</button>
+              </div>
+            )}
+
+            {/* Elevation grip tools */}
+            {activeTab==="elevation"&&viewerUrl&&scale.locked&&(
+              <>
+                <div className="h-4 w-px bg-zinc-800"/>
+                <button onClick={()=>setGripMode(m=>!m)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
+                  {gripMode?`Drag Area ${selectedArea} on ${selectedElev}`:"Add Grip"}
+                </button>
+              </>
+            )}
+            {activeTab==="elevation"&&viewerUrl&&!scale.locked&&(
+              <span className="text-[9px] text-yellow-600">Set scale first to capture areas</span>
+            )}
+
+            {/* Section wall outline */}
+            {activeTab==="section"&&viewerUrl&&(
+              <>
+                <div className="h-4 w-px bg-zinc-800"/>
+                <button onClick={()=>setWallOutlineMode(m=>!m)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${wallOutlineMode?"border-blue-500 bg-blue-500/15 text-blue-300":"border-zinc-700 text-zinc-400 hover:border-blue-500/40"}`}>
+                  {wallOutlineMode?"Wall Outline":"Start Wall Outline"}
+                </button>
+                {activeSec?.wallOutline?.length>0&&!activeSec.wallComplete&&(
+                  <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
+                    className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/20">
+                    Complete
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* PDF Canvas */}
+          <div ref={viewerRef}
+            className="relative flex-1 overflow-auto bg-zinc-950 flex items-start justify-center p-6"
+            onMouseDown={handleViewerMouseDown}
+            onMouseMove={handleViewerMouseMove}
+            onMouseUp={handleViewerMouseUp}
+            onDoubleClick={handleViewerDblClick}
+            style={{cursor:isCapturing?"crosshair":"default"}}>
+
+            {/* Scale required - pinned, unmissable. Nothing measured on this
+                tab means anything until scale is locked, so this stays until
+                it is. */}
+            {viewerUrl&&!scale.locked&&(
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center px-6 pt-3">
+                <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-yellow-500/50 bg-yellow-500/10 px-4 py-2.5 shadow-lg backdrop-blur-sm">
+                  <span className="text-base leading-none">&#9888;</span>
+                  <div>
+                    <p className="text-[11px] font-bold text-yellow-300">Set scale before measuring</p>
+                    <p className="text-[10px] text-yellow-500/80">Click <span className="font-bold">Scale</span>, pick two points a known distance apart, then enter that distance.</p>
+                  </div>
+                  <button onClick={()=>setScale({pickingPoint:1,point1:null,point2:null})}
+                    className="ml-1 rounded-lg bg-yellow-400 px-3 py-1.5 text-[10px] font-bold text-black transition hover:bg-yellow-300">
+                    Set Scale
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!viewerUrl&&!pdfLoading&&(
+              <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)handleFile(f);}}
+                className="flex h-full w-full flex-col items-center justify-center gap-3 cursor-pointer">
+                <span className="text-5xl opacity-15">&#128208;</span>
+                <p className="text-sm font-bold text-zinc-500">Upload Plans to begin</p>
+                <p className="text-xs text-zinc-700">PDF, JPG or PNG &middot; Click or drag</p>
+              </div>
+            )}
+            {pdfLoading&&<div className="flex h-full items-center justify-center"><p className="text-xs text-zinc-600">Opening...</p></div>}
+
+            {viewerUrl&&(
+              <div className="relative" style={{transform:`scale(${viewerZoom})`,transformOrigin:"top center",userSelect:"none"}}>
+                <img ref={imgRef} src={viewerUrl} alt="" draggable={false} onLoad={handleImgLoad}
+                  className="block rounded-lg shadow-2xl border border-zinc-800 select-none"
+                  style={{maxWidth:"100%",opacity:renderingPage?0.5:1,transition:"opacity 0.15s"}}/>
+
+                <svg className="absolute inset-0 pointer-events-none overflow-visible"
+                  style={{width:imgRef.current?.clientWidth||"100%",height:imgRef.current?.clientHeight||"100%"}}>
+
+                  {/* Floor traces */}
+                  {activeTab==="floor"&&floorLevels.map(lvl=>{
+                    if(lvl.tracePoints.length<1) return null;
+                    const pts=[...lvl.tracePoints,...(lvl.traceClosed?[lvl.tracePoints[0]]:[])];
+                    const mk=1/viewerZoom; // counter-scale so markers stay a constant on-screen size at any zoom
+                    return (
+                      <g key={lvl.id}>
+                        {lvl.tracePoints.length>=2&&(
+                          <polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")} fill={lvl.traceClosed?"rgba(249,115,22,0.08)":"none"} stroke={lvl.color} strokeWidth={1.5*mk} strokeDasharray={lvl.traceClosed?"none":`${4*mk},${3*mk}`}/>
+                        )}
+                        {lvl.id===activeLevel&&lvl.tracePoints.map((pt,i)=>(
+                          <g key={i}>
+                            <circle cx={pt.x} cy={pt.y} r={2.5*mk} fill={lvl.color} opacity="0.9"/>
+                            <text x={pt.x+6*mk} y={pt.y-5*mk} fontSize={8*mk} fill={lvl.color} fontFamily="monospace" fontWeight="bold">{i+1}</text>
+                          </g>
+                        ))}
+                      </g>
+                    );
+                  })}
+
+                  {/* Per-level reference points - the anchors that make
+                      levels stack correctly. Drawn as a distinct yellow
+                      crosshair so they're never confused with trace points. */}
+                  {activeTab==="floor"&&floorLevels.map(lvl=>{
+                    if(!lvl.refPoint) return null;
+                    const mk=1/viewerZoom;
+                    const {x,y}=lvl.refPoint;
+                    const isActive=lvl.id===activeLevel;
+                    return (
+                      <g key={`ref-${lvl.id}`} opacity={isActive?1:0.5}>
+                        <line x1={x-9*mk} y1={y} x2={x+9*mk} y2={y} stroke="#facc15" strokeWidth={1.4*mk}/>
+                        <line x1={x} y1={y-9*mk} x2={x} y2={y+9*mk} stroke="#facc15" strokeWidth={1.4*mk}/>
+                        <circle cx={x} cy={y} r={3.5*mk} fill="none" stroke="#facc15" strokeWidth={1.2*mk}/>
+                        <text x={x+11*mk} y={y-6*mk} fontSize={7*mk} fill="#facc15" fontFamily="monospace" fontWeight="bold">REF</text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Section wall + scaffold dots */}
+                  {activeTab==="section"&&activeSec&&activeSec.wallOutline.length>=1&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
+                    <g>
+                      {activeSec.wallOutline.length>=2&&(
+                        <polyline points={activeSec.wallOutline.map(p=>`${p.x},${p.y}`).join(" ")} fill="none" stroke="#2563eb" strokeWidth={2*mk} strokeDasharray={activeSec.wallComplete?"none":`${4*mk},${3*mk}`}/>
+                      )}
+                      {activeSec.wallOutline.map((pt,i)=>(
+                        <circle key={`pt-${i}`} cx={pt.x} cy={pt.y} r={2.5*mk} fill="#2563eb" opacity="0.9"/>
+                      ))}
+                      {activeSec.wallComplete&&scale.pageUnitsPerFoot&&activeSec.wallOutline.map((pt,i,arr)=>{
+                        if(i>=arr.length-1) return null;
+                        const next=arr[i+1];
+                        const dx=next.x-pt.x,dy=next.y-pt.y,len=Math.sqrt(dx*dx+dy*dy);
+                        const nx=-dy/len,ny=dx/len;
+                        const off=1*scale.pageUnitsPerFoot!;
+                        const mid={x:(pt.x+next.x)/2+nx*off,y:(pt.y+next.y)/2+ny*off};
+                        return <circle key={i} cx={mid.x} cy={mid.y} r={2.5*mk} fill="#f97316" opacity="0.8"/>;
+                      })}
+                    </g>
+                    );
+                  })()}
+
+                  {/* Scale crosshairs */}
+                  {scale.point1&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
+                    <g>
+                      <line x1={scale.point1.x-12*mk} y1={scale.point1.y} x2={scale.point1.x+12*mk} y2={scale.point1.y} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <line x1={scale.point1.x} y1={scale.point1.y-12*mk} x2={scale.point1.x} y2={scale.point1.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <circle cx={scale.point1.x} cy={scale.point1.y} r={4*mk} fill="#f97316"/>
+                      <circle cx={scale.point1.x} cy={scale.point1.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
+                      <text x={scale.point1.x+12*mk} y={scale.point1.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">1</text>
+                    </g>
+                    );
+                  })()}
+                  {scale.point2&&(() => {
+                    const mk=1/viewerZoom;
+                    return (
+                    <g>
+                      <line x1={scale.point2.x-12*mk} y1={scale.point2.y} x2={scale.point2.x+12*mk} y2={scale.point2.y} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <line x1={scale.point2.x} y1={scale.point2.y-12*mk} x2={scale.point2.x} y2={scale.point2.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
+                      <circle cx={scale.point2.x} cy={scale.point2.y} r={4*mk} fill="#f97316"/>
+                      <circle cx={scale.point2.x} cy={scale.point2.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
+                      <text x={scale.point2.x+12*mk} y={scale.point2.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">2</text>
+                    </g>
+                    );
+                  })()}
+                  {scale.point1&&scale.point2&&<line x1={scale.point1.x} y1={scale.point1.y} x2={scale.point2.x} y2={scale.point2.y} stroke="#f97316" strokeWidth={1/viewerZoom} strokeDasharray={`${4/viewerZoom},${3/viewerZoom}`} opacity="0.5"/>}
+
+                  {/* Elevation grips */}
+                  {activeTab==="elevation"&&elevData.map(ed=>ed.areas.map(a=>{
+                    if(!a.rect) return null;
+                    const isActiveElev=ed.direction===selectedElev;
+                    return (
+                      <g key={a.id}>
+                        <rect x={a.rect.x} y={a.rect.y} width={a.rect.w} height={a.rect.h} fill="rgba(249,115,22,0.10)" stroke={isActiveElev?"#f97316":"#71717a"} strokeWidth={isActiveElev?"1.5":"1"}/>
+                        <text x={a.rect.x+4} y={a.rect.y+13} fontSize="8.5" fill="#f97316" fontFamily="monospace" fontWeight="bold">{ed.direction} A{a.areaIndex}: {a.lf}LF x {a.heightFt}&apos;</text>
+                        <text x={a.rect.x+4} y={a.rect.y+24} fontSize="7.5" fill="#fb923c" fontFamily="monospace">{a.legs} legs &middot; {a.frameTall} frames per leg</text>
+                      </g>
+                    );
+                  }))}
+                  {/* Live grip */}
+                  {liveGrip&&liveGrip.w>3&&liveGrip.h>3&&(
+                    <g>
+                      <rect x={liveGrip.x} y={liveGrip.y} width={liveGrip.w} height={liveGrip.h} fill="rgba(249,115,22,0.08)" stroke="#f97316" strokeWidth="1.5" strokeDasharray="5,3"/>
+                      {scale.locked&&tabScales.elevation.pageUnitsPerFoot&&(()=>{
+                        const puf=tabScales.elevation.pageUnitsPerFoot!;
+                        const lf=(liveGrip.w/puf).toFixed(1), ht=(liveGrip.h/puf).toFixed(1);
+                        return <text x={liveGrip.x+4} y={liveGrip.y+14} fontSize="9" fill="#f97316" fontFamily="monospace" fontWeight="bold">{lf}LF x {ht}&apos;</text>;
+                      })()}
+                    </g>
+                  )}
+                </svg>
+                {renderingPage&&<div className="absolute inset-0 flex items-center justify-center"><p className="text-xs text-zinc-500 bg-black/60 px-3 py-1.5 rounded-lg">Loading...</p></div>}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Right panel */}
+        <aside className="flex w-[250px] flex-shrink-0 flex-col border-l border-zinc-900 bg-[#080604] overflow-y-auto">
+
+          {/* -- FLOOR PLAN -- */}
+          {activeTab==="floor"&&(
+            <div className="flex flex-col h-full">
+              <div className="p-4 flex-1 space-y-3 overflow-y-auto">
+                {/* Reference point - its own step. It's an anchor shared
+                    across levels, not a property of any one outline, so it
+                    sits above the level list rather than inside a tile. */}
+                <div data-guide="reference-point" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Reference Point</p>
+                    <span className="text-[9px] text-zinc-600">
+                      {floorLevels.filter(l=>l.refPoint).length}/{floorLevels.length} set
+                    </span>
+                  </div>
+                  <p className="mb-2 text-[10px] leading-relaxed text-zinc-500">
+                    Pick the same fixed feature on every level - a column, a grid intersection, a corner.
+                    It&apos;s what lines the floors up with each other.
+                  </p>
+                  <div className="space-y-1">
+                    {floorLevels.map(level=>(
+                      <div key={level.id} className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{background:level.color}} />
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-zinc-400">{level.levelName}</span>
+                        <span className={`text-[8px] font-mono ${level.refPoint?"text-yellow-400":"text-zinc-700"}`}>
+                          {level.refPoint?"set":"-"}
+                        </span>
+                        <button onClick={()=>{setActiveLevel(level.id);setRefPickLevelId(refPickLevelId===level.id?null:level.id);}}
+                          className={`rounded-lg border px-2 py-0.5 text-[9px] font-bold transition ${refPickLevelId===level.id?"animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300":"border-zinc-700 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"}`}>
+                          {refPickLevelId===level.id?"Click plan...":level.refPoint?"Redo":"Pick"}
+                        </button>
+                        {level.refPoint&&(
+                          <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,refPoint:null}:l))}
+                            className="text-[9px] text-zinc-700 hover:text-red-400">&times;</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Floor Levels</p>
+                {floorLevels.map((level,i)=>{
+                  const isActive=level.id===activeLevel;
+                  const isWorking=isActive&&(level.traceMode||level.tracePoints.length>0)&&!level.stored;
+                  return (
+                    <div key={level.id} onClick={()=>setActiveLevel(level.id)}
+                      className={`rounded-xl border p-3 space-y-2.5 cursor-pointer transition ${level.stored?"border-emerald-500/30 bg-emerald-500/5":isWorking?"border-orange-500/60 bg-orange-500/5 shadow-[0_0_14px_rgba(249,115,22,0.18)]":isActive?"border-orange-500/40 bg-orange-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
+                      <div className="flex items-center gap-2">
+                        <div className="h-2.5 w-2.5 rounded-full flex-shrink-0" style={{background:level.color}}/>
+                        <input value={level.levelName} onClick={e=>e.stopPropagation()}
+                          onChange={e=>setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,levelName:e.target.value}:l))}
+                          className="flex-1 min-w-0 bg-transparent text-[10px] font-bold text-zinc-200 outline-none border-b border-zinc-700 pb-0.5"/>
+                        {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.filter((_,j)=>j!==i));}} className="text-[9px] text-zinc-700 hover:text-red-400">&times;</button>}
+                      </div>
+
+                      {/* LF - auto-calculated, condensed to one inline row */}
+                      <div onClick={e=>e.stopPropagation()} className="flex items-center gap-2">
+                        <label className="text-[9px] text-zinc-600 flex-shrink-0">Lineal Feet</label>
+                        {level.traceClosed&&level.linealFeet>0
+                          ? <span className="text-[8px] text-emerald-400 flex-shrink-0">Auto</span>
+                          : <span className="text-[8px] text-zinc-700 flex-shrink-0 whitespace-nowrap">Trace to calc</span>}
+                        <input value={level.linealFeet||""} placeholder="--"
+                          readOnly={level.traceClosed&&level.linealFeet>0}
+                          onChange={e=>setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,linealFeet:parseFloat(e.target.value)||0}:l))}
+                          className={`flex-1 min-w-0 rounded-lg border px-2 py-1 text-right text-[10px] font-mono outline-none ${level.traceClosed&&level.linealFeet>0?"border-emerald-500/30 bg-emerald-500/5 text-emerald-300":"border-zinc-800 bg-zinc-900 text-orange-300 focus:border-orange-500/50"}`}/>
+                      </div>
+
+                      {/* Key floor - an explicit choice on every level, rather
+                          than implied by one being named "Main". This is the
+                          floor whose outline drives linear feet/quantities. */}
+                      <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>({...l,isKeyFloor:l.id===level.id})));}}
+                        className={`flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition ${level.isKeyFloor?"border-orange-500/40 bg-orange-500/5":"border-zinc-800 hover:border-zinc-700"}`}>
+                        <span className={`flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full border ${level.isKeyFloor?"border-orange-500":"border-zinc-600"}`}>
+                          {level.isKeyFloor&&<span className="h-1.5 w-1.5 rounded-full bg-orange-500" />}
+                        </span>
+                        <span className={`text-[9px] ${level.isKeyFloor?"text-orange-300":"text-zinc-500"}`}>
+                          {level.isKeyFloor?"Key floor - drives quantities":"Use as key floor"}
+                        </span>
+                      </button>
+
+                      {/* Start / Close / Store per level */}
+                      <div className="flex gap-1.5" onClick={e=>e.stopPropagation()}>
+                        <button onClick={()=>{setActiveLevel(level.id);setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,traceMode:true,tracePoints:[],traceClosed:false,stored:false,linealFeet:0}:l));}}
+                          className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${level.traceMode&&!level.traceClosed?"border-blue-500 bg-blue-500/15 text-blue-300":"border-zinc-700 text-zinc-500 hover:border-blue-500/40 hover:text-blue-300"}`}>
+                          Start
+                        </button>
+                        <button onClick={()=>{
+                          if(level.tracePoints.length>=3){
+                            const puf=tabScales.floor.pageUnitsPerFoot;
+                            const lf=puf?calcPerimeterFt(level.tracePoints,puf):0;
+                            setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,traceClosed:true,traceMode:false,linealFeet:lf}:l));
+                          }
+                        }}
+                          disabled={level.tracePoints.length<3||level.traceClosed}
+                          className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${level.traceClosed?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-zinc-500"} disabled:opacity-30`}>
+                          {level.traceClosed?"Done":"Close"}
+                        </button>
+                        <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,stored:true,traceMode:false}:l))}
+                          disabled={!level.traceClosed&&level.tracePoints.length===0}
+                          className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${level.stored?"border-emerald-500/40 bg-emerald-500/10 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300"} disabled:opacity-30`}>
+                          {level.stored?"Stored":"Store"}
+                        </button>
+                      </div>
+
+                      {/* Undo Point - only while actively tracing this level */}
+                      {level.traceMode&&!level.traceClosed&&level.tracePoints.length>0&&(
+                        <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,tracePoints:l.tracePoints.slice(0,-1)}:l));}}
+                          className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[9px] font-bold text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300">
+                          Undo Point ({level.tracePoints.length} placed)
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length+1}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false,refPoint:null}])}
+                  className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
+                  + Add Level
+                </button>
+
+                {/* Overlay preview */}
+                {allLevelPoints.length>0&&(() => {
+                  // Preview the ACTUAL aligned stacking, not raw traces -
+                  // this is the visual confirmation that reference points
+                  // are lining the floors up correctly.
+                  const previewRows = alignOverlayRows(floorLevels.map((l,i)=>({
+                    id:i+1, isKeyFloor:l.isKeyFloor, overlayType:"Level", level:l.levelName,
+                    points:l.tracePoints, closed:l.traceClosed, linealFeet:l.linealFeet,
+                    color:l.color, pageNumber:currentPageNo, refPoint:l.refPoint, alignedPoints:l.tracePoints,
+                  }))).filter(r=>r.alignedPoints.length>=2);
+                  if(!previewRows.length) return null;
+                  const all = previewRows.flatMap(r=>r.alignedPoints);
+                  const minX=Math.min(...all.map(p=>p.x)), maxX=Math.max(...all.map(p=>p.x));
+                  const minY=Math.min(...all.map(p=>p.y)), maxY=Math.max(...all.map(p=>p.y));
+                  const gw=Math.max(1,maxX-minX), gh=Math.max(1,maxY-minY);
+                  const s=Math.min(180/gw,130/gh);
+                  const ox=10+(180-gw*s)/2, oy=10+(130-gh*s)/2;
+                  const missingRef = floorLevels.filter(l=>l.tracePoints.length>=2&&!l.refPoint);
+                  return (
+                  <div className="rounded-xl border border-zinc-800 bg-black overflow-hidden">
+                    <p className="text-[9px] text-zinc-500 uppercase tracking-wider px-3 pt-3 pb-1.5">Overlay Preview &middot; Aligned Stack</p>
+                    <div className="px-3 pb-3">
+                      <svg viewBox="0 0 200 150" className="w-full rounded-lg bg-zinc-950">
+                        {previewRows.map(r=>{
+                          const pts=[...r.alignedPoints,...(r.closed?[r.alignedPoints[0]]:[])]
+                            .map(p=>`${ox+(p.x-minX)*s},${oy+(p.y-minY)*s}`).join(" ");
+                          return <polyline key={r.id} points={pts} fill={r.closed?"rgba(249,115,22,0.06)":"none"} stroke={r.color} strokeWidth="1.4"/>;
+                        })}
+                      </svg>
+                      {missingRef.length>0&&(
+                        <p className="mt-2 rounded-lg border border-yellow-500/25 bg-yellow-500/5 px-2 py-1.5 text-[8px] leading-relaxed text-yellow-400">
+                          {missingRef.length} level{missingRef.length>1?"s":""} missing a reference point - {missingRef.length>1?"they":"it"} can&apos;t be stacked accurately until one is picked.
+                        </p>
+                      )}
+                      {floorLevels.filter(l=>l.linealFeet>0).map(l=>(
+                        <div key={l.id} className="flex justify-between text-[9px] mt-1">
+                          <span style={{color:l.color}}>{l.levelName}</span>
+                          <span className="font-mono text-zinc-400">{l.linealFeet} LF</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  );
+                })()}
+              </div>
+              <div className="p-4 border-t border-zinc-900">
+                <button onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{overlayStored?"Overlay Stored":"Store Overlay"}</button>
+              </div>
+            </div>
+          )}
+
+          {/* -- ELEVATIONS -- */}
+          {activeTab==="elevation"&&(
+            <div className="flex flex-col h-full">
+              <div className="p-4 flex-1 space-y-3 overflow-y-auto">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">
+                  {activeCourtyard ? `${activeCourtyard.name} Heights` : "Elevation Heights"}
+                </p>
+
+                {/* Zone - the building itself, or a courtyard. Courtyards are
+                    gripped exactly like elevations but stored separately so
+                    their quantities can be toggled in or out of totals. */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-2 space-y-2">
+                  <div className="flex gap-1 flex-wrap">
+                    <button onClick={()=>{setActiveZone("building");setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                      className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone==="building"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
+                      Exterior
+                    </button>
+                    {courtyards.map(cy=>(
+                      <button key={cy.id} onClick={()=>{setActiveZone(cy.id);setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                        className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone===cy.id?"border-emerald-500 bg-emerald-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-emerald-500/40"}`}>
+                        {cy.name}
+                      </button>
+                    ))}
+                    <button onClick={()=>{const c=makeCourtyard(courtyards.length+1);setCourtyards(prev=>[...prev,c]);setActiveZone(c.id);setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                      className="rounded-lg border border-dashed border-zinc-700 px-2 py-1 text-[9px] text-zinc-500 hover:border-emerald-500/40 hover:text-emerald-300">
+                      + Courtyard
+                    </button>
+                  </div>
+                  {activeCourtyard&&(
+                    <div className="flex items-center gap-1.5">
+                      <input value={activeCourtyard.name}
+                        onChange={e=>setCourtyards(prev=>prev.map(c=>c.id===activeCourtyard.id?{...c,name:e.target.value}:c))}
+                        className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-2 py-1 text-[9px] text-emerald-300 outline-none focus:border-emerald-500/50"/>
+                      <button onClick={()=>{setCourtyards(prev=>prev.filter(c=>c.id!==activeCourtyard.id));setActiveZone("building");}}
+                        className="rounded border border-zinc-800 px-2 py-1 text-[9px] text-zinc-600 hover:border-red-500/40 hover:text-red-400">
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={includeCourtyards}
+                      onChange={e=>setIncludeCourtyards(e.target.checked)}
+                      className="h-3 w-3 accent-emerald-500"/>
+                    <span className="text-[9px] text-zinc-500">Include courtyards in project totals</span>
+                  </label>
+                </div>
+
+                <div className="flex gap-1 flex-wrap">
+                  {ELEVATION_DIRS.map(dir=>{
+                    // A face counts as "in use" once something's gripped on
+                    // it - courtyards often have an open side that never is.
+                    const face=activeFaces.find(f=>f.direction===dir);
+                    const used=face?.areas.some(a=>a.rect&&a.lf>0);
+                    return (
+                    <button key={dir} onClick={()=>{setSelectedElev(dir);setSelectedArea(1);setGripMode(false);}}
+                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":used?"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-orange-500/40":"border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-orange-500/40"}`}>
+                      {dir}{used&&selectedElev!==dir?" \u00b7":""}
+                    </button>
+                    );
+                  })}
+                </div>
+
+                {/* Duplicate toggles - North to South, East to West */}
+                {activeZone==="building"&&selectedElev==="North"&&(
+                  <div className="flex items-center gap-2">
+                    <button onClick={()=>{duplicateElevation("North","South");setDupSouth(true);}}
+                      className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupSouth?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
+                      {dupSouth?"Copied to South - click to re-copy":"Duplicate to South"}
+                    </button>
+                  </div>
+                )}
+                {activeZone==="building"&&selectedElev==="East"&&(
+                  <div className="flex items-center gap-2">
+                    <button onClick={()=>{duplicateElevation("East","West");setDupWest(true);}}
+                      className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupWest?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
+                      {dupWest?"Copied to West - click to re-copy":"Duplicate to West"}
+                    </button>
+                  </div>
+                )}
+
+                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " - Coverage Areas" : " Elevation"}</p>
+
+                {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
+                  const hasData=area.rect&&area.lf>0;
+                  const isSelected=selectedArea===area.areaIndex;
+                  return (
+                    <div key={area.id} onClick={()=>setSelectedArea(area.areaIndex)}
+                      className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>{depthTab==="korban-bid" ? `Area ${area.areaIndex}` : `${selectedElev} Elevation`}</span>
+                        {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>}
+                      </div>
+
+                      {hasData?(
+                        <div className="grid grid-cols-3 gap-1 mb-2">
+                          <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
+                            <p className="text-[7px] text-zinc-600 uppercase">LF</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.lf}</p>
+                          </div>
+                          <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
+                            <p className="text-[7px] text-zinc-600 uppercase">Height</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.heightFt}&apos;</p>
+                          </div>
+                          <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
+                            <p className="text-[7px] text-zinc-600 uppercase">Frames/leg</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.frameTall}</p>
+                          </div>
+                          <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
+                            <p className="text-[7px] text-zinc-600 uppercase">Bays</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.bayCount}</p>
+                          </div>
+                          <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5 col-span-2">
+                            <p className="text-[7px] text-zinc-600 uppercase">Legs</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.legs}</p>
+                          </div>
+                        </div>
+                      ):(
+                        <p className="text-[9px] text-zinc-600 mb-2">{isSelected?"Select Start then drag on drawing":"Click to select area"}</p>
+                      )}
+
+                      {/* Level range - optional. Says which floors this
+                          gripped region spans, so Korban can derive where
+                          the run actually starts vertically. */}
+                      <div onClick={e=>e.stopPropagation()} className="mb-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
+                        <label className="text-[8px] uppercase tracking-wider text-zinc-600 block mb-1">Level Range (optional)</label>
+                        <div className="flex items-center gap-1">
+                          <select value={area.fromLevelId ?? ""}
+                            onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,fromLevelId:v}:a)}:ed));}}
+                            className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
+                            <option value="">From...</option>
+                            {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
+                          </select>
+                          <span className="text-[8px] text-zinc-600">&rarr;</span>
+                          <select value={area.toLevelId ?? ""}
+                            onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,toLevelId:v}:a)}:ed));}}
+                            className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
+                            <option value="">To...</option>
+                            {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
+                          </select>
+                        </div>
+                        {(() => {
+                          if (!area.fromLevelId) return null;
+                          const base = deriveRunBaseFt(area, currentElevData.areas);
+                          if (base === null) return (
+                            <p className="mt-1 text-[8px] leading-tight text-yellow-500">A level below this isn&apos;t gripped - base height unknown.</p>
+                          );
+                          return (
+                            <p className="mt-1 text-[8px] font-mono text-emerald-400">
+                              Starts at {Math.floor(base)}&apos;-{Math.round((base % 1) * 12)}&quot; {base === 0 ? "(grade)" : "above grade"}
+                            </p>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Start / Close / Store per area */}
+                      <div className="flex gap-1" onClick={e=>e.stopPropagation()}>
+                        <button onClick={()=>{setSelectedArea(area.areaIndex);setGripMode(true);}}
+                          className={`flex-1 rounded-lg border px-1.5 py-1.5 text-[8px] font-bold transition ${isSelected&&gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40"}`}>
+                          Start
+                        </button>
+                        <button onClick={()=>setGripMode(false)} disabled={!gripMode||!isSelected}
+                          className="flex-1 rounded-lg border border-zinc-700 px-1.5 py-1.5 text-[8px] font-bold text-zinc-500 hover:border-zinc-500 disabled:opacity-30">
+                          Close
+                        </button>
+                        <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,stored:true}:a)}:ed))}
+                          disabled={!hasData}
+                          className={`flex-1 rounded-lg border px-1.5 py-1.5 text-[8px] font-bold transition ${area.stored?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40"} disabled:opacity-30`}>
+                          {area.stored?"Stored":"Store"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Multiple areas per elevation are a Korban Bid capability.
+                    Full Bid keeps it to one grip per elevation. */}
+                {depthTab==="korban-bid" ? (
+                <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
+                  ...ed,
+                  areas:[...ed.areas,newElevArea(ed.areas.length+1,selectedElev)],
+                }:ed))}
+                  className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
+                  + Add Area
+                </button>
+                ) : (
+                <p className="rounded-xl border border-dashed border-zinc-900 py-2 text-center text-[9.5px] text-zinc-700">
+                  One grip per elevation at this depth. Korban Bid adds multiple areas.
+                </p>
+                )}
+
+                {/* Summary */}
+                <div className="rounded-xl border border-zinc-800 bg-black p-3">
+                  <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">All Elevations to Set Scaffold</p>
+                  {ELEVATION_DIRS.map(dir=>{
+                    const ed=elevData.find(e=>e.direction===dir);
+                    const filled=ed?.areas.filter(a=>a.rect&&a.lf>0)??[];
+                    const totalLF=filled.reduce((s,a)=>s+a.lf,0);
+                    const totalLegs=filled.reduce((s,a)=>s+a.legs,0);
+                    const avgFT=filled.length?Math.round(filled.reduce((s,a)=>s+a.frameTall,0)/filled.length):0;
+                    return (
+                      <div key={dir} className={`py-1 border-b border-zinc-900 last:border-0 ${filled.length?"":"opacity-40"}`}>
+                        <div className="flex justify-between text-[9px]">
+                          <span className="text-zinc-500 font-bold">{dir}</span>
+                          <span className={`font-mono ${filled.length?"text-orange-300":"text-zinc-700"}`}>{filled.length?`${totalLF.toFixed(0)}LF`:"-"}</span>
+                        </div>
+                        {filled.length>0&&<p className="text-[8px] text-zinc-600">{totalLegs} legs &middot; {avgFT} frames per leg</p>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="p-4 border-t border-zinc-900">
+                <button onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"Stored":"Store Elevations"}</button>
+              </div>
+            </div>
+          )}
+
+          {/* -- SECTION VIEW -- */}
+          {activeTab==="section"&&(
+            <div className="flex flex-col h-full">
+              <div className="p-4 flex-1 space-y-3 overflow-y-auto">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Section Views</p>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {sections.map(sec=>(
+                    <button key={sec.id} onClick={()=>setActiveSection(sec.id)}
+                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${activeSection===sec.id?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                      {sec.label}
+                    </button>
+                  ))}
+                  {sections.length<4&&<button onClick={addSection} className="rounded-lg border border-dashed border-zinc-700 px-2 py-1 text-[10px] text-zinc-600 hover:border-zinc-500">+ Add</button>}
+                </div>
+
+                {activeSec&&(
+                  <>
+                    {/* Frame width */}
+                    <div>
+                      <label className="text-[9px] text-zinc-500 block mb-1.5">Frame Width</label>
+                      <div className="flex gap-1">
+                        {(["3'","3'-6\"","5'"] as ScaffoldWidth[]).map(w=>(
+                          <button key={w} onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,frameWidth:w,frameMakeup:getFrameParts(w).map((f,i)=>({...f,qty:s.frameMakeup[i]?.qty??0}))}:s))}
+                            className={`flex-1 rounded-lg border px-1.5 py-1.5 text-[9px] font-bold transition ${activeSec.frameWidth===w?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                            {w}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
-                    {/* 32-color grid picker */}
-                    {isColorOpen && (
-                      <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950 p-2">
-                        <div className="grid grid-cols-8 gap-1">
-                          {overlayColors.map((color) => (
-                            <button
-                              key={color}
-                              onClick={() => {
-                                updateFullOverlayRow(row.id, { color });
-                                setColorPickerOpenId(null);
-                              }}
-                              className="h-5 w-5 rounded-full border-2 transition-transform hover:scale-125"
-                              style={{
-                                background: color,
-                                borderColor: row.color === color ? "#f97316" : "transparent",
-                              }}
-                              title={color}
-                            />
-                          ))}
+                    {/* Wall offset + top of wall height */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[9px] text-zinc-500 block mb-1">Wall Offset</label>
+                        <input value={activeSec.wallOffset} type="number" step="0.5" min="0"
+                          onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOffset:parseFloat(e.target.value)||1}:s))}
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
+                      </div>
+                      <div>
+                        <label className="text-[9px] text-zinc-500 block mb-1">Top of Wall Ht.</label>
+                        <input value={activeSec.topOfWallDistance} type="number" step="0.5" min="0"
+                          onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,topOfWallDistance:parseFloat(e.target.value)||0}:s))}
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
+                      </div>
+                    </div>
+                    <p className="text-[8px] leading-relaxed text-zinc-600">
+                      Wall height from grade. The top working deck lands a worker&apos;s reach below it -
+                      set that in Backend &gt; Scaffold Defaults.
+                    </p>
+
+                    {/* Wall outline status */}
+                    {activeSec.wallOutline.length>0&&(
+                      <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-2.5 flex items-center justify-between">
+                        <span className="text-[9px] text-blue-300">{activeSec.wallComplete?"Wall complete":"Wall outline in progress..."}</span>
+                        <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[],wallComplete:false,totalLF:0,totalLegs:0,totalFrames:0,totalPlanks:0}:s))}
+                          className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>
+                      </div>
+                    )}
+
+                    {/* Scaffold side toggle - appears once wall outline is complete */}
+                    {activeSec.wallComplete&&(
+                      <div>
+                        <label className="text-[9px] text-zinc-500 block mb-1.5">Scaffold Side (relative to wall)</label>
+                        <div className="flex gap-1">
+                          <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,scaffoldSide:"left"}:s))}
+                            className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${activeSec.scaffoldSide==="left"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                            Scaffold Left
+                          </button>
+                          <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,scaffoldSide:"right"}:s))}
+                            className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${activeSec.scaffoldSide==="right"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 text-zinc-400 hover:border-orange-500/40"}`}>
+                            Scaffold Right
+                          </button>
                         </div>
                       </div>
                     )}
 
-                    <div className="mt-2 grid grid-cols-4 gap-1.5">
-                      <button
-                        onClick={() => startPick({ type: "full", id: row.id })}
-                        className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isActiveFullPick && !hasPendingFullMeasure ? "animate-pulse border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)]" : "border-zinc-800"}`}
-                      >
-                        Start
-                      </button>
-                      <button onClick={closePick} className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50">
-                        Close
-                      </button>
-                      <button
-                        onClick={storePick}
-                        className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${isStored ? "border border-white/25 bg-white/5 text-white" : "bg-orange-500 text-black hover:bg-orange-400"}`}
-                      >
-                        Store
-                      </button>
-                      <button onClick={() => removeFullOverlayRow(row.id)} className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-500 hover:border-red-500/40 hover:text-red-300">
-                        Remove
-                      </button>
-                    </div>
-
-                    {/* Undo Point — only shown when this row is actively being traced */}
-                    {isActiveFullPick && tracePoints.length > 0 && (
-                      <button
-                        onClick={undoLastPoint}
-                        className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
-                      >
-                        ↩ Undo Point ({tracePoints.length} placed)
-                      </button>
+                    {/* Quantities this section produced. Shown here so the
+                        per-jump counts are visible without leaving the tab. */}
+                    {activeSec.wallComplete&&activeSec.totalLF>0&&(
+                      <div className="rounded-xl border border-zinc-800 bg-black p-2.5">
+                        <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-1.5">Section Quantities</p>
+                        {activeSec.frameMakeup.filter(f=>f.qty>0).map(f=>(
+                          <div key={f.partNo} className="flex items-center gap-2 py-0.5">
+                            <span className="w-11 shrink-0 font-mono text-[8px] text-orange-400">{f.partNo}</span>
+                            <span className="flex-1 truncate text-[9px] text-zinc-500">{f.description}</span>
+                            <span className="font-mono text-[10px] font-bold text-orange-300">{f.qty.toLocaleString()}</span>
+                          </div>
+                        ))}
+                        <p className="mt-1.5 border-t border-zinc-900 pt-1.5 font-mono text-[8px] text-zinc-600">
+                          {activeSec.totalLF} LF &middot; {activeSec.totalLegs} legs &middot; {activeSec.totalLegs>0?Math.round(activeSec.totalFrames/activeSec.totalLegs):0} frames per leg
+                        </p>
+                      </div>
                     )}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <button onClick={() => addFullOverlayRow("Level")} className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">+ Level</button>
-              <button onClick={() => addFullOverlayRow("Roof")} className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20">+ Roof</button>
-              <button onClick={() => addFullOverlayRow("Penthouse")} className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs font-semibold text-yellow-300 hover:bg-yellow-500/20">+ Penthouse</button>
-              <button onClick={() => addFullOverlayRow("Basement")} className="rounded-xl border border-orange-300/30 bg-orange-300/10 px-3 py-2 text-xs font-semibold text-orange-200 hover:bg-orange-300/20">+ Basement</button>
-            </div>
-          </KorbanPanel>
 
-          {/* Reference Point — anchor that aligns all overlays from any page/session */}
-          <KorbanPanel
-            title="Reference Point"
-            subtitle="Anchor point — aligns overlays from same or different pages"
-            compact
-          >
-            <div className="space-y-2">
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] uppercase tracking-widest text-zinc-600">Anchor</span>
-                  <span className={`font-mono text-xs ${referencePoint ? "text-yellow-300" : "text-zinc-600"}`}>
-                    {referencePoint
-                      ? `X: ${Math.round(referencePoint.x)}  Y: ${Math.round(referencePoint.y)}`
-                      : "Not Set"}
-                  </span>
-                </div>
-                <p className="mt-1.5 text-[10px] leading-4 text-zinc-600">
-                  Click "Pick" then click once on a known fixed point on the plan — a column, corner, or grid intersection. Every overlay will align to this point so traces from different pages stack correctly.
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setReferencePickMode(true)}
-                  className={`rounded-xl border px-3 py-2 text-[10px] font-semibold transition ${
-                    referencePickMode
-                      ? "animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300"
-                      : "border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
-                  }`}
-                >
-                  {referencePickMode ? "Click on Plan..." : "Pick Reference"}
-                </button>
-                <button
-                  onClick={() => { setReferencePoint(null); setReferencePickMode(false); }}
-                  disabled={!referencePoint}
-                  className="rounded-xl border border-zinc-800 px-3 py-2 text-[10px] font-semibold text-zinc-400 hover:border-red-500/30 hover:text-red-400 disabled:opacity-30"
-                >
-                  Clear
-                </button>
-              </div>
-              {referencePoint && (
-                <div className="rounded-lg border border-yellow-400/20 bg-yellow-400/5 px-3 py-2 text-[10px] text-yellow-300">
-                  ✓ Reference locked — all overlays will align to this anchor
-                </div>
-              )}
-            </div>
-          </KorbanPanel>
-
-          {/* Elevation Heights — store works with direct input OR pick points */}
-          <KorbanPanel title="Elevation Heights" compact>
-            <div className="space-y-2">
-              {elevationHeights.map((item) => {
-                const isActive = activeElevation === item.elevation;
-                const isOverallPickActive = pickTarget?.type === "heightOverall" && pickTarget.elevation === item.elevation;
-                const hasPendingOverall = isOverallPickActive && tracePoints.length >= 2 && (traceClosed || overlayLockedOpen);
-                const overallDisplay = hasPendingOverall ? formatFeetInches(tracedLinealFeet) : item.overallHeightInput;
-
-                return (
-                  <div
-                    key={item.elevation}
-                    onClick={() => setActiveElevation(item.elevation)}
-                    className={`cursor-pointer rounded-xl border p-3 transition-all ${
-                      isActive
-                        ? "border-orange-500/40 bg-orange-500/5 shadow-[0_0_18px_rgba(249,115,22,0.12)]"
-                        : "border-zinc-800 bg-zinc-950/70 hover:border-zinc-700"
-                    }`}
-                  >
-                    <div className="mb-2 flex items-center justify-between">
-                      <span className={`text-xs font-semibold ${isActive ? "text-orange-300" : "text-zinc-200"}`}>
-                        {item.elevation}
-                      </span>
-                      {canDuplicateOpposite(item.elevation) && (
-                        <label
-                          className="flex items-center gap-1.5 text-[10px] text-zinc-500"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={duplicateElevationHeights[item.elevation]}
-                            onChange={(event) => {
-                              const checked = event.target.checked;
-                              setDuplicateElevationHeights((current) => ({
-                                ...current,
-                                [item.elevation]: checked,
-                              }));
-                              // Immediately populate opposite elevation when checked
-                              if (checked) {
-                                const opposite = getOppositeElevation(item.elevation);
-                                if (opposite) {
-                                  updateElevationHeight(opposite, {
-                                    overallHeightInput: item.overallHeightInput,
-                                    belowGradeEnabled: item.belowGradeEnabled,
-                                    belowGradeInput: item.belowGradeInput,
-                                  });
-                                }
-                              }
-                            }}
-                            className="accent-orange-500"
-                          />
-                          Duplicate to {getOppositeElevation(item.elevation)}
-                        </label>
-                      )}
-                    </div>
-
-                    {/* Overall height — direct input works, Enter stores */}
-                    <div className={`grid grid-cols-[1fr_96px] items-center gap-2 ${hasPendingOverall ? "rounded-lg bg-yellow-300/5 p-1" : ""}`}>
-                      <span className="text-[10px] uppercase tracking-widest text-zinc-600">Height</span>
-                      <input
-                        value={overallDisplay}
-                        onChange={(event) => {
-                          setActiveElevation(item.elevation);
-                          updateElevationHeight(item.elevation, { overallHeightInput: event.target.value });
-                        }}
-                        onFocus={() => setActiveElevation(item.elevation)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") storeManualOverallHeight(item.elevation);
-                        }}
-                        onClick={(e) => { e.stopPropagation(); setActiveElevation(item.elevation); }}
-                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
-                        placeholder="0'"
-                      />
-                    </div>
-
-                    {/* Below grade */}
-                    <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-2">
-                      <label
-                        className="flex items-center gap-1.5 text-[10px] text-zinc-500"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={item.belowGradeEnabled}
-                          onChange={(event) => updateElevationHeight(item.elevation, { belowGradeEnabled: event.target.checked })}
-                          className="accent-orange-500"
-                        />
-                        Below Grade
-                      </label>
-                      <input
-                        value={item.belowGradeInput}
-                        onChange={(event) => updateElevationHeight(item.elevation, { belowGradeInput: event.target.value })}
-                        onFocus={() => setActiveElevation(item.elevation)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") storeManualOverallHeight(item.elevation);
-                        }}
-                        onClick={(e) => { e.stopPropagation(); setActiveElevation(item.elevation); }}
-                        disabled={!item.belowGradeEnabled}
-                        className="rounded-lg border border-zinc-800 bg-black px-2 py-1 text-right text-[10px] text-orange-300 outline-none focus:border-orange-500 disabled:opacity-35"
-                        placeholder="0'"
-                      />
-                    </div>
-
-                    {/* PDF pick buttons + Store — Start / Close / Store */}
-                    <div className="mt-2 grid grid-cols-3 gap-1.5">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); startPick({ type: "heightOverall", elevation: item.elevation }); }}
-                        className={`rounded-lg border px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50 ${isOverallPickActive && !hasPendingOverall ? "animate-pulse border-yellow-300/40 shadow-[0_0_16px_rgba(234,179,8,0.25)]" : "border-zinc-800"}`}
-                      >
+                    {/* Start / Complete / Store */}
+                    <div className="flex gap-1.5">
+                      <button onClick={()=>setWallOutlineMode(true)}
+                        className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${wallOutlineMode?"border-blue-500 bg-blue-500/15 text-blue-300":"border-zinc-700 text-zinc-500 hover:border-blue-500/40"}`}>
                         Start
                       </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); closePick(); }}
-                        className="rounded-lg border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 hover:border-orange-500/50"
-                      >
-                        Close
+                      <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
+                        disabled={!activeSec.wallOutline||activeSec.wallOutline.length<2||activeSec.wallComplete}
+                        className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${activeSec.wallComplete?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-emerald-500/40"} disabled:opacity-30`}>
+                        {activeSec.wallComplete?"Done":"Complete"}
                       </button>
-                      {/* Store — works with direct input OR after PDF pick */}
-                      {(() => {
-                        const heightVal = parseFeetInches(item.overallHeightInput);
-                        const isHeightStored = heightVal !== null && heightVal > 0 && !hasPendingOverall;
-                        return (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); hasPendingOverall ? storePick() : storeManualOverallHeight(item.elevation); }}
-                            className={`rounded-lg px-2 py-1 text-[10px] font-semibold transition ${
-                              hasPendingOverall
-                                ? "bg-yellow-400 text-black hover:bg-yellow-300"
-                                : isHeightStored
-                                ? "border border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
-                                : "border border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
-                            }`}
-                          >
-                            {isHeightStored ? "✓ Stored" : "Store"}
-                          </button>
-                        );
-                      })()}
+                      <button onClick={storeSection}
+                        className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${sectionStored?"border-emerald-500/40 bg-emerald-500/10 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300"}`}>
+                        {sectionStored?"Stored":"Store"}
+                      </button>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-            {/* Store All — saves all 4 elevations in one atomic write */}
-            <button
-              onClick={storeAllHeights}
-              className="mt-3 w-full rounded-xl border border-orange-500/40 bg-orange-500/15 px-3 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/25"
-            >
-              Store All Heights
-            </button>
-          </KorbanPanel>
-
-          {/* Elevation Breakdown — tight layout so store button stays inside boundary */}
-          <KorbanPanel
-            title="Elevation Breakdown"
-            subtitle="Optional — cross-check only, does not affect ticks or counts"
-            compact
-          >
-            <div className="space-y-2">
-              {elevationBreakdownRows.map((row) => (
-                <div
-                  key={row.elevation}
-                  className="grid grid-cols-[44px_1fr_44px] items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950/70 p-2"
-                >
-                  <span className="text-xs font-semibold text-zinc-300">{row.elevation}</span>
-                  <input
-                    value={row.approxLinearFeet || ""}
-                    onChange={(event) =>
-                      updateElevationBreakdownRow(
-                        row.elevation as ElevationName,
-                        Number(event.target.value.replace(/[^0-9.]/g, "") || 0),
-                      )
-                    }
-                    inputMode="numeric"
-                    placeholder="LF"
-                    className="w-full rounded-lg border border-zinc-800 bg-black px-1.5 py-1 text-right text-xs text-orange-300 outline-none focus:border-orange-500"
-                  />
-                  <button
-                    onClick={() => storeElevationBreakdownRow(row.elevation as ElevationName)}
-                    className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-1 py-1 text-[9px] font-semibold text-orange-300 hover:bg-orange-500/20"
-                  >
-                    Save
-                  </button>
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-[10px] leading-4 text-zinc-600">
-              Used in Estimate Review for Partial Exterior Cost comparison only.
-            </p>
-          </KorbanPanel>
-
-          {/* Takeoff Viewer */}
-          <KorbanPanel title="Takeoff Viewer" compact>
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-              <TakeoffViewer
-                fullOverlayRows={fullOverlayRows}
-                elevationHeights={elevationHeights}
-              />
-              <div className="mt-3 space-y-1 text-xs">
-                <MetaRow label="Key Floor LF" value={formatFeetInches(keyFloorLf)} />
-                <MetaRow label="Avg. Exterior Height" value={formatFeetInches(getAverageExteriorHeight(elevationHeights))} />
-                {elevationOptions.map((elevation) => {
-                  const height = elevationHeights.find((item) => item.elevation === elevation);
-                  if (!height) return null;
-                  return (
-                    <MetaRow
-                      key={elevation}
-                      label={`${elevation} Height`}
-                      value={formatFeetInches(getHeightWithBelowGrade(height))}
-                    />
-                  );
-                })}
+                  </>
+                )}
+              </div>
+              <div className="p-4 border-t border-zinc-900">
+                <button onClick={storeSection} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${sectionStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{sectionStored?"Stored":"Store Section"}</button>
               </div>
             </div>
-            <KorbanButton variant="primary" block className="mt-3" onClick={() => { saveToEstimateReview(); window.location.href = "/set-scaffold"; }}>
-              Save & Continue
-            </KorbanButton>
-          </KorbanPanel>
-        </div>
-      </KorbanPanel>
-    </div>
-  );
-}
-
-function TakeoffViewer({
-  fullOverlayRows,
-  elevationHeights,
-}: {
-  fullOverlayRows: FullOverlayRow[];
-  elevationHeights: ElevationHeight[];
-}) {
-  const drawableFullRows = fullOverlayRows.filter((row) => row.points.length >= 2);
-
-  if (drawableFullRows.length === 0) {
-    return (
-      <div className="flex h-32 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 text-[10px] text-zinc-600">
-        Stored takeoff will appear here.
+          )}
+        </aside>
       </div>
-    );
-  }
-
-  const allPoints = drawableFullRows.flatMap((row) => row.points);
-  const hasPointGeometry = allPoints.length >= 2;
-
-  const minX = hasPointGeometry ? Math.min(...allPoints.map((point) => point.x)) : 0;
-  const maxX = hasPointGeometry ? Math.max(...allPoints.map((point) => point.x)) : 1;
-  const minY = hasPointGeometry ? Math.min(...allPoints.map((point) => point.y)) : 0;
-  const maxY = hasPointGeometry ? Math.max(...allPoints.map((point) => point.y)) : 1;
-
-  const geometryWidth = Math.max(1, maxX - minX);
-  const geometryHeight = Math.max(1, maxY - minY);
-  const availableWidth = 224;
-  const availableHeight = 96;
-  const scale = Math.min(availableWidth / geometryWidth, availableHeight / geometryHeight);
-  const drawnWidth = geometryWidth * scale;
-  const drawnHeight = geometryHeight * scale;
-  const offsetX = 28 + (availableWidth - drawnWidth) / 2;
-  const offsetY = 28 + (availableHeight - drawnHeight) / 2;
-
-  function mapStoredPoint(point: Point) {
-    const x = offsetX + (point.x - minX) * scale;
-    const y = offsetY + (point.y - minY) * scale;
-    return `${x},${y}`;
-  }
-
-  function mappedPointTuple(point: Point) {
-    const [x, y] = mapStoredPoint(point).split(",").map(Number);
-    return { x, y };
-  }
-
-  return (
-    <div className="rounded-lg border border-orange-500/10 bg-[linear-gradient(to_right,rgba(249,115,22,0.14)_1px,transparent_1px),linear-gradient(to_bottom,rgba(249,115,22,0.14)_1px,transparent_1px)] bg-[size:20px_20px] p-2">
-      <svg viewBox="0 0 280 160" className="h-40 w-full rounded border border-zinc-800 bg-black/70">
-        {drawableFullRows.map((row, index) => {
-          const hasGeometry = row.points.length >= 2;
-          const lastPoint = row.points[row.points.length - 1];
-          const firstPoint = row.points[0];
-          const lastMapped = lastPoint ? mappedPointTuple(lastPoint) : null;
-          const firstMapped = firstPoint ? mappedPointTuple(firstPoint) : null;
-
-          return (
-            <g key={row.id} opacity={row.isKeyFloor ? 1 : 0.86}>
-              {hasGeometry && (
-                <>
-                  <polyline
-                    points={row.points.map((point) => mapStoredPoint(point)).join(" ")}
-                    fill="none"
-                    stroke={overlayColorFor(row)}
-                    strokeWidth={row.isKeyFloor ? 4 : 3}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  {row.closed && row.points.length > 2 && lastMapped && firstMapped && (
-                    <line
-                      x1={lastMapped.x} y1={lastMapped.y}
-                      x2={firstMapped.x} y2={firstMapped.y}
-                      stroke={overlayColorFor(row)}
-                      strokeWidth={row.isKeyFloor ? 4 : 3}
-                      strokeLinecap="round"
-                    />
-                  )}
-                </>
-              )}
-              <text x="12" y={14 + index * 11} fill={overlayColorFor(row)} fontSize="8" fontWeight="700">
-                {row.isKeyFloor ? "MAIN · " : ""}{row.level} · {formatFeetInches(row.linealFeet)}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
-
-function ActiveElevationMini({
-  activeElevation,
-  setActiveElevation,
-}: {
-  activeElevation: ElevationName;
-  setActiveElevation: (elevation: ElevationName) => void;
-}) {
-  return (
-    <div className="ml-1 flex items-center gap-1 rounded-xl border border-zinc-800 bg-black px-2 py-1.5">
-      <span className="px-1 text-[10px] uppercase tracking-[0.16em] text-zinc-600">Elevation</span>
-      {elevationOptions.map((elevation) => (
-        <button
-          key={elevation}
-          onClick={() => setActiveElevation(elevation)}
-          className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${activeElevation === elevation ? "bg-white/10 text-white shadow-[0_0_14px_rgba(255,255,255,0.16)]" : "text-zinc-600 hover:text-zinc-300"}`}
-        >
-          {elevation[0]}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Marker({ point, label, zoom, canvasRef }: { point: Point; label: string; zoom: number; canvasRef: React.RefObject<HTMLCanvasElement | null> }) {
-  // Compute position relative to the click container (the outer rounded div)
-  // by using the canvas element's offsetLeft/offsetTop within its parent chain
-  const canvas = canvasRef.current;
-  // The canvas sits inside: outer-div(p-4=16) > white-div(p-4=16) > canvas
-  // So canvas is offset 32px from the outer click target's top-left
-  const containerPadding = canvas ? (canvas.offsetLeft) : 32;
-  const containerPaddingY = canvas ? (canvas.offsetTop) : 32;
-  return (
-    <div
-      className="absolute z-30 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-orange-300 bg-orange-500 text-[10px] font-bold text-black"
-      style={{ left: point.x * zoom + containerPadding, top: point.y * zoom + containerPaddingY }}
-    >
-      {label}
-    </div>
-  );
-}
-
-function MetaRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between border-b border-zinc-900 pb-2 last:border-b-0 last:pb-0">
-      <span className="text-zinc-600">{label}</span>
-      <span className="font-mono text-orange-400">{value}</span>
-    </div>
+      )}
+    </main>
   );
 }
