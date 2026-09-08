@@ -1,334 +1,438 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+/**
+ * Company inventory - what the yard owns, and what is already spoken for.
+ *
+ * Owned counts, costs and weights live in Backend under Stock Catalog. This
+ * page reads them and shows what open projects have committed against them,
+ * so an estimator can see whether the next bid is coverable before promising
+ * a schedule.
+ *
+ * Nothing here is estimated. A part with no owned count says so; a project
+ * with no takeoff commits nothing.
+ */
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-type InventoryRow = { partNo: string; description: string; };
-
-type ProjectAllocation = {
-  projectId: string;
-  projectName: string;
-  qty: number;
-};
-
-type MasterItem = {
-  partNo: string;
-  description: string;
-  owned: number;                      // set in Backend on account setup
-  allocations: ProjectAllocation[];   // one per active project
-};
-
-// ── Full catalog (same as load list) ─────────────────────────────────────────
-
-const ALL_ROWS: InventoryRow[] = [
-  { partNo: "FO7CP",   description: "7' Pedestrian Canopy" },
-  { partNo: "FO6L3",   description: "6' 4\" H - 3' W Frame" },
-  { partNo: "FO5L3",   description: "5' H - 3' W Frame" },
-  { partNo: "FM33",    description: "3' H - 3' W Frame" },
-  { partNo: "FO6L42",  description: "6' 4\" H - 42\" W Frame" },
-  { partNo: "FO5L42",  description: "5' H - 42\" W Frame" },
-  { partNo: "FM342",   description: "3' H - 42\" W Frame" },
-  { partNo: "FO6L",    description: "6' 4\" H - 5' W Frame" },
-  { partNo: "FM5",     description: "5' Mason Frame" },
-  { partNo: "FM3",     description: "3' Mason Frame" },
-  { partNo: "FO6L2",   description: "6' 4\" H X 2' W Frame" },
-  { partNo: "FO5L2",   description: "5' H X 2' W Frame" },
-  { partNo: "FM32",    description: "3' H X 2' W Frame" },
-  { partNo: "AL1",     description: "Screw Jack W/No Base" },
-  { partNo: "AL1S",    description: "Screw Jack W/Base Plate" },
-  { partNo: "BP1",     description: "Fixed Base Plate" },
-  { partNo: "BP2",     description: "Swivel Base Plate" },
-  { partNo: "BP3",     description: "Curved Base Plate" },
-  { partNo: "SJS",     description: "Swivel Jacks" },
-  { partNo: "P12",     description: "12' Putlogs" },
-  { partNo: "P16",     description: "16' Putlogs" },
-  { partNo: "P22",     description: "22' Putlogs" },
-  { partNo: "PH2",     description: "Putlogs Hangers" },
-  { partNo: "SP3",     description: "3' Spreader Bar" },
-  { partNo: "SP42",    description: "42\" Spreader Bar" },
-  { partNo: "SP5",     description: "5' Spreader Bar" },
-  { partNo: "B42",     description: "4X2 Cross Brace" },
-  { partNo: "B52",     description: "5X2 Cross Brace" },
-  { partNo: "B62",     description: "6X2 Cross Brace" },
-  { partNo: "B72",     description: "7X2 Cross Brace" },
-  { partNo: "B82",     description: "8X2 Cross Brace" },
-  { partNo: "B102",    description: "10X2 Cross Brace" },
-  { partNo: "B44",     description: "4X4 Cross Brace" },
-  { partNo: "B54",     description: "5X4 Cross Brace" },
-  { partNo: "B64",     description: "6X4 Cross Brace" },
-  { partNo: "B74",     description: "7X4 Cross Brace" },
-  { partNo: "B84",     description: "8X4 Cross Brace" },
-  { partNo: "B104",    description: "10X4 Cross Brace" },
-  { partNo: "GR42",    description: "42\" Guard Rail" },
-  { partNo: "GR3",     description: "3' Guard Rail" },
-  { partNo: "GR4",     description: "4' Guard Rail" },
-  { partNo: "GR5",     description: "5' Guard Rail" },
-  { partNo: "GR6",     description: "6' Guard Rail" },
-  { partNo: "GR7",     description: "7' Guard Rail" },
-  { partNo: "GR8",     description: "8' Guard Rail" },
-  { partNo: "GR10",    description: "10' Guard Rail" },
-  { partNo: "GHB3",    description: "3' Gooser Brace" },
-  { partNo: "GHB5",    description: "5' Gooser Brace" },
-  { partNo: "GHB7",    description: "7' Gooser Brace" },
-  { partNo: "GHB10",   description: "10' Gooser Brace" },
-  { partNo: "BR12L",   description: "12\" Side Bracket" },
-  { partNo: "BR20L",   description: "20\" Side Bracket" },
-  { partNo: "BR24L",   description: "24\" Side Bracket" },
-  { partNo: "BR30S",   description: "30\" Side Bracket" },
-  { partNo: "BR20E",   description: "20\" End Bracket" },
-  { partNo: "BR30E",   description: "30\" End Bracket" },
-  { partNo: "CGRP",    description: "Male Corner Guard" },
-  { partNo: "ST4SG",   description: "4' Tube" },
-  { partNo: "ST6SG",   description: "6' Tube" },
-  { partNo: "ST8SG",   description: "8' Tube" },
-  { partNo: "ST10SG",  description: "10' Tube" },
-  { partNo: "ST13SG",  description: "13' Tube" },
-  { partNo: "CRA19",   description: "Right Angle Clamp" },
-  { partNo: "CSA19",   description: "Swivel Clamp" },
-  { partNo: "SAU3",    description: "3' Steel Ladder" },
-  { partNo: "SAU6",    description: "6' Steel Ladder" },
-  { partNo: "SAUB",    description: "Ladder Bracket" },
-  { partNo: "K18",     description: "18\" Kickers" },
-  { partNo: "K12",     description: "12\" Kickers" },
-  { partNo: "CPS",     description: "Coupling Pin" },
-  { partNo: "PTP",     description: "Pig Tail Pin" },
-  { partNo: "SU6",     description: "6' 4\" Stair Unit" },
-  { partNo: "SU6OR",   description: "Outside Rail" },
-  { partNo: "SU6IR",   description: "Inner Rail" },
-  { partNo: "SU6IER",  description: "Inner End Rail" },
-  { partNo: "WP5",     description: "5' Wood Plank" },
-  { partNo: "WP6",     description: "6' Wood Plank" },
-  { partNo: "WP7",     description: "7' Wood Plank" },
-  { partNo: "WP8",     description: "8' Wood Plank" },
-  { partNo: "WP9",     description: "9' Wood Plank" },
-  { partNo: "WP10",    description: "10' Wood Plank" },
-  { partNo: "WP12",    description: "12' Wood Plank" },
-  { partNo: "SB7",     description: "7' Hatch Board" },
-  { partNo: "SB10",    description: "10' Hatch Board" },
-  { partNo: "FP10",    description: "10' Filler Plank" },
-  { partNo: "AT12",    description: "1/2\" All Thread" },
-  { partNo: "N12",     description: "1/2\" Nuts" },
-  { partNo: "RH12",    description: "1/2\" Redheads" },
-];
-
-// ── Demo seed data ────────────────────────────────────────────────────────────
-// Backend-configured owned quantities (hundreds/thousands, realistic for a
-// mid-size scaffold contractor). Percentages of a base fleet.
-
-const OWNED_QUANTITIES: Record<string, number> = {
-  FO6L3: 2400, FO5L3: 800,  FM33: 400,
-  FO6L42: 600, FO5L42: 200, FM342: 120,
-  FO6L:  1800, FM5: 300,    FM3: 200,
-  FO6L2:  400, FO5L2: 120,  FM32: 80,
-  AL1:   1200, AL1S: 600,   BP1: 1200,
-  BP2:    300, BP3: 80,     SJS: 400,
-  P12:    500, P16: 300,    P22: 150,
-  PH2:    800, SP3: 400,    SP42: 200, SP5: 180,
-  B82:   2000, B62: 800,    B102: 400,
-  B84:    600, B64: 300,
-  GR8:   1500, GR10: 600,   GR6: 400, GR5: 200,
-  GHB5:   300, GHB7: 200,   GHB10: 100,
-  BR12L:  400, BR20L: 300,  BR24L: 200, BR30S: 150,
-  WP8:   3000, WP10: 1200,  WP12: 600,
-  WP6:    400, WP5: 200,
-  CPS:   5000, PTP: 3000,
-  SAU6:   200, SAU3: 120,   SAUB: 300,
-  ST8SG:  400, ST10SG: 300, ST6SG: 200, ST13SG: 100,
-  CRA19: 1000, CSA19: 600,
-};
-
-// Demo projects with allocations
-const DEMO_PROJECTS = [
-  { projectId: "KRB-260614-001", projectName: "Mare Island Apts" },
-  { projectId: "KRB-260522-002", projectName: "Oakland Federal Bldg" },
-  { projectId: "KRB-260411-003", projectName: "SF Civic Center" },
-];
-
-// Per-project allocations as % of owned (realistic demo spread)
-const PROJECT_ALLOCATION_PCT: Record<string, Record<string, number>> = {
-  "KRB-260614-001": { FO6L3: 0.19, FO6L: 0.25, WP8: 0.06, BP1: 0.05, AL1: 0.05, B82: 0.03, GR8: 0.04 },
-  "KRB-260522-002": { FO6L3: 0.22, FO6L: 0.18, WP8: 0.08, BP1: 0.07, AL1: 0.07, B82: 0.04, GR8: 0.05, FO6L2: 0.15 },
-  "KRB-260411-003": { FO6L3: 0.15, FO6L: 0.12, WP8: 0.05, BP1: 0.04, AL1: 0.04, B82: 0.02, GR8: 0.03 },
-};
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import { getFirstElevation, listProjects, type ProjectRecord } from "@/lib/projectStore";
+import { getBackendSettings, type StockItem } from "@/lib/backendStore";
 
 const menuLinks: KorbanMenuLink[] = [
-  { href: "/dashboard",           label: "Bid Room" },
-  { href: "/inventory/load-list", label: "Load List" },
-  { href: "/backend",             label: "Backend" },
+  { href: "/dashboard", label: "Bid Room" },
+  { href: "/inventory-load-list", label: "Project Load List" },
+  { href: "/projects", label: "Bid Log" },
+  { href: "/backend", label: "Backend" },
 ];
 
-// ── Availability status ───────────────────────────────────────────────────────
-
-type AvailStatus = "healthy" | "low" | "critical" | "over";
-
-function getStatus(available: number, owned: number): AvailStatus {
-  if (owned === 0) return "healthy";
-  if (available < 0) return "over";
-  const pct = available / owned;
-  if (pct <= 0.10) return "critical";
-  if (pct <= 0.25) return "low";
-  return "healthy";
-}
-
-const STATUS_STYLES: Record<AvailStatus, { cell: string; text: string; glow: string; label: string }> = {
-  healthy:  { cell: "bg-emerald-500/8",  text: "text-emerald-300", glow: "shadow-[0_0_12px_rgba(52,211,153,0.25)]",  label: "OK" },
-  low:      { cell: "bg-yellow-500/10",  text: "text-yellow-300",  glow: "shadow-[0_0_12px_rgba(234,179,8,0.3)]",    label: "LOW" },
-  critical: { cell: "bg-red-500/12",     text: "text-red-400",     glow: "shadow-[0_0_14px_rgba(239,68,68,0.35)]",   label: "SHORT" },
-  over:     { cell: "bg-orange-500/12",  text: "text-orange-400",  glow: "shadow-[0_0_14px_rgba(249,115,22,0.35)]",  label: "OVER" },
+/** Which engine count commits which part. Mirrors the load list. */
+const QUANTITY_SOURCE: Record<string, string> = {
+  FO6L3: "frameCount",
+  WP10: "plankCount",
+  B82: "crossBraceCount",
+  GR8: "guardrailCount",
+  BP1: "basePlateCount",
+  AL1S: "screwJackCount",
+  CPS: "couplingPinCount",
 };
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+const CATEGORY_ORDER = [
+  "Frames",
+  "Planks",
+  "Cross Braces",
+  "Guardrails",
+  "Base Plates",
+  "Screw Jacks",
+  "",
+];
 
-export default function MasterInventoryPage() {
-  const [items, setItems] = useState<MasterItem[]>([]);
+export default function InventoryPage() {
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [stock, setStock] = useState<StockItem[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [openCategory, setOpenCategory] = useState<string | null>("Frames");
 
-  useEffect(() => {
-    // Build master items from catalog + owned quantities + project allocations
-    const built: MasterItem[] = ALL_ROWS.map((row) => {
-      const owned = OWNED_QUANTITIES[row.partNo] ?? 0;
-      const allocations: ProjectAllocation[] = DEMO_PROJECTS.map((proj) => {
-        const pct = PROJECT_ALLOCATION_PCT[proj.projectId]?.[row.partNo] ?? 0;
-        return {
-          projectId: proj.projectId,
-          projectName: proj.projectName,
-          qty: Math.round(owned * pct),
-        };
-      });
-      return { partNo: row.partNo, description: row.description, owned, allocations };
-    });
-    setItems(built);
+  const load = useCallback(() => {
+    try {
+      setStock(getBackendSettings().material.stock);
+      setProjects(listProjects().filter((project) => project.projectName.trim() !== ""));
+    } catch {
+      // Storage unavailable - the page renders empty rather than failing.
+    }
+    setMounted(true);
   }, []);
 
-  const projects = DEMO_PROJECTS;
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
+
+  /** What each part is committed to, project by project. */
+  const allocations = useMemo(() => {
+    const map = new Map<string, { projectName: string; qty: number }[]>();
+    projects.forEach((project) => {
+      const engine = (getFirstElevation(project)?.quantityEngine ?? {}) as unknown as Record<
+        string,
+        number
+      >;
+      Object.entries(QUANTITY_SOURCE).forEach(([partNo, key]) => {
+        const qty = engine[key] ?? 0;
+        if (qty <= 0) return;
+        const list = map.get(partNo) ?? [];
+        list.push({ projectName: project.projectName, qty });
+        map.set(partNo, list);
+      });
+    });
+    return map;
+  }, [projects]);
+
+  const grouped = useMemo(() => {
+    return CATEGORY_ORDER.map((category) => {
+      const items = stock
+        .filter((item) => item.category === category)
+        .map((item) => {
+          const committedList = allocations.get(item.partNo) ?? [];
+          const committed = committedList.reduce((sum, row) => sum + row.qty, 0);
+          return { item, committed, committedList, available: item.owned - committed };
+        });
+      const owned = items.reduce((sum, row) => sum + row.item.owned, 0);
+      const committed = items.reduce((sum, row) => sum + row.committed, 0);
+      return {
+        category: category || "Other",
+        key: category,
+        items,
+        owned,
+        committed,
+        pressure: owned > 0 ? committed / owned : 0,
+      };
+    }).filter((group) => group.items.length > 0);
+  }, [stock, allocations]);
+
+  const totalOwned = grouped.reduce((sum, group) => sum + group.owned, 0);
+  const totalValue = stock.reduce((sum, item) => sum + item.owned * item.purchaseCost, 0);
+  const entered = stock.filter((item) => item.owned > 0).length;
+
+  if (!mounted) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-korban-base">
+        <p className="font-mono text-[11px] text-zinc-600">Opening inventory...</p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-[#080604] text-white">
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanMotionStyles />
+
       <KorbanHeader
-        title="Master Inventory"
-        subtitle="Company-wide equipment — allocations across all active projects"
+        title="Company Inventory"
+        subtitle="What the yard owns, and what open bids have already spoken for."
         menuLinks={menuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((open) => !open)}
         actionsAlwaysVisible
+        actionsClassName="gap-2.5"
         actions={
           <>
-            <a href="/inventory/load-list"
-              className="rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-bold text-zinc-300 hover:border-orange-500/30 hover:text-orange-300">
-              Load List
-            </a>
-            <a href="/dashboard"
-              className="rounded-xl border border-orange-500/25 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20">
+            <div className="rounded-lg border border-zinc-800 bg-korban-raised px-3.5 py-1.5 text-right">
+              <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">Pieces owned</p>
+              <p className="font-mono text-[14px] font-bold leading-tight text-zinc-200">
+                {totalOwned.toLocaleString()}
+              </p>
+            </div>
+            <KorbanButton variant="ghost" onClick={() => router.push("/backend")}>
+              Edit stock
+            </KorbanButton>
+            <KorbanButton variant="primary" onClick={() => router.push("/dashboard")}>
               Bid Room
-            </a>
+            </KorbanButton>
           </>
         }
       />
 
-      <section className="p-6">
+      <div className="relative mx-auto w-full max-w-[1400px] px-4 py-4">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.022]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
+            backgroundSize: "26px 26px",
+          }}
+        />
 
-        {/* Legend */}
-        <div className="mb-5 flex items-center gap-4 flex-wrap">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-600">Available Stock:</span>
-          {(Object.entries(STATUS_STYLES) as [AvailStatus, typeof STATUS_STYLES[AvailStatus]][]).map(([key, s]) => (
-            <div key={key} className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-[10px] font-bold ${s.cell} ${s.text} border-current/20`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${s.text.replace("text-", "bg-")}`} />
-              {s.label}
-            </div>
-          ))}
-          <span className="ml-auto text-[10px] text-zinc-600">{items.filter(i => i.owned > 0).length} tracked items · {projects.length} active projects</span>
-        </div>
+        {entered === 0 && (
+          <div className="relative mb-3 rounded-lg border border-orange-500/30 bg-orange-500/[0.06] px-4 py-3">
+            <p className="text-[12px] font-semibold text-orange-200">
+              The yard is empty because nobody has told KORBAN what is in it.
+            </p>
+            <p className="mt-1 max-w-2xl text-[11px] leading-[1.6] text-zinc-400">
+              Enter owned counts, purchase costs and weights under Backend, Stock Catalog.
+              Once they are in, this page shows what every open bid commits and flags a
+              category before it runs short.
+            </p>
+            <button
+              onClick={() => router.push("/backend")}
+              className="mt-2 rounded bg-orange-500 px-4 py-1.5 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
+            >
+              Set up the yard
+            </button>
+          </div>
+        )}
 
-        {/* Horizontally scrollable table */}
-        <div className="overflow-x-auto rounded-2xl border border-zinc-800 bg-black">
-          <table className="w-full text-left text-[11px] min-w-[900px]">
-            <thead>
-              <tr className="bg-zinc-950">
-                {/* Fixed left columns */}
-                <th className="sticky left-0 z-10 bg-zinc-950 border-b border-r border-zinc-800 px-3 py-3 font-semibold text-zinc-500 w-[84px]">Part No.</th>
-                <th className="sticky left-[84px] z-10 bg-zinc-950 border-b border-r border-zinc-800 px-3 py-3 font-semibold text-zinc-500 min-w-[200px]">Description</th>
-                <th className="border-b border-r border-zinc-800 px-3 py-3 font-semibold text-zinc-400 text-right w-[80px]">Owned</th>
-                {/* One column per project */}
-                {projects.map((p) => (
-                  <th key={p.projectId} className="border-b border-r border-zinc-800 px-3 py-3 font-semibold text-zinc-500 text-right w-[120px] whitespace-nowrap">
-                    <div className="text-[9px] text-zinc-600 font-mono">{p.projectId}</div>
-                    <div className="text-zinc-400 truncate max-w-[110px]">{p.projectName}</div>
-                  </th>
-                ))}
-                {/* Available column */}
-                <th className="border-b border-zinc-800 px-3 py-3 font-semibold text-right w-[90px] text-zinc-300">Available</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => {
-                const totalAllocated = item.allocations.reduce((s, a) => s + a.qty, 0);
-                const available = item.owned - totalAllocated;
-                const status = getStatus(available, item.owned);
-                const s = STATUS_STYLES[status];
-                const hasOwned = item.owned > 0;
-
+        <div className="relative grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
+          <Panel
+            title="Stock by category"
+            right={
+              <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
+                {grouped.length} categories
+              </span>
+            }
+          >
+            <div className="grid gap-1">
+              {grouped.map((group) => {
+                const open = openCategory === group.key;
                 return (
-                  <tr key={item.partNo}
-                    className={`border-b border-zinc-900 transition-colors hover:bg-zinc-900/40 ${!hasOwned ? "opacity-40" : ""}`}>
-                    {/* Part No — sticky */}
-                    <td className="sticky left-0 z-10 bg-[#080604] border-r border-zinc-900 px-3 py-2 font-mono text-[10px] text-orange-400">
-                      {item.partNo}
-                    </td>
-                    {/* Description — sticky */}
-                    <td className="sticky left-[84px] z-10 bg-[#080604] border-r border-zinc-900 px-3 py-2 uppercase tracking-[0.02em] text-zinc-400">
-                      {item.description}
-                    </td>
-                    {/* Owned */}
-                    <td className="border-r border-zinc-900 px-3 py-2 text-right font-mono text-zinc-300">
-                      {hasOwned ? item.owned.toLocaleString() : "—"}
-                    </td>
-                    {/* Per-project allocations */}
-                    {item.allocations.map((alloc) => (
-                      <td key={alloc.projectId} className="border-r border-zinc-900 px-3 py-2 text-right font-mono text-zinc-500">
-                        {alloc.qty > 0 ? (
-                          <span className="text-orange-300/80">{alloc.qty.toLocaleString()}</span>
-                        ) : "—"}
-                      </td>
-                    ))}
-                    {/* Available — color glow */}
-                    <td className={`px-3 py-2 text-right font-mono font-bold rounded-r-sm ${hasOwned ? `${s.cell} ${s.text} ${s.glow}` : "text-zinc-700"}`}>
-                      {hasOwned ? (
-                        <span className="flex items-center justify-end gap-1.5">
-                          {available < 0 ? available.toLocaleString() : available.toLocaleString()}
-                          <span className="text-[8px] font-bold opacity-70">{s.label}</span>
+                  <div key={group.category} className="border-b border-zinc-900/70 last:border-0">
+                    <button
+                      onClick={() => setOpenCategory(open ? null : group.key)}
+                      className="w-full py-1.5 text-left"
+                    >
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] text-zinc-600">
+                            {open ? "\u2212" : "+"}
+                          </span>
+                          <span className="text-[11.5px] font-semibold text-zinc-200">
+                            {group.category}
+                          </span>
+                          <span className="font-mono text-[9px] text-zinc-700">
+                            {group.items.length} parts
+                          </span>
                         </span>
-                      ) : "—"}
-                    </td>
-                  </tr>
+                        <span className="font-mono text-[11px] text-zinc-400">
+                          <span className="font-bold text-zinc-200">
+                            {group.owned.toLocaleString()}
+                          </span>
+                          <span className="mx-1 text-zinc-700">owned</span>
+                          <span
+                            className={group.committed > 0 ? "text-orange-300" : "text-zinc-700"}
+                          >
+                            {group.committed.toLocaleString()}
+                          </span>
+                          <span className="ml-1 text-zinc-700">out</span>
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-900">
+                        <div
+                          className={`h-full transition-[width] duration-500 ${
+                            group.pressure > 0.85
+                              ? "bg-red-500"
+                              : group.pressure > 0.6
+                              ? "bg-amber-500"
+                              : "bg-orange-500"
+                          }`}
+                          style={{ width: `${Math.min(100, group.pressure * 100)}%` }}
+                        />
+                      </div>
+                    </button>
+
+                    {open && (
+                      <div className="mb-1.5 rounded border border-zinc-900 bg-black p-2">
+                        <div className="grid grid-cols-[68px_1fr_64px_64px_64px] gap-2 px-1 pb-1">
+                          {["Part", "Description", "Owned", "Out", "Free"].map((heading) => (
+                            <span
+                              key={heading}
+                              className="font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-600"
+                            >
+                              {heading}
+                            </span>
+                          ))}
+                        </div>
+                        {group.items.map(({ item, committed, committedList, available }) => (
+                          <div key={item.id}>
+                            <div
+                              className={`grid grid-cols-[68px_1fr_64px_64px_64px] items-center gap-2 border-t border-zinc-900/70 px-1 py-1 ${
+                                item.owned > 0 ? "" : "opacity-40"
+                              }`}
+                            >
+                              <span className="font-mono text-[10px] font-bold text-orange-400">
+                                {item.partNo || "-"}
+                              </span>
+                              <span className="truncate text-[10.5px] text-zinc-400">
+                                {item.description}
+                              </span>
+                              <span className="text-right font-mono text-[11px] font-bold text-zinc-200">
+                                {item.owned > 0 ? (
+                                  item.owned.toLocaleString()
+                                ) : (
+                                  <span className="text-zinc-700">-</span>
+                                )}
+                              </span>
+                              <span className="text-right font-mono text-[11px] text-orange-300">
+                                {committed > 0 ? (
+                                  committed.toLocaleString()
+                                ) : (
+                                  <span className="text-zinc-700">-</span>
+                                )}
+                              </span>
+                              <span
+                                className={`text-right font-mono text-[11px] font-bold ${
+                                  available < 0 ? "text-red-400" : "text-zinc-300"
+                                }`}
+                              >
+                                {item.owned > 0 ? (
+                                  available.toLocaleString()
+                                ) : (
+                                  <span className="text-zinc-700">-</span>
+                                )}
+                              </span>
+                            </div>
+                            {committedList.length > 0 && (
+                              <div className="px-1 pb-1 pl-[76px]">
+                                {committedList.map((row) => (
+                                  <span
+                                    key={row.projectName}
+                                    className="mr-3 font-mono text-[9px] text-zinc-600"
+                                  >
+                                    {row.projectName}
+                                    <span className="ml-1 text-orange-400/60">
+                                      {row.qty.toLocaleString()}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
-            </tbody>
+            </div>
+          </Panel>
 
-            {/* Totals footer */}
-            <tfoot>
-              <tr className="bg-zinc-950 border-t border-zinc-700">
-                <td className="sticky left-0 z-10 bg-zinc-950 px-3 py-3 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500" colSpan={2}>
-                  Totals
-                </td>
-                <td className="px-3 py-3 text-right font-mono font-bold text-zinc-300 border-r border-zinc-800">
-                  {items.reduce((s, i) => s + i.owned, 0).toLocaleString()}
-                </td>
-                {projects.map((p) => (
-                  <td key={p.projectId} className="px-3 py-3 text-right font-mono font-bold text-orange-300/70 border-r border-zinc-800">
-                    {items.reduce((s, i) => s + (i.allocations.find(a => a.projectId === p.projectId)?.qty ?? 0), 0).toLocaleString()}
-                  </td>
-                ))}
-                <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">
-                  {items.reduce((s, i) => {
-                    const alloc = i.allocations.reduce((a, b) => a + b.qty, 0);
-                    return s + (i.owned - alloc);
-                  }, 0).toLocaleString()}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
+          <div className="grid items-start gap-3">
+            <Panel title="Yard summary" scan={false}>
+              <Figure label="Pieces owned" value={totalOwned.toLocaleString()} />
+              <Figure
+                label="Replacement value"
+                value={
+                  totalValue > 0
+                    ? totalValue.toLocaleString("en-US", {
+                        style: "currency",
+                        currency: "USD",
+                        maximumFractionDigits: 0,
+                      })
+                    : "-"
+                }
+              />
+              <Figure label="Parts entered" value={`${entered} of ${stock.length}`} />
+              <Figure label="Projects committing" value={String(projects.length)} />
+            </Panel>
+
+            <Panel title="Committed by project" scan={false}>
+              {projects.length === 0 ? (
+                <p className="text-[10.5px] leading-[1.6] text-zinc-600">
+                  No projects yet. Once a bid has a takeoff, its material shows here
+                  against the yard.
+                </p>
+              ) : (
+                <div className="grid gap-1">
+                  {projects.map((project) => {
+                    const engine = (getFirstElevation(project)?.quantityEngine ??
+                      {}) as unknown as Record<string, number>;
+                    const pieces = Object.values(QUANTITY_SOURCE).reduce(
+                      (sum, key) => sum + (engine[key] ?? 0),
+                      0
+                    );
+                    return (
+                      <div
+                        key={project.projectId}
+                        className="flex items-baseline justify-between gap-3 border-b border-zinc-900/70 py-1 last:border-0"
+                      >
+                        <span className="min-w-0 truncate text-[10.5px] text-zinc-400">
+                          {project.projectName}
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] font-bold text-zinc-300">
+                          {pieces > 0 ? (
+                            pieces.toLocaleString()
+                          ) : (
+                            <span className="text-zinc-700">no takeoff</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Panel>
+          </div>
         </div>
-
-      </section>
+      </div>
     </main>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Pieces
+// -----------------------------------------------------------------------------
+
+function KorbanMotionStyles() {
+  return (
+    <style>{`
+      @keyframes korban-scan {
+        0% { transform: translateX(-40%); opacity: 0.5; }
+        85% { opacity: 0.5; }
+        100% { transform: translateX(320%); opacity: 0; }
+      }
+      .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
+      @media (prefers-reduced-motion: reduce) {
+        .korban-scan { animation: none; opacity: 0; }
+      }
+    `}</style>
+  );
+}
+
+function Panel({
+  title, right, scan = true, children,
+}: {
+  title: string;
+  right?: React.ReactNode;
+  scan?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+      <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+      <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
+      {scan && (
+        <span
+          aria-hidden
+          className="korban-scan pointer-events-none absolute -top-px left-0 h-px w-[36%]"
+          style={{ background: "linear-gradient(90deg,transparent,#F97316,transparent)" }}
+        />
+      )}
+      <div className="flex items-center justify-between gap-3 pb-2">
+        <h2 className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+          {title}
+        </h2>
+        {right}
+      </div>
+      <div className="rounded border border-zinc-900 bg-black p-2.5">{children}</div>
+    </section>
+  );
+}
+
+function Figure({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between border-b border-zinc-900/70 py-1.5 last:border-0">
+      <span className="text-[10.5px] text-zinc-500">{label}</span>
+      <span className="font-mono text-[13px] font-bold text-orange-300">{value}</span>
+    </div>
   );
 }

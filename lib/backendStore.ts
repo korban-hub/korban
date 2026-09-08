@@ -27,6 +27,11 @@ export type CompanySettings = {
   unionAffiliation: string;
   /** Licensing board line printed on the proposal. */
   licenseBoardLine: string;
+  /**
+   * Region the Bid Room pulls local construction news for. A contractor in
+   * Vallejo cares about Bay Area starts, not national averages.
+   */
+  newsRegion: string;
 };
 
 /** The person whose name and numbers go on the proposal. */
@@ -82,9 +87,41 @@ export type MaterialItem = {
   billsAsRental: boolean;
 };
 
+/**
+ * A real piece of stock, by part number.
+ *
+ * The categories above describe how a bay is built; this describes what is
+ * actually on the yard. A frame is never just a frame - it is a 6'-4" by 3',
+ * and it has its own cost, rate and weight. Load lists, the inventory page
+ * and truck counts all read from here.
+ */
+export type StockItem = {
+  /**
+   * Stable key. Several real parts carry no part number - wood pads, sleeves,
+   * stud clamps, sammy's - so the number can't be the identity.
+   */
+  id: string;
+  partNo: string;
+  description: string;
+  /** Which of the six core categories this belongs to. Blank for specialty. */
+  category: string;
+  /** Which column this prints in on the paper load list. 1, 2 or 3. */
+  column: number;
+  /** What it cost to buy. Drives replacement value and loss recovery. */
+  purchaseCost: number;
+  /** Monthly rental rate for this specific part. */
+  rentalRate: number;
+  /** Pounds each. Drives load counts and truck planning. */
+  weightLbs: number;
+  /** How many the company owns. Zero until entered. */
+  owned: number;
+};
+
 export type MaterialDefaults = {
   items: MaterialItem[];
   rules: MaterialRules;
+  /** The full parts catalog with cost, rate, weight and owned counts. */
+  stock: StockItem[];
 };
 
 /**
@@ -291,6 +328,127 @@ function buildDefaultMaterialItems(): MaterialItem[] {
   return [...core, ...specialty];
 }
 
+/**
+ * The parts catalog. Descriptions and part numbers are the trade's, not ours -
+ * they match what shows on a load list and what the yard calls things. Costs,
+ * rates, weights and owned counts start at zero: those are the company's
+ * numbers and inventing them would put fiction into a bid.
+ */
+function buildDefaultStock(): StockItem[] {
+  // partNo, description, category, column (1-3 as they print on the form)
+  const rows: [string, string, string, number][] = [
+    // -- Column one: frames, jacks, bases, putlogs, spreaders --------------
+    ["FO7CP", "7' Pedestrian Canopy", "", 1],
+    ["FO6L3", "6'-4\" H - 3' W Frame", "Frames", 1],
+    ["FO5L3", "5' H - 3' W Frame", "Frames", 1],
+    ["FM33", "3' H - 3' W Frame", "Frames", 1],
+    ["FO6L42", "6'-4\" H - 42\" W Frame", "Frames", 1],
+    ["FO5L42", "5' H - 42\" W Frame", "Frames", 1],
+    ["FM342", "3' H - 42\" W Frame", "Frames", 1],
+    ["FO6L", "6'-4\" H - 5' W Frame", "Frames", 1],
+    ["FM5", "5' Mason Frame", "Frames", 1],
+    ["FM3", "3' Mason Frame", "Frames", 1],
+    ["FO6L2", "6'-4\" H x 2' W Frame", "Frames", 1],
+    ["FO5L2", "5' H x 2' W Frame", "Frames", 1],
+    ["FM32", "3' H x 2' W Frame", "Frames", 1],
+    ["", "Wood Pad 12\" x 12\"", "", 1],
+    ["AL1", "Screw Jack w/ No Base", "Screw Jacks", 1],
+    ["AL1S", "Screw Jack w/ Base Plate", "Screw Jacks", 1],
+    ["BP1", "Fixed Base Plate", "Base Plates", 1],
+    ["BP2", "Swivel Base Plate", "Base Plates", 1],
+    ["BP3", "Curved Base Plate", "Base Plates", 1],
+    ["SJS", "Swivel Jacks", "Screw Jacks", 1],
+    ["", "12\" Sleeves", "", 1],
+    ["", "Stud Clamps", "", 1],
+    ["P12", "12' Putlogs", "", 1],
+    ["P16", "16' Putlogs", "", 1],
+    ["P22", "22' Putlogs", "", 1],
+    ["PH2", "Putlog Hangers", "", 1],
+    ["SP3", "3' Spreader Bar", "", 1],
+    ["SP42", "42\" Spreader Bar", "", 1],
+    ["SP5", "5' Spreader Bar", "", 1],
+
+    // -- Column two: braces, guardrails, brackets, hardware ----------------
+    ["B42", "4x2 Cross Brace", "Cross Braces", 2],
+    ["B52", "5x2 Cross Brace", "Cross Braces", 2],
+    ["B72", "7x2 Cross Brace", "Cross Braces", 2],
+    ["B82", "8x2 Cross Brace", "Cross Braces", 2],
+    ["B102", "10x2 Cross Brace", "Cross Braces", 2],
+    ["B44", "4x4 Cross Brace", "Cross Braces", 2],
+    ["B54", "5x4 Cross Brace", "Cross Braces", 2],
+    ["B74", "7x4 Cross Brace", "Cross Braces", 2],
+    ["B84", "8x4 Cross Brace", "Cross Braces", 2],
+    ["B104", "10x4 Cross Brace", "Cross Braces", 2],
+    ["GR2", "2' Guard Rail", "Guardrails", 2],
+    ["GR3", "3' Guard Rail", "Guardrails", 2],
+    ["GR42", "42\" Guard Rail", "Guardrails", 2],
+    ["GR4", "4' Guard Rail", "Guardrails", 2],
+    ["GR5", "5' Guard Rail", "Guardrails", 2],
+    ["GR7", "7' Guard Rail", "Guardrails", 2],
+    ["GR8", "8' Guard Rail", "Guardrails", 2],
+    ["GR10", "10' Guard Rail", "Guardrails", 2],
+    ["GHB3", "3' Gooser Brace", "", 2],
+    ["GHB5", "5' Gooser Brace", "", 2],
+    ["GHB7", "7' Gooser Brace", "", 2],
+    ["GHB10", "10' Gooser Brace", "", 2],
+    ["BR12L", "12\" Side Bracket", "", 2],
+    ["BR20L", "20\" Side Bracket", "", 2],
+    ["BR30S", "30\" Side Bracket", "", 2],
+    ["BR20E", "20\" End Bracket", "", 2],
+    ["BR30E", "30\" End Bracket", "", 2],
+    ["", "1/2\" All Thread", "", 2],
+    ["", "1/2\" Nuts", "", 2],
+    ["", "1/2\" Redheads", "", 2],
+    ["", "1/2\" Steel Sammy's", "", 2],
+    ["", "1/2\" Wood Sammy's", "", 2],
+
+    // -- Column three: tube and clamp, ladders, stairs, planks -------------
+    ["CGRP", "Male Corner Guard", "", 3],
+    ["ST4SG", "4' Tube", "", 3],
+    ["ST6SG", "6' Tube", "", 3],
+    ["ST8SG", "8' Tube", "", 3],
+    ["ST10SG", "10' Tube", "", 3],
+    ["ST13SG", "13' Tube", "", 3],
+    ["CRA19", "Right Angle Clamp", "", 3],
+    ["CSA19", "Swivel Clamp", "", 3],
+    ["", "12\" Kickers", "", 3],
+    ["", "18\" Kickers", "", 3],
+    ["CPS", "Coupling Pin", "", 3],
+    ["PTP", "Pig Tail Pin", "", 3],
+    ["", "Swivel Clamp Beam Clamp", "", 3],
+    ["", "Right Angle Beam Clamp", "", 3],
+    ["SAU3", "3' Steel Ladder", "", 3],
+    ["SAU6", "6' Steel Ladder", "", 3],
+    ["SAUB", "Ladder Bracket", "", 3],
+    ["SU6", "6'-4\" Stair Unit", "", 3],
+    ["SU6OR", "Outside Rail", "", 3],
+    ["SU6IR", "Inner Rail", "", 3],
+    ["WP5", "5' Wood Plank", "Planks", 3],
+    ["WP7", "7' Wood Plank", "Planks", 3],
+    ["WP9", "9' Wood Plank", "Planks", 3],
+    ["WP10", "10' Wood Plank", "Planks", 3],
+    ["WP12", "12' Wood Plank", "Planks", 3],
+    ["SB7", "7' Hatch Board", "", 3],
+    ["SB8", "8' Hatch Board", "", 3],
+    ["SB10", "10' Hatch Board", "", 3],
+    ["", "Sheetrock Cart", "", 3],
+    ["", "Netting", "", 3],
+    ["", "Wire & Nails", "", 3],
+  ];
+
+  return rows.map(([partNo, description, category, column]) => ({
+    id: partNo || description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
+    partNo,
+    description,
+    category,
+    column,
+    purchaseCost: 0,
+    rentalRate: 0,
+    weightLbs: 0,
+    owned: 0,
+  }));
+}
+
 export const DEFAULT_MATERIAL_RULES: MaterialRules = {
   crossBracesPerBayPerJump: 2,
   guardrailTopPerBay: 4,
@@ -391,6 +549,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     travelStartAddress: "",
     unionAffiliation: "",
     licenseBoardLine: "Contractors State License Board - P.O. Box 26000, Sacramento, CA 95826",
+    newsRegion: "",
   },
   estimator: {
     estimatorName: "",
@@ -417,6 +576,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
   material: {
     items: buildDefaultMaterialItems(),
     rules: DEFAULT_MATERIAL_RULES,
+    stock: buildDefaultStock(),
   },
   labor: {
     installCrewSize: 4,
@@ -533,6 +693,7 @@ function normalizeCompany(value: unknown): CompanySettings {
     travelStartAddress: asString(r.travelStartAddress, d.travelStartAddress),
     unionAffiliation: asString(r.unionAffiliation, d.unionAffiliation),
     licenseBoardLine: asString(r.licenseBoardLine, d.licenseBoardLine),
+    newsRegion: asString(r.newsRegion, d.newsRegion),
   };
 }
 
@@ -590,13 +751,60 @@ function normalizeMaterialRules(value: unknown): MaterialRules {
   };
 }
 
+function normalizeStock(value: unknown): StockItem[] {
+  const defaults = buildDefaultStock();
+  if (!Array.isArray(value) || value.length === 0) return defaults;
+
+  const stored = new Map<string, Record<string, unknown>>();
+  value.forEach((row) => {
+    if (!isRecord(row)) return;
+    const key = typeof row.id === "string" ? row.id : typeof row.partNo === "string" ? row.partNo : "";
+    if (key) stored.set(key, row);
+  });
+
+  const merged = defaults.map((fallback) => {
+    const row = stored.get(fallback.id) ?? stored.get(fallback.partNo);
+    if (!row) return fallback;
+    return {
+      ...fallback,
+      purchaseCost: asNumber(row.purchaseCost, fallback.purchaseCost),
+      rentalRate: asNumber(row.rentalRate, fallback.rentalRate),
+      weightLbs: asNumber(row.weightLbs, fallback.weightLbs),
+      owned: asNumber(row.owned, fallback.owned),
+    };
+  });
+
+  // Parts a company added themselves survive alongside the standard catalog.
+  const known = new Set(defaults.flatMap((row) => [row.id, row.partNo]).filter(Boolean));
+  const custom = value
+    .filter((row): row is Record<string, unknown> => {
+      if (!isRecord(row)) return false;
+      const key = typeof row.id === "string" ? row.id : String(row.partNo ?? "");
+      return Boolean(key) && !known.has(key);
+    })
+    .map((row) => ({
+      id: String(row.id ?? row.partNo ?? ""),
+      partNo: asString(row.partNo, ""),
+      description: asString(row.description, "Custom part"),
+      category: asString(row.category, ""),
+      column: asNumber(row.column, 3),
+      purchaseCost: asNumber(row.purchaseCost, 0),
+      rentalRate: asNumber(row.rentalRate, 0),
+      weightLbs: asNumber(row.weightLbs, 0),
+      owned: asNumber(row.owned, 0),
+    }));
+
+  return [...merged, ...custom];
+}
+
 function normalizeMaterial(value: unknown): MaterialDefaults {
   const r = isRecord(value) ? value : {};
   const defaults = buildDefaultMaterialItems();
   const rules = normalizeMaterialRules(r.rules);
+  const stock = normalizeStock(r.stock);
 
   if (!Array.isArray(r.items) || r.items.length === 0) {
-    return { items: defaults, rules };
+    return { items: defaults, rules, stock };
   }
 
   const storedById = new Map<string, unknown>();
@@ -615,7 +823,7 @@ function normalizeMaterial(value: unknown): MaterialDefaults {
       id: String(item.id), name: "Custom Item", isCore: false, unitRate: 0, billsAsRental: false,
     }));
 
-  return { items: [...merged, ...customItems], rules };
+  return { items: [...merged, ...customItems], rules, stock };
 }
 
 function normalizeRateSet(value: unknown, d: LaborRateSet): LaborRateSet {
@@ -842,6 +1050,19 @@ export function computeTravel(
 export function getPieceRate(name: string, settings: BackendSettings = getBackendSettings()): number {
   const item = settings.material.items.find((row) => row.name.toLowerCase() === name.toLowerCase());
   return item?.unitRate ?? 0;
+}
+
+/** One stock row by part number. */
+export function getStockItem(
+  key: string,
+  settings: BackendSettings = getBackendSettings(),
+): StockItem | undefined {
+  return settings.material.stock.find((row) => row.id === key || row.partNo === key);
+}
+
+/** Everything the company owns at least one of. */
+export function getOwnedStock(settings: BackendSettings = getBackendSettings()): StockItem[] {
+  return settings.material.stock.filter((row) => row.owned > 0);
 }
 
 /** Core pieces flagged to bill as rental on the estimate. */

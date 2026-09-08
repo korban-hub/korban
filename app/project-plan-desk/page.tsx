@@ -39,13 +39,13 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/backend", label: "Backend" },
 ];
 
-const DEPTH_LABEL: Record<EstimateDepth, string> = {
+const LEVEL_LABEL: Record<EstimateDepth, string> = {
   "quick-bid": "Quick Bid",
   "full-bid": "Full Bid",
   "korban-bid": "Korban Bid",
 };
 
-const DEPTH_ACCURACY: Record<EstimateDepth, string> = {
+const LEVEL_ACCURACY: Record<EstimateDepth, string> = {
   "quick-bid": "+/-15-25%",
   "full-bid": "+/-8-12%",
   "korban-bid": "+/-3-6%",
@@ -109,6 +109,8 @@ export default function ProjectPlanDeskPage() {
   const [elevation, setElevation] = useState<ProjectElevation | null>(null);
   const [depth, setDepth] = useState<EstimateDepth>("quick-bid");
   const [derived, setDerived] = useState<EstimateDerived | null>(null);
+  /** Which drawing is open full size. Null means none. */
+  const [openView, setOpenView] = useState<{ label: string; ready: boolean } | null>(null);
   const [unionDefault, setUnionDefault] = useState("Union");
 
   const load = useCallback(() => {
@@ -155,6 +157,8 @@ export default function ProjectPlanDeskPage() {
   const hasGrips = elevationTotals.areaCount > 0;
   const hasSection = (elevation?.sectionView?.wallOutline?.length ?? 0) >= 2;
   const hasPricing = Boolean(derived && derived.rentalsRevenue > 0);
+  // A level only counts as chosen once real takeoff work backs it up.
+  const levelChosen = hasScale || hasGrips || tracedLevels > 0;
 
   const engine = elevation?.quantityEngine;
   const linearFeet = elevation?.linearFeet ?? 0;
@@ -190,20 +194,23 @@ export default function ProjectPlanDeskPage() {
         actions={
           <>
             <div className="rounded-lg border border-zinc-800 bg-korban-raised px-3.5 py-1.5 text-right">
-              <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">Bid depth</p>
-              <p className="font-mono text-[12px] font-bold leading-tight text-zinc-200">
-                {DEPTH_LABEL[depth]}
-                <span className="ml-2 text-[10px] font-normal text-zinc-600">
-                  {DEPTH_ACCURACY[depth]}
-                </span>
-              </p>
+              <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">Bid level</p>
+              {/* Blank until the estimator chooses one in Takeoff. Showing a
+                  level before anything is measured claims an accuracy the job
+                  hasn't earned. */}
+              {levelChosen ? (
+                <p className="font-mono text-[12px] font-bold leading-tight text-zinc-200">
+                  {LEVEL_LABEL[depth]}
+                  <span className="ml-2 text-[10px] font-normal text-zinc-600">
+                    {LEVEL_ACCURACY[depth]}
+                  </span>
+                </p>
+              ) : (
+                <p className="font-mono text-[12px] font-bold leading-tight text-zinc-700">
+                  Not set
+                </p>
+              )}
             </div>
-            <KorbanButton
-              variant="ghost"
-              onClick={() => router.push("/dashboard")}
-            >
-              Bid Room
-            </KorbanButton>
             <KorbanButton
               variant="primary"
               onClick={() => router.push("/takeoff-workspace-advanced")}
@@ -287,6 +294,28 @@ export default function ProjectPlanDeskPage() {
                 </div>
               </div>
             </div>
+            {/* The nudge belongs at the bottom of the details, because that's
+                where an estimator finishes and wonders what's next. */}
+            <div className="mt-2.5 rounded border border-orange-500/25 bg-orange-500/[0.05] px-3 py-2.5">
+              <p className="text-[11.5px] font-semibold text-orange-200">
+                {complete
+                  ? "Details are in. Time to build the estimate."
+                  : hasGrips
+                  ? "Takeoff is underway - pick up where you left off."
+                  : "Now let's go land some work!"}
+              </p>
+              <p className="mt-1 text-[10.5px] leading-[1.55] text-zinc-500">
+                {hasGrips
+                  ? "Every measurement you have already taken carries forward. Nothing gets entered twice."
+                  : "Upload the plans, set the scale, and grip the elevations that need coverage. Korban does the counting."}
+              </p>
+              <button
+                onClick={() => router.push("/takeoff-workspace-advanced")}
+                className="mt-2 rounded bg-orange-500 px-4 py-1.5 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
+              >
+                {hasGrips ? "Back to takeoff" : "Start takeoff"}
+              </button>
+            </div>
           </Panel>
 
           <div className="grid items-start gap-3">
@@ -295,7 +324,7 @@ export default function ProjectPlanDeskPage() {
               title="Where this bid stands"
               right={
                 <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
-                  {DEPTH_LABEL[depth]}
+                  {LEVEL_LABEL[depth]}
                 </span>
               }
               scan={false}
@@ -350,7 +379,7 @@ export default function ProjectPlanDeskPage() {
 
             {/* ---- What it currently totals ------------------------------ */}
             <Panel title="Current quantities" scan={false}>
-              {linearFeet <= 0 && !hasGrips ? (
+              {!hasScale && !hasGrips && tracedLevels === 0 ? (
                 <p className="px-1 py-3 text-[11px] leading-[1.6] text-zinc-600">
                   Nothing measured yet. Quantities appear here as the takeoff
                   progresses - they are never estimated ahead of the work.
@@ -387,6 +416,33 @@ export default function ProjectPlanDeskPage() {
               )}
             </Panel>
 
+            {/* ---- What the job looks like ------------------------------- */}
+            <Panel title="Project views" scan={false}>
+              <p className="mb-2 px-1 text-[10px] leading-[1.5] text-zinc-600">
+                Fills in as the takeoff progresses. Click any view to open it.
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                <ViewBay
+                  label="Plan overlay"
+                  ready={tracedLevels > 0}
+                  note={tracedLevels > 0 ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"}` : "Full Bid and above"}
+                  onOpen={() => setOpenView({ label: "Plan overlay", ready: tracedLevels > 0 })}
+                />
+                <ViewBay
+                  label="3D model"
+                  ready={hasGrips && tracedLevels > 0}
+                  note={hasGrips && tracedLevels > 0 ? "Ready to view" : "Needs a traced plan"}
+                  onOpen={() => setOpenView({ label: "3D model", ready: hasGrips && tracedLevels > 0 })}
+                />
+                <ViewBay
+                  label="Section view"
+                  ready={hasSection}
+                  note={hasSection ? "Wall profile captured" : "Korban Bid only"}
+                  onOpen={() => setOpenView({ label: "Section view", ready: hasSection })}
+                />
+              </div>
+            </Panel>
+
             {/* ---- The number, if there is one --------------------------- */}
             {hasPricing && derived && (
               <Panel title="Estimate so far" scan={false}>
@@ -411,6 +467,66 @@ export default function ProjectPlanDeskPage() {
           Last saved {formatWhen(project.updatedAt)}
         </p>
       </div>
+
+      {/* A drawing is worth looking at properly, so it opens full size rather
+          than sending the estimator to another page to squint at it. */}
+      {openView && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col bg-black/95 backdrop-blur-sm"
+          onClick={() => setOpenView(null)}
+        >
+          <div
+            className="relative m-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-korban-base"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-4 w-4 border-l border-t border-orange-500" />
+            <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-4 w-4 border-b border-r border-orange-500" />
+
+            <div className="flex items-center justify-between border-b border-zinc-900 px-4 py-2.5">
+              <h2 className="font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-300">
+                {openView.label}
+              </h2>
+              <span className="flex items-center gap-2">
+                <button
+                  onClick={() =>
+                    router.push(
+                      openView.label === "Plan overlay"
+                        ? "/takeoff-workspace-advanced"
+                        : "/set-scaffold-v2"
+                    )
+                  }
+                  className="rounded border border-zinc-800 bg-korban-raised px-3 py-1.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300"
+                >
+                  Edit in {openView.label === "Plan overlay" ? "Takeoff" : "Set Scaffold"}
+                </button>
+                <button
+                  onClick={() => setOpenView(null)}
+                  className="rounded border border-zinc-800 bg-korban-raised px-3 py-1.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+                >
+                  Close
+                </button>
+              </span>
+            </div>
+
+            <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+              <div className="text-center">
+                <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">
+                  {openView.label}
+                </p>
+                <p className="mx-auto mt-2 max-w-md text-[11.5px] leading-[1.6] text-zinc-500">
+                  {openView.ready
+                    ? "The live drawing renders here. Until the viewer is wired through, open it in the tool that owns it."
+                    : openView.label === "Plan overlay"
+                    ? "Nothing traced yet. Trace a floor plan in Takeoff Workspace and the building outline appears here, stacked level by level."
+                    : openView.label === "3D model"
+                    ? "Nothing to model yet. Once a plan is traced and elevations are gripped, the scaffold builds itself here and turns so you can walk it."
+                    : "No section drawn yet. Trace a wall profile in Set Scaffold and the frame configuration shows here against the real wall."}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -554,6 +670,48 @@ function Stage({
       <span className="font-mono text-[10px] text-zinc-700 transition group-hover:text-orange-400">
         {done ? "review" : optional ? "" : "go"}
       </span>
+    </button>
+  );
+}
+
+/**
+ * A reserved slot for a drawing. Empty bays are deliberate - they show what
+ * this job will hold once the work is done, so the page reads as a project
+ * taking shape rather than a page with things missing.
+ */
+function ViewBay({
+  label, ready, note, onOpen,
+}: {
+  label: string;
+  ready: boolean;
+  note: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      onClick={ready ? onOpen : undefined}
+      disabled={!ready}
+      className={`group flex aspect-[4/3] flex-col items-center justify-center gap-1.5 rounded border transition ${
+        ready
+          ? "border-orange-500/30 bg-orange-500/[0.04] hover:border-orange-500/60 hover:bg-orange-500/[0.08]"
+          : "cursor-default border-dashed border-zinc-800 bg-transparent"
+      }`}
+    >
+      <span
+        className={`font-mono text-[10px] font-medium uppercase tracking-[0.14em] ${
+          ready ? "text-orange-300" : "text-zinc-700"
+        }`}
+      >
+        {label}
+      </span>
+      <span className="px-2 text-center font-mono text-[9px] leading-[1.4] text-zinc-600">
+        {note}
+      </span>
+      {ready && (
+        <span className="font-mono text-[9px] text-zinc-600 transition group-hover:text-orange-400">
+          open
+        </span>
+      )}
     </button>
   );
 }

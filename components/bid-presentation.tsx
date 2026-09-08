@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-export type PresentationDepth = "quick-bid" | "full-bid" | "korban-bid";
+export type BidLevel = "quick-bid" | "full-bid" | "korban-bid";
 
 export type BidPresentationData = {
   projectName: string;
@@ -28,7 +28,7 @@ export type BidPresentationData = {
   estimator: string;
   proposalNumber: string;
   bidDate: string;
-  depth: PresentationDepth;
+  depth: BidLevel;
 
   linearFeet: number;
   wallHeight: number;
@@ -94,7 +94,7 @@ function formatEstimator(name: string): string {
   return `${first} ${last.charAt(0).toUpperCase()}.`;
 }
 
-const DEPTH_LABEL: Record<PresentationDepth, string> = {
+const LEVEL_LABEL: Record<BidLevel, string> = {
   "quick-bid": "Quick Bid",
   "full-bid": "Full Bid",
   "korban-bid": "Korban Bid",
@@ -624,7 +624,7 @@ const coverSlide: Slide = {
             ["Estimator", data.estimator],
             ["Proposal", data.proposalNumber],
             ["Date", data.bidDate],
-            ["Bid depth", DEPTH_LABEL[data.depth]],
+            ["Bid level", LEVEL_LABEL[data.depth]],
           ].map(([label, value]) => (
             <span key={label}>
               <span className="block text-[9px] uppercase tracking-[0.2em] text-zinc-600">{label}</span>
@@ -1064,7 +1064,7 @@ export default function BidPresentation({
           <SlideStage key={slide.id} slide={slide} data={data} phase={phase} />
 
           <p className="absolute bottom-3.5 right-6 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-700">
-            {DEPTH_LABEL[data.depth]} · {data.proposalNumber}
+            {LEVEL_LABEL[data.depth]} · {data.proposalNumber}
           </p>
         </div>
       </div>

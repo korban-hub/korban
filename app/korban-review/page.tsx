@@ -7,6 +7,7 @@ import {
   getActiveElevation, getActiveProject, getEstimateDepth,
   type EstimateDepth, type ProjectElevation,
 } from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
 /**
  * Korban Review - three readings of the same job, side by side.
@@ -26,7 +27,7 @@ import {
  * mistaken for each other.
  */
 
-type DepthMeta = {
+type LevelMeta = {
   id: EstimateDepth;
   name: string;
   blurb: string;
@@ -34,13 +35,13 @@ type DepthMeta = {
   source: string;
 };
 
-const DEPTHS: DepthMeta[] = [
+const LEVELS: LevelMeta[] = [
   { id: "quick-bid",  name: "Quick Bid",  blurb: "Elevation coverage only",   accuracy: "+/-15-25%", source: "Gripped elevation areas" },
   { id: "full-bid",   name: "Full Bid",   blurb: "Plan geometry and layout",  accuracy: "+/-8-12%",  source: "Traced perimeter" },
   { id: "korban-bid", name: "Korban Bid", blurb: "Sections, 3D and my review", accuracy: "+/-3-6%",   source: "Perimeter and sections" },
 ];
 
-const DEPTH_RANK: Record<EstimateDepth, number> = {
+const LEVEL_RANK: Record<EstimateDepth, number> = {
   "quick-bid": 0,
   "full-bid": 1,
   "korban-bid": 2,
@@ -98,6 +99,7 @@ export default function KorbanReviewPage() {
   const [projectName, setProjectName] = useState("");
   const [proposalNumber, setProposalNumber] = useState("");
   const [depth, setDepth] = useState<EstimateDepth>("quick-bid");
+  const [company, setCompany] = useState({ name: "", logo: "" });
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -108,6 +110,8 @@ export default function KorbanReviewPage() {
       setProjectName(project.projectName || "Untitled project");
       setProposalNumber(project.projectId || "");
       setDepth(getEstimateDepth());
+      const backend = getBackendSettings();
+      setCompany({ name: backend.company.companyName, logo: backend.company.companyLogoUrl });
     } catch {
       // Storage unavailable - the page still renders, everything reads empty.
     }
@@ -155,35 +159,44 @@ export default function KorbanReviewPage() {
 
   if (!mounted) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#070604]">
+      <main className="flex min-h-screen items-center justify-center bg-korban-base">
         <p className="font-mono text-[11px] text-zinc-600">Loading review...</p>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-[#070604] text-white">
+    <main className="min-h-screen bg-korban-base text-white">
       <KorbanMotionStyles />
 
       {/* Header - two ways back, one way forward */}
-      <header className="sticky top-0 z-20 border-b border-zinc-900 bg-[#070604]/95 backdrop-blur">
+      <header className="sticky top-0 z-20 border-b border-zinc-900 bg-korban-base/95 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 px-5 py-3">
           <button onClick={() => router.push("/dashboard")} className="flex shrink-0 items-center gap-2.5">
-            <svg width="20" height="20" viewBox="0 0 44 44" aria-hidden>
-              <defs>
-                <linearGradient id="kRev" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#FDBA74" />
-                  <stop offset="100%" stopColor="#F97316" />
-                </linearGradient>
-              </defs>
-              <path d="M22 4 L40 38 L4 38 Z" fill="url(#kRev)" />
-              <path d="M22 4 L40 38 L22 38 Z" fill="#000" opacity="0.18" />
-            </svg>
+            {/* Company logo when one is set in Backend, the KORBAN mark otherwise. */}
+            {company.logo ? (
+              <img
+                src={company.logo}
+                alt={company.name || "Company"}
+                className="h-7 w-auto max-w-[120px] object-contain"
+              />
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 44 44" aria-hidden>
+                <defs>
+                  <linearGradient id="kRev" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%" stopColor="#FDBA74" />
+                    <stop offset="100%" stopColor="#F97316" />
+                  </linearGradient>
+                </defs>
+                <path d="M22 4 L40 38 L4 38 Z" fill="url(#kRev)" />
+                <path d="M22 4 L40 38 L22 38 Z" fill="#000" opacity="0.18" />
+              </svg>
+            )}
             <span
               className="uppercase text-[#F97316]"
-              style={{ fontFamily: "var(--font-title), sans-serif", fontSize: "22px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
+              style={{ fontFamily: "var(--font-title), sans-serif", fontSize: "20px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
             >
-              Korban
+              {company.name || "Korban"}
             </span>
           </button>
 
@@ -199,16 +212,10 @@ export default function KorbanReviewPage() {
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <button
-              onClick={() => router.push("/takeoff-workspace-advanced")}
-              className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+              onClick={() => router.push("/dashboard")}
+              className="rounded-lg border border-zinc-800 bg-korban-raised px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
             >
-              Takeoff
-            </button>
-            <button
-              onClick={() => router.push("/set-scaffold-v2")}
-              className="rounded-lg border border-zinc-800 bg-[#0f0f0f] px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
-            >
-              Set Scaffold
+              Bid Room
             </button>
             <button
               onClick={() => router.push("/estimate-review")}
@@ -248,22 +255,22 @@ export default function KorbanReviewPage() {
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-600">
               Currently at{" "}
               <span className="text-orange-400">
-                {DEPTHS.find((item) => item.id === depth)?.name ?? depth}
+                {LEVELS.find((item) => item.id === depth)?.name ?? depth}
               </span>
             </p>
           </div>
 
           {/* Three tiers, side by side, so they can actually be compared */}
           <div className="mt-5 grid items-start gap-3 lg:grid-cols-3">
-            {DEPTHS.map((meta) => (
-              <DepthPanel
+            {LEVELS.map((meta) => (
+              <LevelPanel
                 key={meta.id}
                 meta={meta}
                 counts={countsFor(meta.id)}
                 report={buildPhaseReport(elevation, meta.id, elevationTotals)}
                 reached={reached(meta.id)}
                 isCurrent={meta.id === depth}
-                isBelowCurrent={DEPTH_RANK[meta.id] < DEPTH_RANK[depth]}
+                isBelowCurrent={LEVEL_RANK[meta.id] < LEVEL_RANK[depth]}
                 courtyardCount={courtyards.courtyardCount}
                 courtyardLinearFeet={courtyards.linearFeet}
                 onGo={() => router.push("/takeoff-workspace-advanced")}
@@ -292,11 +299,11 @@ type Counts = {
   legs: number;
 };
 
-function DepthPanel({
+function LevelPanel({
   meta, counts, report, reached, isCurrent, isBelowCurrent,
   courtyardCount, courtyardLinearFeet, onGo,
 }: {
-  meta: DepthMeta;
+  meta: LevelMeta;
   counts: Counts;
   report: { covered: string; gaps: string[]; nextStep?: string };
   reached: boolean;
@@ -312,8 +319,8 @@ function DepthPanel({
         isCurrent
           ? "border-orange-500/45 bg-orange-500/[0.04]"
           : reached
-          ? "border-zinc-800 bg-[#0b0b0b]"
-          : "border-zinc-900 bg-[#080706]"
+          ? "border-zinc-800 bg-korban-raised"
+          : "border-zinc-900 bg-korban-inset"
       }`}
     >
       {/* Corner ticks read as instrumentation - only on tiers that hold data */}
@@ -374,9 +381,13 @@ function DepthPanel({
           </p>
           <button
             onClick={onGo}
-            className="mt-3 rounded border border-zinc-800 bg-[#0f0f0f] px-3 py-1.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300"
+            className="mt-3 rounded border border-orange-500/40 bg-orange-500/10 px-3.5 py-1.5 font-mono text-[10px] font-bold text-orange-300 transition hover:border-orange-500 hover:bg-orange-500/20"
           >
-            Go do that
+            {meta.id === "quick-bid"
+              ? "Let's do it"
+              : meta.id === "full-bid"
+              ? "Take me back"
+              : "Set it up"}
           </button>
         </div>
       ) : (

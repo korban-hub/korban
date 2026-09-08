@@ -9,7 +9,9 @@ import {
   type EstimatorSettings,
   type ScaffoldDefaults,
   type MaterialDefaults,
+  type MaterialDefaults,
   type MaterialItem,
+  type StockItem,
   type LaborDefaults,
   type LaborRateSet,
   type PricingDefaults,
@@ -21,6 +23,11 @@ import {
 export default function BackendPage() {
   const [isHydrated, setIsHydrated] = useState(false);
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
+  /**
+   * The catalog is forty parts deep with four numbers each. Squeezed into a
+   * tile it was unusable, so it takes the whole page when you go into it.
+   */
+  const [view, setView] = useState<"settings" | "material">("settings");
 
   const [company, setCompany] = useState<CompanySettings | null>(null);
   const [estimator, setEstimator] = useState<EstimatorSettings | null>(null);
@@ -83,6 +90,16 @@ export default function BackendPage() {
                   {savedFlash} saved
                 </span>
               )}
+              <button
+                onClick={() => setView(view === "material" ? "settings" : "material")}
+                className={`rounded-xl border px-5 py-3 font-mono text-[11px] font-bold uppercase tracking-[0.14em] transition ${
+                  view === "material"
+                    ? "border-orange-500 bg-orange-500 text-black"
+                    : "border-orange-500/40 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
+                }`}
+              >
+                {view === "material" ? "Back to settings" : "Material"}
+              </button>
               <button onClick={handleResetAll} className="rounded-xl border border-zinc-700 bg-black px-5 py-3 text-sm font-bold text-zinc-400 hover:border-red-500/40 hover:text-red-300">
                 Reset All
               </button>
@@ -104,6 +121,13 @@ export default function BackendPage() {
         </div>
       </div>
 
+      {view === "material" ? (
+        <MaterialCatalog
+          material={material}
+          setMaterial={setMaterial}
+          onSave={() => { saveBackendSection("material", material); flashSaved("Material Catalog"); }}
+        />
+      ) : (
       <section className="columns-1 gap-5 p-6 xl:columns-3 [&>*]:mb-5 [&>*]:break-inside-avoid">
 
         {/* 1. Company */}
@@ -135,6 +159,9 @@ export default function BackendPage() {
           </FieldRow>
           <FieldRow label="License Board Line" hint="Printed under the union line">
             <TextInput value={company.licenseBoardLine} onChange={(v) => setCompany({ ...company, licenseBoardLine: v })} />
+          </FieldRow>
+          <FieldRow label="Local News Region" hint="City, metro or state the Bid Room pulls local construction news for">
+            <TextInput value={company.newsRegion} onChange={(v) => setCompany({ ...company, newsRegion: v })} placeholder="e.g. Bay Area, CA" />
           </FieldRow>
           <FieldRow label="Main Office Location">
             <TextInput value={company.mainOfficeLocation} onChange={(v) => setCompany({ ...company, mainOfficeLocation: v })} placeholder="Vallejo, CA" />
@@ -208,6 +235,23 @@ export default function BackendPage() {
 
         {/* 4. Material */}
         <BackendTile title="Material & Rental Rates" subtitle="The only home for piece rates - nothing duplicates these" onSave={() => { saveBackendSection("material", material); flashSaved("Material"); }}>
+          <button
+            onClick={() => setView("material")}
+            className="mb-3 flex w-full items-center justify-between rounded-xl border border-orange-500/30 bg-orange-500/[0.07] px-3 py-2.5 text-left transition hover:border-orange-500/60 hover:bg-orange-500/[0.12]"
+          >
+            <span>
+              <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-orange-300">
+                Material catalog
+              </span>
+              <span className="mt-0.5 block text-[10px] text-zinc-500">
+                Cost, rental rate and weight for every part number
+              </span>
+            </span>
+            <span className="shrink-0 font-mono text-[10px] text-orange-400">
+              {material.stock.filter((row) => row.owned > 0).length}/{material.stock.length} entered
+            </span>
+          </button>
+
           <p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Core Inventory</p>
           <p className="mb-2 text-[10px] leading-4 text-zinc-600">
             Rate is monthly, per piece. The toggle decides whether that piece bills as rental
@@ -532,7 +576,217 @@ export default function BackendPage() {
         </BackendTile>
 
       </section>
+      )}
     </main>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Material catalog
+//
+// Every part the company owns, with the three numbers that matter: what it
+// cost, what it rents for, what it weighs. Owned counts sit alongside because
+// a rate without a quantity behind it prices nothing.
+// -----------------------------------------------------------------------------
+
+const CATALOG_ORDER = [
+  "Frames",
+  "Planks",
+  "Cross Braces",
+  "Guardrails",
+  "Base Plates",
+  "Screw Jacks",
+  "",
+];
+
+function MaterialCatalog({
+  material, setMaterial, onSave,
+}: {
+  material: MaterialDefaults;
+  setMaterial: (next: MaterialDefaults) => void;
+  onSave: () => void;
+}) {
+  const [search, setSearch] = useState("");
+
+  function updateStock(partNo: string, patch: Partial<StockItem>) {
+    setMaterial({
+      ...material,
+      stock: material.stock.map((row) => (row.partNo === partNo ? { ...row, ...patch } : row)),
+    });
+  }
+
+  const term = search.trim().toLowerCase();
+  const groups = CATALOG_ORDER.map((category) => ({
+    category: category || "Other",
+    key: category,
+    rows: material.stock.filter(
+      (row) =>
+        row.category === category &&
+        (!term ||
+          row.partNo.toLowerCase().includes(term) ||
+          row.description.toLowerCase().includes(term))
+    ),
+  })).filter((group) => group.rows.length > 0);
+
+  const entered = material.stock.filter((row) => row.owned > 0).length;
+  const value = material.stock.reduce((sum, row) => sum + row.owned * row.purchaseCost, 0);
+  const weight = material.stock.reduce((sum, row) => sum + row.owned * row.weightLbs, 0);
+
+  return (
+    <section className="p-6">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="font-mono text-[11px] font-bold uppercase tracking-[0.22em] text-orange-400">
+            Material Catalog
+          </h2>
+          <p className="mt-1 max-w-2xl text-[11px] leading-[1.6] text-zinc-500">
+            What each part cost, what it rents for, and what it weighs. Load lists, the
+            inventory page and truck counts all read from here. Everything starts at zero
+            because these are your numbers - a guessed weight puts fiction into a bid.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search part or description"
+            className="w-56 rounded-lg border border-zinc-800 bg-black px-3 py-2 text-[11.5px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+          />
+          <button
+            onClick={onSave}
+            className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-4 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300 transition hover:bg-orange-500/20"
+          >
+            Save catalog
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Summary label="Parts entered" value={`${entered} of ${material.stock.length}`} />
+        <Summary
+          label="Replacement value"
+          value={value > 0 ? value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }) : "-"}
+          accent={value > 0}
+        />
+        <Summary
+          label="Yard weight"
+          value={weight > 0 ? `${Math.round(weight).toLocaleString()} lb` : "-"}
+        />
+        <Summary
+          label="Monthly rental value"
+          value={(() => {
+            const monthly = material.stock.reduce((sum, row) => sum + row.owned * row.rentalRate, 0);
+            return monthly > 0
+              ? monthly.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })
+              : "-";
+          })()}
+        />
+      </div>
+
+      <div className="space-y-4">
+        {groups.map((group) => (
+          <div key={group.category} className="rounded-2xl border border-zinc-800 bg-korban-raised p-4">
+            <div className="mb-2 flex items-baseline justify-between">
+              <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">
+                {group.category}
+              </h3>
+              <span className="font-mono text-[9px] text-zinc-600">{group.rows.length} parts</span>
+            </div>
+
+            <div className="grid grid-cols-[84px_1fr_repeat(4,110px)] gap-2 px-2 pb-1.5">
+              {["Part", "Description", "Purchase cost", "Rental rate", "Weight (lb)", "Owned"].map(
+                (heading) => (
+                  <span
+                    key={heading}
+                    className="font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-600"
+                  >
+                    {heading}
+                  </span>
+                )
+              )}
+            </div>
+
+            <div className="space-y-1">
+              {group.rows.map((row) => (
+                <div
+                  key={row.partNo}
+                  className={`grid grid-cols-[84px_1fr_repeat(4,110px)] items-center gap-2 rounded-lg border px-2 py-1.5 transition ${
+                    row.owned > 0 || row.purchaseCost > 0
+                      ? "border-zinc-800 bg-black"
+                      : "border-zinc-900 bg-transparent"
+                  }`}
+                >
+                  <span className="font-mono text-[11px] font-bold text-orange-400">
+                    {row.partNo}
+                  </span>
+                  <span className="truncate text-[11px] text-zinc-400">{row.description}</span>
+                  <CatalogInput
+                    value={row.purchaseCost}
+                    prefix="$"
+                    onChange={(v) => updateStock(row.partNo, { purchaseCost: v })}
+                  />
+                  <CatalogInput
+                    value={row.rentalRate}
+                    prefix="$"
+                    suffix="/mo"
+                    onChange={(v) => updateStock(row.partNo, { rentalRate: v })}
+                  />
+                  <CatalogInput
+                    value={row.weightLbs}
+                    suffix="lb"
+                    onChange={(v) => updateStock(row.partNo, { weightLbs: v })}
+                  />
+                  <CatalogInput
+                    value={row.owned}
+                    onChange={(v) => updateStock(row.partNo, { owned: v })}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Summary({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-korban-raised px-3 py-2">
+      <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
+      <p
+        className={`font-mono text-[16px] font-bold leading-tight ${
+          accent ? "text-orange-400" : "text-zinc-200"
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function CatalogInput({
+  value, prefix, suffix, onChange,
+}: {
+  value: number;
+  prefix?: string;
+  suffix?: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+      {prefix && <span className="font-mono text-[10px] text-zinc-700">{prefix}</span>}
+      <input
+        value={Number.isFinite(value) ? value : 0}
+        onChange={(event) => onChange(Number(event.target.value || 0))}
+        type="number"
+        step="0.01"
+        className={`w-full min-w-0 bg-transparent text-right font-mono text-[12px] font-bold outline-none ${
+          value > 0 ? "text-orange-300" : "text-zinc-700"
+        }`}
+      />
+      {suffix && <span className="shrink-0 font-mono text-[9px] text-zinc-700">{suffix}</span>}
+    </div>
   );
 }
 

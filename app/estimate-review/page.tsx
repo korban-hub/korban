@@ -21,12 +21,12 @@ import {
   type ToeBoardSide,
 } from "@/lib/alternates";
 import {
-  BID_DEPTHS,
+  BID_LEVELS,
   DEFAULT_ESTIMATE_STATE,
   PRODUCTION_TYPES,
   loadEstimateState,
   saveEstimateState,
-  type BidDepth,
+  type BidLevel,
   type ConsumableLine,
   type ProductionKey,
   type ProductionPhase,
@@ -249,7 +249,7 @@ export default function EstimateReviewPage() {
    */
   const [buildingLevels, setBuildingLevels] = useState(1);
 
-  const [bidDepth, setBidDepth] = useState<BidDepth>(DEFAULT_ESTIMATE_STATE.bidDepth);
+  const [bidLevel, setBidLevel] = useState<BidLevel>(DEFAULT_ESTIMATE_STATE.bidLevel);
   const [rentalDays, setRentalDays] = useState(DEFAULT_ESTIMATE_STATE.rentalDays);
   const [frameRate, setFrameRate] = useState(DEFAULT_ESTIMATE_STATE.frameRate);
   const [plankRate, setPlankRate] = useState(DEFAULT_ESTIMATE_STATE.plankRate);
@@ -365,7 +365,7 @@ export default function EstimateReviewPage() {
       setDismantlePercent(backendSettings.labor.dismantlePercentOfErect);
       setLaborMarkupPercent(backendSettings.pricing.laborMarkupPercent);
 
-      setBidDepth(saved.bidDepth);
+      setBidLevel(saved.bidLevel);
       setRentalDays(saved.rentalDays);
       setConsumables(saved.consumables);
       setSiteMiles(saved.siteMiles);
@@ -419,7 +419,7 @@ export default function EstimateReviewPage() {
 
   const selectedProduction =
     PRODUCTION_TYPES.find((type) => type.key === productionKey) ?? PRODUCTION_TYPES[1];
-  const selectedDepth = BID_DEPTHS.find((depth) => depth.key === bidDepth) ?? BID_DEPTHS[2];
+  const selectedLevel = BID_LEVELS.find((depth) => depth.key === bidLevel) ?? BID_LEVELS[2];
 
   // -- Math -------------------------------------------------------------------
   const totals = useMemo(() => {
@@ -478,7 +478,7 @@ export default function EstimateReviewPage() {
   useEffect(() => {
     if (!isHydrated) return;
     saveEstimateState({
-      bidDepth, rentalDays, frameRate, plankRate, consumables,
+      bidLevel, rentalDays, frameRate, plankRate, consumables,
       erectRate, travelRate, siteMiles,
       dismantlePercentOfErect: dismantlePercent,
       productionKey, crewSize, phaseModeOn, phases,
@@ -507,7 +507,7 @@ export default function EstimateReviewPage() {
       },
     });
   }, [
-    alternateSettings, approvedAlternates, bidDepth, consumables, crewSize, dismantlePercent,
+    alternateSettings, approvedAlternates, bidLevel, consumables, crewSize, dismantlePercent,
     erectRate, estimate, frameRate, isHydrated, phaseModeOn, phases, plankRate, productionKey,
     rentalDays, totals, siteMiles, travelRate,
   ]);
@@ -662,7 +662,7 @@ export default function EstimateReviewPage() {
 
       {activeTab === "breakdown" ? (
         <Workspace>
-          <DepthSelector bidDepth={bidDepth} setBidDepth={setBidDepth} selectedDepth={selectedDepth} />
+          <LevelSelector bidLevel={bidLevel} setBidLevel={setBidLevel} selectedLevel={selectedLevel} />
 
           <div className="mt-3 grid items-start gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
             <RentalPanel
@@ -741,7 +741,7 @@ export default function EstimateReviewPage() {
       ) : (
         <ProposalTab
           estimate={estimate}
-          bidDepth={bidDepth}
+          bidLevel={bidLevel}
           erectDays={totals.productionDays}
           dismantleDays={Math.max(1, Math.ceil(totals.productionDays * (dismantlePercent / 100)))}
           crewSize={crewSize}
@@ -1031,25 +1031,25 @@ function TextField({
 // Depth selector
 // ----------------------------------------------------------------------
 
-function DepthSelector({
-  bidDepth, setBidDepth, selectedDepth,
+function LevelSelector({
+  bidLevel, setBidLevel, selectedLevel,
 }: {
-  bidDepth: BidDepth;
-  setBidDepth: (depth: BidDepth) => void;
-  selectedDepth: (typeof BID_DEPTHS)[number];
+  bidLevel: BidLevel;
+  setBidLevel: (depth: BidLevel) => void;
+  selectedLevel: (typeof BID_LEVELS)[number];
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-800 bg-[#0f0f0f] px-3 py-1.5">
       <div className="flex items-center gap-1.5">
         <span className="mr-1.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
-          Quantities from
+          Bid level
         </span>
-        {BID_DEPTHS.map((depth) => {
-          const active = depth.key === bidDepth;
+        {BID_LEVELS.map((depth) => {
+          const active = depth.key === bidLevel;
           return (
             <button
               key={depth.key}
-              onClick={() => setBidDepth(depth.key)}
+              onClick={() => setBidLevel(depth.key)}
               className={`rounded border px-3 py-1 font-mono text-[10px] font-medium transition ${
                 active
                   ? "border-orange-500/60 bg-orange-500/10 text-orange-300"
@@ -1062,12 +1062,12 @@ function DepthSelector({
         })}
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[13px] font-bold text-zinc-200">{selectedDepth.accuracy}</span>
+        <span className="font-mono text-[13px] font-bold text-zinc-200">{selectedLevel.accuracy}</span>
         <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
           expected accuracy
         </span>
         <span className="text-zinc-800">·</span>
-        <span className="text-[10px] text-zinc-600">{selectedDepth.feeds}</span>
+        <span className="text-[10px] text-zinc-600">{selectedLevel.feeds}</span>
       </div>
     </div>
   );
@@ -1696,7 +1696,7 @@ function PartialExteriorAccordion({
 // ----------------------------------------------------------------------
 
 function ProposalTab({
-  estimate, bidDepth, erectDays, dismantleDays, crewSize, erectHours, dismantleHours,
+  estimate, bidLevel, erectDays, dismantleDays, crewSize, erectHours, dismantleHours,
   elevationBreakdownRows, planOutline, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
   company, backend, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
   miscRevenue, setMiscRevenue, alternateRevenue, finalBid,
@@ -1704,7 +1704,7 @@ function ProposalTab({
   updateAlternateSettings, proposalNotes, setProposalNotes, finish, setFinish, proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
 }: {
   estimate: EstimateData;
-  bidDepth: BidDepth;
+  bidLevel: BidLevel;
   erectDays: number;
   dismantleDays: number;
   crewSize: number;
@@ -1757,7 +1757,7 @@ function ProposalTab({
     estimator: backend?.estimator.estimatorName || estimate.estimator,
     proposalNumber: estimate.proposalNumber,
     bidDate: estimate.bidDate,
-    depth: bidDepth,
+    depth: bidLevel,
     company: company.name,
     companyPhone: backend?.estimator.estimatorPhone || company.phone,
     companyEmail: backend?.estimator.estimatorEmail || company.email,
@@ -1840,10 +1840,9 @@ function ProposalTab({
             <TotalBox label="Proposal total" value={finalBid} />
           </Panel>
 
-          <Panel
-            title="Add alternates"
-            scan={false}
-            right={<span className="font-mono text-[9px] text-zinc-600">Priced from the takeoff</span>}
+          <AlternatesPanel
+            count={approvedAlternates.length}
+            total={totals.alternateRevenue}
           >
             <div className="grid items-start gap-1.5 md:grid-cols-2">
               {ALTERNATE_ORDER.map((id) => (
@@ -1863,7 +1862,7 @@ function ProposalTab({
                 />
               ))}
             </div>
-          </Panel>
+          </AlternatesPanel>
 
           <Panel title="Work being performed" scan={false}>
             <p className="mb-2 text-[10px] leading-4 text-zinc-500">
@@ -1896,7 +1895,7 @@ function ProposalTab({
             </div>
           </Panel>
 
-          <Panel title="Proposal notes" scan={false}>
+          <Panel title="Additional proposal notes" scan={false}>
             <textarea
               value={proposalNotes}
               onChange={(event) => setProposalNotes(event.target.value)}
@@ -1996,6 +1995,47 @@ function ProposalTab({
         </div>
       </div>
     </Workspace>
+  );
+}
+
+/**
+ * Alternates are excluded until asked for, so the panel is closed until asked
+ * for too. Opening it expanded with six priced options invited an estimator to
+ * treat them as part of the base bid.
+ */
+function AlternatesPanel({
+  count, total, children,
+}: {
+  count: number;
+  total: number;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+      <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+      <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between gap-3 pb-2 text-left"
+      >
+        <span className="flex items-center gap-2">
+          <span className="font-mono text-[10px] text-zinc-600">{open ? "\u2212" : "+"}</span>
+          <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+            Add alternates
+          </span>
+          {count > 0 && (
+            <span className="rounded border border-orange-500/30 bg-orange-500/10 px-1.5 font-mono text-[9px] text-orange-300">
+              {count}
+            </span>
+          )}
+        </span>
+        <span className="font-mono text-[11px] font-bold text-zinc-400">
+          {count > 0 ? formatMoney(total) : <span className="text-zinc-700">none selected</span>}
+        </span>
+      </button>
+      {open && <div className="rounded border border-zinc-900 bg-black p-2.5">{children}</div>}
+    </section>
   );
 }
 

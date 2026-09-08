@@ -10,7 +10,7 @@
 
 import { DEFAULT_ALTERNATE_SETTINGS, type AlternateId, type AlternateSettings } from "@/lib/alternates";
 
-export type BidDepth = "quick-bid" | "full-bid" | "korban-bid";
+export type BidLevel = "quick-bid" | "full-bid" | "korban-bid";
 export type ProductionKey = "conservative" | "conventional" | "competitive";
 
 export type ConsumableLine = {
@@ -55,7 +55,7 @@ export type EstimateDerived = {
 };
 
 export type EstimateState = {
-  bidDepth: BidDepth;
+  bidLevel: BidLevel;
 
   // Rental
   rentalDays: number;
@@ -98,7 +98,7 @@ export const DEFAULT_CONSUMABLES: ConsumableLine[] = [
 ];
 
 export const DEFAULT_ESTIMATE_STATE: EstimateState = {
-  bidDepth: "korban-bid",
+  bidLevel: "korban-bid",
 
   rentalDays: 30,
   frameRate: 2.0,
@@ -180,8 +180,8 @@ export const PRODUCTION_TYPES: {
   { key: "competitive", title: "Competitive", days: 4, note: "Schedule, access and repetition support a tighter number." },
 ];
 
-export const BID_DEPTHS: {
-  key: BidDepth;
+export const BID_LEVELS: {
+  key: BidLevel;
   title: string;
   accuracy: string;
   feeds: string;

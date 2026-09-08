@@ -1,274 +1,553 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { KorbanHeader, KorbanPanel, type KorbanMenuLink } from "@/components/korban";
-import { getActiveElevation, getActiveProject, type ProjectElevation } from "@/lib/projectStore";
+/**
+ * Material Load List - the sheet that goes to the yard.
+ *
+ * Modelled on the paper form crews already use: job header across the top,
+ * the full catalog in three columns, and Ordered / Shipped / Received against
+ * every line. The takeoff fills Ordered; the yard fills the rest.
+ *
+ * Keeping the layout the crew recognises matters more than making it pretty.
+ * A loader should be able to work from this screen, or a printout of it,
+ * without learning anything new.
+ */
 
-type InventoryRow = { partNo: string; description: string; };
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
+import { getBackendSettings, type StockItem } from "@/lib/backendStore";
 
-const catalogGroups: InventoryRow[][] = [
-  [
-    { partNo: "FO7CP",  description: "7' Pedestrian Canopy" },
-    { partNo: "FO6L3",  description: "6' 4\" H - 3' W Frame" },
-    { partNo: "FO5L3",  description: "5' H - 3' W Frame" },
-    { partNo: "FM33",   description: "3' H - 3' W Frame" },
-    { partNo: "FO6L42", description: "6' 4\" H - 42\" W Frame" },
-    { partNo: "FO5L42", description: "5' H - 42\" W Frame" },
-    { partNo: "FM342",  description: "3' H - 42\" W Frame" },
-    { partNo: "FO6L",   description: "6' 4\" H - 5' W Frame" },
-    { partNo: "FM5",    description: "5' Mason Frame" },
-    { partNo: "FM3",    description: "3' Mason Frame" },
-    { partNo: "FO6L2",  description: "6' 4\" H X 2' W Frame" },
-    { partNo: "FO5L2",  description: "5' H X 2' W Frame" },
-    { partNo: "FM32",   description: "3' H X 2' W Frame" },
-    { partNo: "AL1",    description: "Screw Jack W/No Base" },
-    { partNo: "AL1S",   description: "Screw Jack W/Base Plate" },
-    { partNo: "BP1",    description: "Fixed Base Plate" },
-    { partNo: "BP2",    description: "Swivel Base Plate" },
-    { partNo: "BP3",    description: "Curved Base Plate" },
-    { partNo: "SJS",    description: "Swivel Jacks" },
-    { partNo: "P12",    description: "12' Putlogs" },
-    { partNo: "P16",    description: "16' Putlogs" },
-    { partNo: "P22",    description: "22' Putlogs" },
-    { partNo: "PH2",    description: "Putlogs Hangers" },
-    { partNo: "SP3",    description: "3' Spreader Bar" },
-    { partNo: "SP42",   description: "42\" Spreader Bar" },
-    { partNo: "SP5",    description: "5' Spreader Bar" },
-  ],
-  [
-    { partNo: "B42",   description: "4X2 Cross Brace" },
-    { partNo: "B52",   description: "5X2 Cross Brace" },
-    { partNo: "B62",   description: "6X2 Cross Brace" },
-    { partNo: "B72",   description: "7X2 Cross Brace" },
-    { partNo: "B82",   description: "8X2 Cross Brace" },
-    { partNo: "B102",  description: "10X2 Cross Brace" },
-    { partNo: "B44",   description: "4X4 Cross Brace" },
-    { partNo: "B54",   description: "5X4 Cross Brace" },
-    { partNo: "B64",   description: "6X4 Cross Brace" },
-    { partNo: "B74",   description: "7X4 Cross Brace" },
-    { partNo: "B84",   description: "8X4 Cross Brace" },
-    { partNo: "B104",  description: "10X4 Cross Brace" },
-    { partNo: "GR42",  description: "42\" Guard Rail" },
-    { partNo: "GR3",   description: "3' Guard Rail" },
-    { partNo: "GR4",   description: "4' Guard Rail" },
-    { partNo: "GR5",   description: "5' Guard Rail" },
-    { partNo: "GR6",   description: "6' Guard Rail" },
-    { partNo: "GR7",   description: "7' Guard Rail" },
-    { partNo: "GR8",   description: "8' Guard Rail" },
-    { partNo: "GR10",  description: "10' Guard Rail" },
-    { partNo: "GHB3",  description: "3' Gooser Brace" },
-    { partNo: "GHB5",  description: "5' Gooser Brace" },
-    { partNo: "GHB7",  description: "7' Gooser Brace" },
-    { partNo: "GHB10", description: "10' Gooser Brace" },
-    { partNo: "BR12L", description: "12\" Side Bracket" },
-    { partNo: "BR20L", description: "20\" Side Bracket" },
-    { partNo: "BR24L", description: "24\" Side Bracket" },
-    { partNo: "BR30S", description: "30\" Side Bracket" },
-    { partNo: "BR20E", description: "20\" End Bracket" },
-    { partNo: "BR30E", description: "30\" End Bracket" },
-  ],
-  [
-    { partNo: "CGRP",   description: "Male Corner Guard" },
-    { partNo: "ST4SG",  description: "4' Tube" },
-    { partNo: "ST6SG",  description: "6' Tube" },
-    { partNo: "ST8SG",  description: "8' Tube" },
-    { partNo: "ST10SG", description: "10' Tube" },
-    { partNo: "ST13SG", description: "13' Tube" },
-    { partNo: "CRA19",  description: "Right Angle Clamp" },
-    { partNo: "CSA19",  description: "Swivel Clamp" },
-    { partNo: "SAU3",   description: "3' Steel Ladder" },
-    { partNo: "SAU6",   description: "6' Steel Ladder" },
-    { partNo: "SAUB",   description: "Ladder Bracket" },
-    { partNo: "K18",    description: "18\" Kickers" },
-    { partNo: "K12",    description: "12\" Kickers" },
-    { partNo: "CPS",    description: "Coupling Pin" },
-    { partNo: "PTP",    description: "Pig Tail Pin" },
-    { partNo: "SU6",    description: "6' 4\" Stair Unit" },
-    { partNo: "SU6OR",  description: "Outside Rail" },
-    { partNo: "SU6IR",  description: "Inner Rail" },
-    { partNo: "SU6IER", description: "Inner End Rail" },
-    { partNo: "WP5",    description: "5' Wood Plank" },
-    { partNo: "WP6",    description: "6' Wood Plank" },
-    { partNo: "WP7",    description: "7' Wood Plank" },
-    { partNo: "WP8",    description: "8' Wood Plank" },
-    { partNo: "WP9",    description: "9' Wood Plank" },
-    { partNo: "WP10",   description: "10' Wood Plank" },
-    { partNo: "WP12",   description: "12' Wood Plank" },
-    { partNo: "SB7",    description: "7' Hatch Board" },
-    { partNo: "SB10",   description: "10' Hatch Board" },
-    { partNo: "FP10",   description: "10' Filler Plank" },
-    { partNo: "AT12",   description: "1/2\" All Thread" },
-    { partNo: "N12",    description: "1/2\" Nuts" },
-    { partNo: "RH12",   description: "1/2\" Redheads" },
-  ],
+const menuLinks: KorbanMenuLink[] = [
+  { href: "/dashboard", label: "Bid Room" },
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/set-scaffold-v2", label: "Set Scaffold" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/inventory", label: "Company Inventory" },
 ];
 
-const QUANTITY_ENGINE_PART_MAP: Record<string, keyof ProjectElevation["quantityEngine"]> = {
-  FO6L:  "frameCount",
-  WP8:   "plankCount",
-  B82:   "crossBraceCount",
-  GR8:   "guardrailCount",
-  BP1:   "basePlateCount",
-  AL1:   "screwJackCount",
+/**
+ * Which engine count fills which line. Frame and plank part numbers depend on
+ * the scaffold width chosen in Set Scaffold, so those resolve at read time
+ * rather than being fixed here.
+ */
+const FIXED_SOURCE: Record<string, string> = {
+  B82: "crossBraceCount",
+  GR8: "guardrailCount",
+  BP1: "basePlateCount",
+  AL1S: "screwJackCount",
+  CPS: "couplingPinCount",
 };
 
-const inventoryMenuLinks: KorbanMenuLink[] = [
-  { href: "/project-plan-desk", label: "Project Plan Desk" },
-  { href: "/inventory",         label: "Master Inventory" },
-  { href: "/estimate-review",   label: "Estimate Review" },
-  { href: "/backend",           label: "Backend" },
-];
+type LoadKind = "New Build" | "Add On" | "Return" | "Net Rental";
+const LOAD_KINDS: LoadKind[] = ["New Build", "Add On", "Return", "Net Rental"];
 
-function normalizePart(partNo: string) { return partNo.trim().toUpperCase(); }
+const LOAD_KEY = "korban.loadlist.v1";
 
-export default function InventoryLoadListPage() {
-  const [elevation, setElevation] = useState<ProjectElevation | null>(null);
-  const [projectName, setProjectName] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [projectAddress, setProjectAddress] = useState("");
+type LoadHeader = {
+  truckNo: string;
+  kind: LoadKind;
+  dateOrdered: string;
+  dateShipped: string;
+  dateReturned: string;
+  completedBy: string;
+  loaders: string;
+  notes: string;
+};
 
-  useEffect(() => {
-    function loadLiveData() {
-      const project = getActiveProject();
-      const activeElevation = getActiveElevation();
-      setProjectName(project.projectName || "Untitled Project");
-      setProjectId(project.projectId || "—");
-      setProjectAddress(project.projectAddress || "—");
-      setElevation(activeElevation);
+const EMPTY_HEADER: LoadHeader = {
+  truckNo: "",
+  kind: "New Build",
+  dateOrdered: "",
+  dateShipped: "",
+  dateReturned: "",
+  completedBy: "",
+  loaders: "",
+  notes: "",
+};
+
+/** Yard-entered counts, keyed by stock id. Ordered comes from the takeoff. */
+type Counts = Record<string, { ship?: number; recd?: number }>;
+
+export default function LoadListPage() {
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const [project, setProject] = useState({
+    name: "", jobNo: "", address: "", customer: "", contact: "",
+  });
+  const [stock, setStock] = useState<StockItem[]>([]);
+  const [engine, setEngine] = useState<Record<string, number>>({});
+  const [scaffoldWidth, setScaffoldWidth] = useState(3);
+  const [header, setHeader] = useState<LoadHeader>(EMPTY_HEADER);
+  const [counts, setCounts] = useState<Counts>({});
+
+  const load = useCallback(() => {
+    try {
+      const active = getActiveProject();
+      const elevation = getActiveElevation();
+      setProject({
+        name: active.projectName,
+        jobNo: active.proposalNumber || active.projectId,
+        address: active.projectAddress,
+        customer: active.customer,
+        contact: active.contactName,
+      });
+      setEngine((elevation.quantityEngine ?? {}) as unknown as Record<string, number>);
+      setScaffoldWidth(elevation.scaffoldInput?.scaffoldWidth ?? 3);
+      setStock(getBackendSettings().material.stock);
+
+      const raw = window.localStorage.getItem(`${LOAD_KEY}:${active.projectId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { header?: LoadHeader; counts?: Counts };
+        setHeader({ ...EMPTY_HEADER, ...(parsed.header ?? {}) });
+        setCounts(parsed.counts ?? {});
+      } else {
+        setHeader(EMPTY_HEADER);
+        setCounts({});
+      }
+    } catch {
+      // Storage unavailable - the sheet still renders, it just won't persist.
     }
-    loadLiveData();
-    window.addEventListener("focus", loadLiveData);
-    window.addEventListener("pageshow", loadLiveData);
-    return () => {
-      window.removeEventListener("focus", loadLiveData);
-      window.removeEventListener("pageshow", loadLiveData);
-    };
+    setMounted(true);
   }, []);
 
-  const quantityEngine = elevation?.quantityEngine;
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
 
-  const qtyMap = useMemo(() => {
-    const map = new Map<string, number>();
-    if (!quantityEngine) return map;
-    Object.entries(QUANTITY_ENGINE_PART_MAP).forEach(([partNo, field]) => {
-      const value = quantityEngine[field];
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        map.set(normalizePart(partNo), value);
-      }
-    });
-    return map;
-  }, [quantityEngine]);
+  function persist(nextHeader: LoadHeader, nextCounts: Counts) {
+    try {
+      const id = getActiveProject().projectId;
+      window.localStorage.setItem(
+        `${LOAD_KEY}:${id}`,
+        JSON.stringify({ header: nextHeader, counts: nextCounts })
+      );
+    } catch {
+      // Not being able to persist a load sheet is not worth an error.
+    }
+  }
 
-  const totalQtyRequired = useMemo(() => Array.from(qtyMap.values()).reduce((s, q) => s + q, 0), [qtyMap]);
-  const totalPlankCount = quantityEngine?.plankCount ?? 0;
-  const truckLoads = useMemo(() => totalPlankCount ? Math.ceil(totalPlankCount / 150) : 0, [totalPlankCount]);
-  const hasLiveData = Boolean(elevation?.linearFeet && elevation.linearFeet > 0);
+  function setField(patch: Partial<LoadHeader>) {
+    const next = { ...header, ...patch };
+    setHeader(next);
+    persist(next, counts);
+  }
+
+  function setCount(id: string, field: "ship" | "recd", value: number) {
+    const next = { ...counts, [id]: { ...counts[id], [field]: value } };
+    setCounts(next);
+    persist(header, next);
+  }
+
+  /** The frame part number this job actually uses, by scaffold width. */
+  const dynamicSource = useMemo(() => {
+    const framePart = scaffoldWidth >= 5 ? "FO6L" : scaffoldWidth >= 3.5 ? "FO6L42" : "FO6L3";
+    return { [framePart]: "frameCount", WP10: "plankCount" } as Record<string, string>;
+  }, [scaffoldWidth]);
+
+  const ordered = useCallback(
+    (item: StockItem) => {
+      if (!item.partNo) return 0;
+      const key = FIXED_SOURCE[item.partNo] ?? dynamicSource[item.partNo];
+      return key ? engine[key] ?? 0 : 0;
+    },
+    [engine, dynamicSource]
+  );
+
+  const columns = useMemo(
+    () => [1, 2, 3].map((column) => stock.filter((item) => item.column === column)),
+    [stock]
+  );
+
+  const totals = useMemo(() => {
+    const ord = stock.reduce((sum, item) => sum + ordered(item), 0);
+    const ship = stock.reduce((sum, item) => sum + (counts[item.id]?.ship ?? 0), 0);
+    const weight = stock.reduce((sum, item) => sum + ordered(item) * item.weightLbs, 0);
+    return { ord, ship, weight };
+  }, [stock, counts, ordered]);
+
+  if (!mounted) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-korban-base">
+        <p className="font-mono text-[11px] text-zinc-600">Opening load list...</p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-[#080604] text-white">
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanMotionStyles />
+
       <KorbanHeader
-        title="Inventory Load List"
-        subtitle={`${projectName} · ${projectId}`}
-        menuLinks={inventoryMenuLinks}
+        title="Material Load List"
+        subtitle={project.name || "No project loaded"}
+        menuLinks={menuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((open) => !open)}
         actionsAlwaysVisible
+        actionsClassName="gap-2.5"
         actions={
           <>
-            <a href="/inventory"
-              className="rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-bold text-zinc-300 hover:border-orange-500/30 hover:text-orange-300">
-              Master Inventory
-            </a>
-            <a href="/project-plan-desk"
-              className="rounded-xl border border-orange-500/25 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20">
-              Back to Plan Desk
-            </a>
-            <button className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400">
-              Export Load List
-            </button>
+            <div className="flex gap-2">
+              <Stat label="Ordered" value={totals.ord.toLocaleString()} accent />
+              <Stat label="Shipped" value={totals.ship > 0 ? totals.ship.toLocaleString() : "-"} />
+              <Stat
+                label="Weight"
+                value={totals.weight > 0 ? `${Math.round(totals.weight).toLocaleString()} lb` : "-"}
+              />
+            </div>
+            <KorbanButton variant="ghost" onClick={() => window.print()}>
+              Print
+            </KorbanButton>
+            <KorbanButton variant="primary" onClick={() => router.push("/project-plan-desk")}>
+              Plan Desk
+            </KorbanButton>
           </>
         }
       />
 
-      <section className="p-6">
-        {!hasLiveData && (
-          <div className="mb-5 rounded-2xl border border-dashed border-zinc-800 bg-black/40 p-4 text-center">
-            <p className="text-xs text-zinc-500">
-              No live takeoff data yet. Run a takeoff in Takeoff Workspace to populate quantities.
-            </p>
-          </div>
-        )}
+      <div className="relative mx-auto w-full max-w-[1600px] px-4 py-4">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.022]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
+            backgroundSize: "26px 26px",
+          }}
+        />
 
-        {/* Project header strip */}
-        <div className="mb-5 rounded-2xl border border-orange-500/15 bg-orange-500/5 px-5 py-3 flex items-center gap-6 flex-wrap">
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Project</p>
-            <p className="font-bold text-zinc-200 text-sm mt-0.5">{projectName}</p>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Job No.</p>
-            <p className="font-mono text-orange-300 text-sm mt-0.5">{projectId}</p>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Address</p>
-            <p className="text-zinc-400 text-sm mt-0.5">{projectAddress}</p>
-          </div>
-          <div className="ml-auto flex gap-4">
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Qty Required</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{totalQtyRequired.toLocaleString()}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Truck Loads</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{truckLoads}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">LF</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{(elevation?.linearFeet ?? 0).toLocaleString()}</p>
-            </div>
-          </div>
-        </div>
+        <div className="relative space-y-3">
+          {/* ---- Job header, as it prints ------------------------------- */}
+          <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+            <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+            <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
 
-        <KorbanPanel
-          title="Load List"
-          subtitle="Quantities driven by live takeoff — project specific"
-        >
-          <div className="grid gap-4 xl:grid-cols-3">
-            {catalogGroups.map((group, index) => (
-              <InventoryColumn key={index} rows={group} qtyMap={qtyMap} />
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+              <div className="grid gap-0.5">
+                <ReadRow label="Customer" value={project.customer} />
+                <ReadRow label="Jobsite" value={project.address} />
+                <div className="grid grid-cols-2 gap-3">
+                  <ReadRow label="Job number" value={project.jobNo} mono />
+                  <ReadRow label="Contact" value={project.contact} />
+                </div>
+                <EditRow
+                  label="Truck no."
+                  value={header.truckNo}
+                  placeholder="Which truck"
+                  onChange={(v) => setField({ truckNo: v })}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <div>
+                  <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+                    Load type
+                  </span>
+                  <div className="flex flex-wrap gap-1">
+                    {LOAD_KINDS.map((kind) => (
+                      <button
+                        key={kind}
+                        onClick={() => setField({ kind })}
+                        className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium transition ${
+                          header.kind === kind
+                            ? "border-orange-400/50 bg-orange-400/10 text-orange-200"
+                            : "border-zinc-800 bg-korban-raised text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                        }`}
+                      >
+                        {kind}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-1.5">
+                  <DateRow
+                    label="Ordered"
+                    value={header.dateOrdered}
+                    onChange={(v) => setField({ dateOrdered: v })}
+                  />
+                  <DateRow
+                    label="Shipped"
+                    value={header.dateShipped}
+                    onChange={(v) => setField({ dateShipped: v })}
+                  />
+                  <DateRow
+                    label="Returned"
+                    value={header.dateReturned}
+                    onChange={(v) => setField({ dateReturned: v })}
+                  />
+                </div>
+
+                <EditRow
+                  label="Completed by"
+                  value={header.completedBy}
+                  placeholder="Who signed it off"
+                  onChange={(v) => setField({ completedBy: v })}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* ---- The list, three columns as it prints ------------------- */}
+          <div className="grid gap-3 xl:grid-cols-3">
+            {columns.map((items, index) => (
+              <section
+                key={index}
+                className="relative rounded-lg border border-zinc-800 bg-korban-base p-2.5"
+              >
+                <div className="grid grid-cols-[60px_1fr_36px_38px_38px] gap-1.5 px-1 pb-1.5">
+                  {["Part", "Description", "Ord", "Ship", "Rec"].map((heading) => (
+                    <span
+                      key={heading}
+                      className="font-mono text-[8.5px] uppercase tracking-[0.1em] text-zinc-600"
+                    >
+                      {heading}
+                    </span>
+                  ))}
+                </div>
+
+                <div className="rounded border border-zinc-900 bg-black p-1.5">
+                  {items.map((item) => {
+                    const ord = ordered(item);
+                    const active = ord > 0;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`grid grid-cols-[60px_1fr_36px_38px_38px] items-center gap-1.5 border-b border-zinc-900/60 px-1 py-[3px] last:border-0 ${
+                          active ? "bg-orange-500/[0.07]" : ""
+                        }`}
+                      >
+                        <span
+                          className={`font-mono text-[9.5px] font-bold ${
+                            item.partNo ? "text-orange-400" : "text-zinc-800"
+                          }`}
+                        >
+                          {item.partNo || "-"}
+                        </span>
+                        <span
+                          className={`truncate text-[9.5px] uppercase ${
+                            active ? "text-orange-100" : "text-zinc-500"
+                          }`}
+                          title={item.description}
+                        >
+                          {item.description}
+                        </span>
+                        <span
+                          className={`text-right font-mono text-[10px] ${
+                            active ? "font-bold text-orange-300" : "text-zinc-800"
+                          }`}
+                        >
+                          {ord > 0 ? ord.toLocaleString() : ""}
+                        </span>
+                        <CountCell
+                          value={counts[item.id]?.ship}
+                          onChange={(v) => setCount(item.id, "ship", v)}
+                        />
+                        <CountCell
+                          value={counts[item.id]?.recd}
+                          onChange={(v) => setCount(item.id, "recd", v)}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             ))}
           </div>
-        </KorbanPanel>
-      </section>
+
+          {/* ---- Notes and loaders, as it prints ------------------------ */}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+              <h2 className="pb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                Notes
+              </h2>
+              <textarea
+                value={header.notes}
+                onChange={(event) => setField({ notes: event.target.value })}
+                placeholder="Anything the yard needs to know about this load"
+                className="min-h-20 w-full resize-none rounded border border-zinc-900 bg-black p-2.5 text-[11px] leading-[1.6] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+              />
+            </section>
+
+            <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+              <h2 className="pb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                Loaders
+              </h2>
+              <textarea
+                value={header.loaders}
+                onChange={(event) => setField({ loaders: event.target.value })}
+                placeholder="Print names"
+                className="min-h-20 w-full resize-none rounded border border-zinc-900 bg-black p-2.5 text-[11px] leading-[1.6] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+              />
+            </section>
+          </div>
+
+          {totals.ord === 0 && (
+            <p className="font-mono text-[10px] leading-[1.6] text-zinc-700">
+              Nothing ordered yet. Quantities fill in from the takeoff - this sheet never
+              estimates ahead of the measurement.
+            </p>
+          )}
+        </div>
+      </div>
     </main>
   );
 }
 
-function InventoryColumn({ rows, qtyMap }: { rows: InventoryRow[]; qtyMap: Map<string, number> }) {
+// -----------------------------------------------------------------------------
+// Pieces
+// -----------------------------------------------------------------------------
+
+function KorbanMotionStyles() {
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black">
-      <table className="w-full text-left text-[11px]">
-        <thead className="bg-zinc-950 text-zinc-500">
-          <tr>
-            <th className="w-[76px] border-b border-zinc-800 px-2 py-2 font-semibold">Part No.</th>
-            <th className="border-b border-zinc-800 px-2 py-2 font-semibold">Description</th>
-            <th className="w-[64px] border-b border-zinc-800 px-2 py-2 text-right font-semibold text-orange-300">Qty</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const qty = qtyMap.get(normalizePart(row.partNo)) || 0;
-            const active = qty > 0;
-            return (
-              <tr key={`${row.partNo}`} className={active ? "bg-orange-500/10 text-orange-100" : "text-zinc-400"}>
-                <td className="border-b border-zinc-900 px-2 py-2 font-mono text-[10px] text-orange-400">{row.partNo}</td>
-                <td className="border-b border-zinc-900 px-2 py-2 uppercase tracking-[0.02em]">{row.description}</td>
-                <td className={`border-b border-zinc-900 px-2 py-2 text-right font-mono ${active ? "font-bold text-orange-300" : "text-zinc-700"}`}>
-                  {qty > 0 ? qty.toLocaleString() : "—"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <style>{`
+      @keyframes korban-scan {
+        0% { transform: translateX(-40%); opacity: 0.5; }
+        85% { opacity: 0.5; }
+        100% { transform: translateX(320%); opacity: 0; }
+      }
+      .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
+      @media (prefers-reduced-motion: reduce) {
+        .korban-scan { animation: none; opacity: 0; }
+      }
+    `}</style>
+  );
+}
+
+/** A quantity the yard fills in. Blank until someone counts it. */
+function CountCell({ value, onChange }: { value?: number; onChange: (v: number) => void }) {
+  return (
+    <input
+      value={value ?? ""}
+      onChange={(event) => onChange(Number(event.target.value || 0))}
+      type="number"
+      className="w-full min-w-0 rounded border border-zinc-900 bg-korban-raised px-1 py-[1px] text-right font-mono text-[10px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+    />
+  );
+}
+
+/**
+ * Month, day and year as three boxes. A single field invites every format
+ * under the sun; three boxes only accept one, and the sheet has to read the
+ * same to whoever picks it up in the yard.
+ */
+function DateRow({
+  label, value, onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [month = "", day = "", year = ""] = (value || "").split("/");
+
+  function set(part: "m" | "d" | "y", next: string) {
+    const clean = next.replace(/[^0-9]/g, "");
+    const parts = [month, day, year];
+    parts[part === "m" ? 0 : part === "d" ? 1 : 2] = clean;
+    // An entirely empty date stays empty rather than becoming "//".
+    onChange(parts.every((entry) => entry === "") ? "" : parts.join("/"));
+  }
+
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <span className="flex items-center gap-1">
+        <DateBox value={month} placeholder="MM" max={2} onChange={(v) => set("m", v)} />
+        <span className="font-mono text-[11px] text-zinc-700">/</span>
+        <DateBox value={day} placeholder="DD" max={2} onChange={(v) => set("d", v)} />
+        <span className="font-mono text-[11px] text-zinc-700">/</span>
+        <DateBox value={year} placeholder="YYYY" max={4} wide onChange={(v) => set("y", v)} />
+      </span>
+    </div>
+  );
+}
+
+function DateBox({
+  value, placeholder, max, wide, onChange,
+}: {
+  value: string;
+  placeholder: string;
+  max: number;
+  wide?: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(event) => onChange(event.target.value.slice(0, max))}
+      placeholder={placeholder}
+      inputMode="numeric"
+      className={`rounded border border-zinc-900 bg-korban-raised px-1.5 py-1 text-center font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40 ${
+        wide ? "w-14" : "w-10"
+      }`}
+    />
+  );
+}
+
+function ReadRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3 border-b border-zinc-900/60 py-1 last:border-0">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <span className={`truncate text-[11.5px] ${mono ? "font-mono text-orange-300" : "text-zinc-300"}`}>
+        {value || <span className="text-zinc-700">Not set</span>}
+      </span>
+    </div>
+  );
+}
+
+function EditRow({
+  label, value, placeholder, stacked, onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  stacked?: boolean;
+  onChange: (value: string) => void;
+}) {
+  if (stacked) {
+    return (
+      <div>
+        <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+          {label}
+        </span>
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded border border-zinc-900 bg-korban-raised px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3 border-b border-zinc-900/60 py-1 last:border-0">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded border border-transparent bg-transparent px-2 py-1 text-[11.5px] text-zinc-200 outline-none transition placeholder:text-zinc-700 focus:border-orange-500/40 focus:bg-korban-raised"
+      />
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-korban-raised px-3 py-1.5 text-right">
+      <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
+      <p
+        className={`font-mono text-[14px] font-bold leading-tight ${
+          accent ? "text-orange-400" : "text-zinc-200"
+        }`}
+      >
+        {value}
+      </p>
     </div>
   );
 }

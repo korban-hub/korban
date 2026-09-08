@@ -291,6 +291,12 @@ export type ProjectRecord = {
   bidDueDate: string;
   /** Union or non-union for this job. Defaults from Backend, overridable here. */
   unionStatus: string;
+  /**
+   * Where the bid stands with the customer. Set by the estimator - this is
+   * outcome, not progress. Progress (has takeoff work happened) derives from
+   * the elevation itself and is never stored, so it can't fall out of step.
+   */
+  bidStatus: BidStatus;
   updatedAt: string;
   schemaVersion: number;
   /** Estimate depth — see EstimateDepth. Defaults to korban-bid for
@@ -301,6 +307,43 @@ export type ProjectRecord = {
     levels: ProjectLevel[];
   };
 };
+
+export const BID_STATUSES = [
+  "Draft",
+  "Internal Review",
+  "Ready To Send",
+  "Submitted",
+  "Won",
+  "Lost",
+  "Still Chasing",
+  "No Response",
+] as const;
+export type BidStatus = (typeof BID_STATUSES)[number];
+
+/** Submitted or later means the bid has left the building. */
+export const SUBMITTED_STATUSES: BidStatus[] = [
+  "Submitted", "Won", "Lost", "Still Chasing", "No Response",
+];
+
+export type ProjectProgress = "Not started" | "In process" | "Complete";
+
+/**
+ * How far a bid has actually come. Derived, never stored - a project is in
+ * process the moment real takeoff work exists, and complete once the bid has
+ * been submitted. Nothing to keep in sync.
+ */
+export function getProjectProgress(
+  project: ProjectRecord,
+  elevation: ProjectElevation | null,
+): ProjectProgress {
+  if (SUBMITTED_STATUSES.includes(project.bidStatus)) return "Complete";
+  const hasScale = Boolean(elevation?.scale);
+  const hasGeometry = (elevation?.overlayGeometry?.fullOverlayRows ?? []).some(
+    (row) => row.points.length >= 3
+  );
+  const hasCoverage = (elevation?.linearFeet ?? 0) > 0;
+  return hasScale || hasGeometry || hasCoverage ? "In process" : "Not started";
+}
 
 export type ProjectData = Record<string, ProjectRecord>;
 
@@ -833,6 +876,7 @@ export function createEmptyProject(
     contactPhone: "",
     bidDueDate: "",
     unionStatus: "",
+    bidStatus: "Draft",
     updatedAt: nowIso(),
     schemaVersion: 2,
     estimateDepth: "quick-bid",
@@ -865,6 +909,7 @@ function createDemoProject(): ProjectRecord {
     contactPhone: "(510) 555-0138",
     bidDueDate: "06/14/26",
     unionStatus: "Union",
+    bidStatus: "Ready To Send",
     estimateDepth: "korban-bid",
     takeoff: {
       levels: [
@@ -975,6 +1020,9 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     contactPhone: asString(record.contactPhone, fallback.contactPhone),
     bidDueDate: asString(record.bidDueDate, fallback.bidDueDate),
     unionStatus: asString(record.unionStatus, fallback.unionStatus),
+    bidStatus: (BID_STATUSES as readonly string[]).includes(record.bidStatus as string)
+      ? (record.bidStatus as BidStatus)
+      : fallback.bidStatus,
     updatedAt: asString(record.updatedAt, nowIso()),
     schemaVersion: asNumber(record.schemaVersion, 2),
     estimateDepth: DEPTH_ORDER.includes(record.estimateDepth as EstimateDepth)
@@ -1108,6 +1156,11 @@ export function listProjects(): ProjectRecord[] {
   return Object.values(getProjectData()).sort((a, b) =>
     (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")
   );
+}
+
+/** First elevation of any project. Used by lists that show many at once. */
+export function getFirstElevation(project: ProjectRecord): ProjectElevation | null {
+  return project.takeoff.levels[0]?.elevations[0] ?? null;
 }
 
 export function saveActiveProject(project: ProjectRecord) {
