@@ -10,6 +10,7 @@ import {
 import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
 import { computeTravel, getBackendSettings, getPieceRate, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
+import { buildPresentationUrl } from "@/lib/presentationLink";
 import {
   ALTERNATE_ORDER,
   DEFAULT_ALTERNATE_SETTINGS,
@@ -209,6 +210,54 @@ function KorbanMotionStyles() {
       .korban-flash { animation: korban-flash 0.5s ease-out; }
       @media (prefers-reduced-motion: reduce) {
         .korban-scan, .korban-sweep, .korban-flash { animation: none; opacity: 0; }
+      }
+
+      /*
+       * Printing.
+       *
+       * Everything except the sheet is chrome for working, not for sending, so
+       * it comes off. The sheet itself is already paper stock - it just has to
+       * keep its ink, which browsers strip by default to save toner. Each page
+       * breaks where the document says it does rather than wherever the paper
+       * happens to run out.
+       */
+      @media print {
+        @page { size: letter portrait; margin: 0.4in; }
+
+        body { background: #fff !important; }
+
+        /* Hide the app, then walk the sheet back into view. */
+        body * { visibility: hidden !important; }
+        #korban-proposal, #korban-proposal * { visibility: visible !important; }
+
+        #korban-proposal {
+          position: absolute !important;
+          left: 0; top: 0;
+          width: 100% !important;
+          max-height: none !important;
+          overflow: visible !important;
+          border: 0 !important;
+          padding: 0 !important;
+          background: transparent !important;
+        }
+
+        /* Dark bands are part of the document, not decoration. */
+        .korban-sheet-page {
+          break-after: page;
+          page-break-after: always;
+          box-shadow: none !important;
+          border-radius: 0 !important;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+        .korban-sheet-page:last-child {
+          break-after: auto;
+          page-break-after: auto;
+        }
+
+        /* Live-field rules are an editing aid. They mean nothing on paper. */
+        .korban-live-rule { border-color: transparent !important; background: transparent !important; box-shadow: none !important; }
+        .korban-no-print { display: none !important; }
       }
     `}</style>
   );
@@ -789,7 +838,7 @@ export default function EstimateReviewPage() {
 /** Panel body with the faint graph-paper ground behind it. */
 function Workspace({ children }: { children: React.ReactNode }) {
   return (
-    <div className="relative rounded-b-xl rounded-tr-xl border border-t-0 border-zinc-800 bg-[#0b0b0b] p-3">
+    <div className="relative rounded-b-xl rounded-tr-xl border border-t-0 border-zinc-800 bg-korban-raised p-3">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 rounded-b-xl rounded-tr-xl opacity-[0.022]"
@@ -853,7 +902,7 @@ function TabStrip({ activeTab, onChange }: { activeTab: TabKey; onChange: (tab: 
             onClick={() => onChange(tab.key)}
             className={`relative rounded-t-lg border border-b-0 px-6 py-2 font-mono text-[11px] font-bold uppercase tracking-[0.15em] transition ${
               active
-                ? "border-zinc-800 bg-[#0b0b0b] text-white"
+                ? "border-zinc-800 bg-korban-raised text-white"
                 : "border-transparent bg-transparent text-zinc-600 hover:text-zinc-400"
             }`}
           >
@@ -881,7 +930,7 @@ function Panel({
   children: React.ReactNode;
 }) {
   return (
-    <section className="relative rounded-lg border border-zinc-800 bg-[#070604] p-3">
+    <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
       <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
       <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
       {scan && (
@@ -940,7 +989,7 @@ function MiniInput({
 
   return (
     <div
-      className={`relative flex items-center gap-0.5 overflow-hidden rounded border border-zinc-800 bg-[#0f0f0f] px-1.5 ${width}`}
+      className={`relative flex items-center gap-0.5 overflow-hidden rounded border border-zinc-800 bg-korban-raised px-1.5 ${width}`}
     >
       {flashKey > 0 && (
         <span
@@ -1039,7 +1088,7 @@ function LevelSelector({
   selectedLevel: (typeof BID_LEVELS)[number];
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-800 bg-[#0f0f0f] px-3 py-1.5">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-800 bg-korban-raised px-3 py-1.5">
       <div className="flex items-center gap-1.5">
         <span className="mr-1.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
           Bid level
@@ -1113,7 +1162,7 @@ function RentalPanel({
               className={`rounded border px-2 py-0.5 font-mono text-[10px] font-medium transition ${
                 rentalDays === days
                   ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
-                  : "border-zinc-800 bg-[#0f0f0f] text-zinc-600 hover:text-zinc-400"
+                  : "border-zinc-800 bg-korban-raised text-zinc-600 hover:text-zinc-400"
               }`}
             >
               {days}d
@@ -1201,7 +1250,7 @@ function RentalPanel({
             })}
 
             <div className="mt-1.5 flex items-center gap-1.5 border-t border-zinc-800 pt-1.5">
-              <span className="flex min-w-0 flex-1 rounded border border-zinc-800 bg-[#0f0f0f] px-2 py-1 focus-within:border-orange-500/40">
+              <span className="flex min-w-0 flex-1 rounded border border-zinc-800 bg-korban-raised px-2 py-1 focus-within:border-orange-500/40">
                 <TextField
                   value={newLabel}
                   onChange={setNewLabel}
@@ -1233,7 +1282,7 @@ function BigQuantity({
 }) {
   const rolled = useRollingNumber(quantity);
   return (
-    <div className="rounded border border-zinc-900 bg-[#0f0f0f] px-2.5 py-2">
+    <div className="rounded border border-zinc-900 bg-korban-raised px-2.5 py-2">
       <div className="flex items-baseline justify-between gap-2">
         <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-500">{label}</span>
         <span className="font-mono text-[11px] font-bold text-zinc-400">{formatMoney(extended)}</span>
@@ -1376,7 +1425,7 @@ function ProductionPanel({
           className={`flex items-center gap-2 rounded border px-2.5 py-1 font-mono text-[10px] font-medium transition ${
             phaseModeOn
               ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
-              : "border-zinc-800 bg-[#0f0f0f] text-zinc-600 hover:text-zinc-400"
+              : "border-zinc-800 bg-korban-raised text-zinc-600 hover:text-zinc-400"
           }`}
         >
           <span
@@ -1405,7 +1454,7 @@ function ProductionPanel({
               className={`rounded border px-3 py-1 font-mono text-[10px] font-medium transition ${
                 active
                   ? "border-white/30 bg-white/[0.06] text-white shadow-[0_0_12px_rgba(255,255,255,0.1)]"
-                  : "border-zinc-800 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                  : "border-zinc-800 bg-korban-raised text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
               }`}
             >
               {type.title}
@@ -1527,7 +1576,7 @@ function ProductionPanel({
           <div className="mt-1.5 flex items-center justify-between gap-3 border-t border-zinc-800 px-1 pt-1.5">
             <button
               onClick={addPhase}
-              className="rounded border border-zinc-800 bg-[#0f0f0f] px-2.5 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+              className="rounded border border-zinc-800 bg-korban-raised px-2.5 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
             >
               Add phase
             </button>
@@ -1620,7 +1669,7 @@ function PartialExteriorAccordion({
   const [open, setOpen] = useState(false);
 
   return (
-    <section className="mt-3 rounded-lg border border-zinc-800 bg-[#070604]">
+    <section className="mt-3 rounded-lg border border-zinc-800 bg-korban-base">
       <button
         onClick={() => setOpen(!open)}
         className="flex w-full items-center justify-between gap-4 px-3 py-2 text-left"
@@ -1643,7 +1692,7 @@ function PartialExteriorAccordion({
             as one complete exterior job.
           </p>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
-            <div className="rounded border border-zinc-900 bg-[#0f0f0f] px-3 py-2">
+            <div className="rounded border border-zinc-900 bg-korban-raised px-3 py-2">
               <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
                 Complete exterior
               </p>
@@ -1651,7 +1700,7 @@ function PartialExteriorAccordion({
                 {formatMoney(completeExteriorCost)}
               </p>
             </div>
-            <div className="rounded border border-zinc-900 bg-[#0f0f0f] px-3 py-2">
+            <div className="rounded border border-zinc-900 bg-korban-raised px-3 py-2">
               <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
                 Partial exterior
               </p>
@@ -1745,6 +1794,8 @@ function ProposalTab({
   // it goes to the client.
   const [activeField, setActiveField] = useState<string | null>(null);
   const [presenting, setPresenting] = useState(false);
+  /** Shows for a moment after the link is copied, then goes away. */
+  const [linkCopied, setLinkCopied] = useState(false);
   const focusHandler = (field: string) => (active: boolean) =>
     setActiveField((current) => (active ? field : current === field ? null : current));
 
@@ -1885,7 +1936,7 @@ function ProposalTab({
                     className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium transition ${
                       active
                         ? "border-orange-400/45 bg-orange-400/[0.06] text-orange-200"
-                        : "border-zinc-900 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                        : "border-zinc-900 bg-korban-raised text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
                     }`}
                   >
                     {option}
@@ -1901,7 +1952,7 @@ function ProposalTab({
               onChange={(event) => setProposalNotes(event.target.value)}
               onFocus={() => setActiveField("notes")}
               onBlur={() => setActiveField((c) => (c === "notes" ? null : c))}
-              className="min-h-24 w-full resize-none rounded border border-zinc-900 bg-[#0f0f0f] p-2.5 text-[11px] leading-5 text-zinc-300 outline-none focus:border-orange-500/40"
+              className="min-h-24 w-full resize-none rounded border border-zinc-900 bg-korban-raised p-2.5 text-[11px] leading-5 text-zinc-300 outline-none focus:border-orange-500/40"
             />
           </Panel>
 
@@ -1915,7 +1966,7 @@ function ProposalTab({
                     className={`rounded border px-2.5 py-1.5 text-left font-mono text-[11px] font-medium transition ${
                       proposalStatus === status
                         ? "border-orange-400/45 bg-orange-400/[0.06] text-orange-200"
-                        : "border-zinc-900 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                        : "border-zinc-900 bg-korban-raised text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
                     }`}
                   >
                     {status}
@@ -1937,7 +1988,7 @@ function ProposalTab({
                   className={`rounded border px-2 py-1 font-mono text-[10px] font-medium transition ${
                     bidRoundPhase === phase
                       ? "border-zinc-500 bg-zinc-400/10 text-zinc-200"
-                      : "border-zinc-900 bg-[#0f0f0f] text-zinc-600 hover:text-zinc-400"
+                      : "border-zinc-900 bg-korban-raised text-zinc-600 hover:text-zinc-400"
                   }`}
                 >
                   {phase}
@@ -1949,7 +2000,7 @@ function ProposalTab({
 
         {/* -- Live sheet ----------------------------------------------- */}
         <div className="xl:sticky xl:top-3">
-          <div className="mb-1.5 flex items-center justify-between px-1">
+          <div className="korban-no-print mb-1.5 flex items-center justify-between px-1">
             <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
               Live proposal
             </span>
@@ -1958,7 +2009,11 @@ function ProposalTab({
                 <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-orange-500 align-middle" />
                 live fields
               </span>
-              <button className="rounded border border-zinc-800 bg-[#0f0f0f] px-2.5 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200">
+              <button
+                onClick={() => window.print()}
+                title="Pick Save as PDF in the print dialog to send it as a file"
+                className="rounded border border-zinc-800 bg-korban-raised px-2.5 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+              >
                 Print / PDF
               </button>
               <button
@@ -1966,6 +2021,28 @@ function ProposalTab({
                 className="rounded border border-orange-500/50 bg-orange-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-orange-300 transition hover:border-orange-500 hover:bg-orange-500/20"
               >
                 + Bid presentation
+              </button>
+              <button
+                onClick={async () => {
+                  // The whole bid rides in the link, so there is nothing to
+                  // upload and nothing for the client to log into.
+                  const url = buildPresentationUrl(presentationData);
+                  try {
+                    await navigator.clipboard.writeText(url);
+                    setLinkCopied(true);
+                    window.setTimeout(() => setLinkCopied(false), 2400);
+                  } catch {
+                    window.prompt("Copy this link", url);
+                  }
+                }}
+                title="Copies a link that plays the presentation in any browser"
+                className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium transition ${
+                  linkCopied
+                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+                    : "border-zinc-800 bg-korban-raised text-zinc-400 hover:border-orange-500/40 hover:text-orange-300"
+                }`}
+              >
+                {linkCopied ? "Link copied" : "Share link"}
               </button>
               <button
                 onClick={() => setProposalStatus("Ready To Send")}
@@ -2069,7 +2146,7 @@ function AlternateTile({
       className={`rounded border transition ${
         included
           ? "border-orange-400/45 bg-orange-400/[0.06]"
-          : "border-zinc-900 bg-[#0f0f0f] hover:border-zinc-700"
+          : "border-zinc-900 bg-korban-raised hover:border-zinc-700"
       }`}
     >
       <button onClick={onToggle} className="w-full px-2.5 py-2 text-left">
@@ -2345,7 +2422,7 @@ function LiveBlock({
   const active = activeField === field;
   return (
     <div
-      className={`rounded-[2px] border-l-2 pl-2.5 transition-all duration-200 ${
+      className={`korban-live-rule rounded-[2px] border-l-2 pl-2.5 transition-all duration-200 ${
         active
           ? "border-orange-500 bg-orange-500/[0.11] shadow-[0_0_0_3px_rgba(249,115,22,0.13)]"
           : "border-orange-500/25 bg-transparent"
@@ -2366,7 +2443,7 @@ function SheetPage({
   children: React.ReactNode;
 }) {
   return (
-    <div className="relative overflow-hidden rounded-[3px]" style={{ background: PAPER }}>
+    <div className="korban-sheet-page relative overflow-hidden rounded-[3px]" style={{ background: PAPER }}>
       <span aria-hidden className="pointer-events-none absolute left-0 top-0 h-3.5 w-3.5 border-l border-t border-orange-500/60" />
       <span aria-hidden className="pointer-events-none absolute bottom-0 right-0 h-3.5 w-3.5 border-b border-r border-orange-500/60" />
       {/* Page one carries the number in the masthead; the rest carry it here. */}
@@ -2471,7 +2548,10 @@ function ProposalSheet({
   const totalPages = 2 + (alternateQualifications.length > 0 ? 1 : 0);
 
   return (
-    <div className="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+    <div
+      id="korban-proposal"
+      className="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-2"
+    >
       <div className="grid gap-2.5">
         {/* -- Page 1 --------------------------------------------------- */}
         <SheetPage number={1} total={totalPages} proposalNumber={estimate.proposalNumber} showCorner={false}>

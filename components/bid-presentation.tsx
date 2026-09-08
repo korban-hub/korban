@@ -1043,10 +1043,43 @@ export default function BidPresentation({
   }, [index, goTo, onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/95 backdrop-blur-sm">
-      <div className="flex min-h-0 flex-1 items-center justify-center p-5">
+    <div id="korban-deck" className="fixed inset-0 z-50 flex flex-col bg-black/95 backdrop-blur-sm">
+      {/*
+       * Export. Each slide prints as one landscape page with its numbers and
+       * drawings intact. The motion is what sells, so a PDF is the fallback
+       * for whoever can't open a link - not the main event.
+       */}
+      <style>{`
+        @media print {
+          @page { size: letter landscape; margin: 0.3in; }
+          body { background: #fff !important; }
+          body * { visibility: hidden !important; }
+          #korban-deck, #korban-deck * { visibility: visible !important; }
+          #korban-deck {
+            position: absolute !important;
+            left: 0; top: 0;
+            width: 100% !important;
+            height: auto !important;
+            background: transparent !important;
+            backdrop-filter: none !important;
+          }
+          .korban-live-stage, .korban-no-print { display: none !important; }
+          .korban-print-deck { display: block !important; }
+          .korban-print-slide {
+            break-after: page;
+            page-break-after: always;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            border: 1px solid #333;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          .korban-print-slide:last-child { break-after: auto; page-break-after: auto; }
+        }
+      `}</style>
+      <div className="korban-live-stage flex min-h-0 flex-1 items-center justify-center p-5">
         <div
-          className="relative w-full overflow-hidden rounded-lg border border-zinc-800 bg-[#070604]"
+          className="relative w-full overflow-hidden rounded-lg border border-zinc-800 bg-korban-base"
           style={{ aspectRatio: "16 / 9", maxHeight: "100%", maxWidth: "min(100%, 1600px)" }}
         >
           <div
@@ -1069,17 +1102,29 @@ export default function BidPresentation({
         </div>
       </div>
 
-      <div className="flex items-center gap-3 border-t border-zinc-900 bg-[#0b0b0b] px-6 py-2.5">
+      {/* Every slide, stacked, for the printer only. */}
+      <div className="korban-print-deck hidden">
+        {deck.map((item) => (
+          <div
+            key={`print-${item.id}`}
+            className="korban-print-slide relative overflow-hidden bg-korban-base"
+          >
+            {item.render(data, 1)}
+          </div>
+        ))}
+      </div>
+
+      <div className="korban-no-print flex items-center gap-3 border-t border-zinc-900 bg-korban-raised px-6 py-2.5">
         <button
           onClick={onClose}
-          className="rounded border border-zinc-800 bg-[#0f0f0f] px-3 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+          className="rounded border border-zinc-800 bg-korban-raised px-3 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
         >
           Close
         </button>
         <button
           onClick={() => goTo(index - 1)}
           disabled={index === 0}
-          className="rounded border border-zinc-800 bg-[#0f0f0f] px-2.5 py-1 font-mono text-[10px] text-zinc-400 disabled:opacity-30"
+          className="rounded border border-zinc-800 bg-korban-raised px-2.5 py-1 font-mono text-[10px] text-zinc-400 disabled:opacity-30"
         >
           ‹
         </button>
@@ -1092,7 +1137,7 @@ export default function BidPresentation({
         <button
           onClick={() => goTo(index + 1)}
           disabled={index === deck.length - 1}
-          className="rounded border border-zinc-800 bg-[#0f0f0f] px-2.5 py-1 font-mono text-[10px] text-zinc-400 disabled:opacity-30"
+          className="rounded border border-zinc-800 bg-korban-raised px-2.5 py-1 font-mono text-[10px] text-zinc-400 disabled:opacity-30"
         >
           ›
         </button>
@@ -1119,6 +1164,14 @@ export default function BidPresentation({
             </button>
           ))}
         </div>
+
+        <button
+          onClick={() => window.print()}
+          title="Each slide prints as a page. Choose Save as PDF to send it as a file."
+          className="rounded border border-zinc-800 bg-black px-3 py-1 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300"
+        >
+          Export
+        </button>
 
         <span className="font-mono text-[10px] text-zinc-600">
           {index + 1} / {deck.length} · {Math.round(totalSeconds)}s

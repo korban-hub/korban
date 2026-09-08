@@ -201,7 +201,7 @@ export default function LoadListPage() {
               />
             </div>
             <KorbanButton variant="ghost" onClick={() => window.print()}>
-              Print
+              Print / PDF
             </KorbanButton>
             <KorbanButton variant="primary" onClick={() => router.push("/project-plan-desk")}>
               Plan Desk
@@ -210,10 +210,10 @@ export default function LoadListPage() {
         }
       />
 
-      <div className="relative mx-auto w-full max-w-[1600px] px-4 py-4">
+      <div id="korban-loadsheet" className="relative mx-auto w-full max-w-[1600px] px-4 py-4">
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-0 opacity-[0.022]"
+          className="korban-no-print pointer-events-none absolute inset-0 opacity-[0.022]"
           style={{
             backgroundImage:
               "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
@@ -338,7 +338,7 @@ export default function LoadListPage() {
                           {item.description}
                         </span>
                         <span
-                          className={`text-right font-mono text-[10px] ${
+                          className={`korban-ordered text-right font-mono text-[10px] ${
                             active ? "font-bold text-orange-300" : "text-zinc-800"
                           }`}
                         >
@@ -414,6 +414,46 @@ function KorbanMotionStyles() {
       .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
       @media (prefers-reduced-motion: reduce) {
         .korban-scan { animation: none; opacity: 0; }
+      }
+
+      /*
+       * Printing. This sheet exists to leave the building - a loader works
+       * from it on a clipboard. Portrait, three columns across, white ground
+       * and black type - the way the paper form always was. Ship and Rec boxes
+       * come out empty so they can be filled in by hand.
+       */
+      @media print {
+        @page { size: letter portrait; margin: 0.35in; }
+
+        body { background: #fff !important; color: #000 !important; }
+        .korban-no-print { display: none !important; }
+
+        #korban-loadsheet, #korban-loadsheet * {
+          background: transparent !important;
+          color: #000 !important;
+          border-color: #999 !important;
+          box-shadow: none !important;
+        }
+        #korban-loadsheet {
+          position: absolute !important;
+          left: 0; top: 0;
+          width: 100% !important;
+          padding: 0 !important;
+          font-size: 8px;
+        }
+        /* The three columns are the whole point of the form - keep them. */
+        #korban-loadsheet .xl\\:grid-cols-3 {
+          display: grid !important;
+          grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+          gap: 0.12in !important;
+        }
+        /* A quantity the takeoff produced still needs to stand out on paper. */
+        .korban-ordered { font-weight: 700 !important; }
+        /* Empty boxes for the yard to write in. */
+        #korban-loadsheet input, #korban-loadsheet textarea {
+          border: 1px solid #999 !important;
+          min-height: 1.1em;
+        }
       }
     `}</style>
   );
