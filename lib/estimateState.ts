@@ -66,7 +66,8 @@ export type EstimateState = {
   // Labor
   erectRate: number;
   travelRate: number;
-  travelHours: number;
+  /** One-way miles to site. Loads, trips, hours and cost all derive from it. */
+  siteMiles: number;
   dismantlePercentOfErect: number;
 
   // Production
@@ -106,16 +107,21 @@ export const DEFAULT_ESTIMATE_STATE: EstimateState = {
 
   erectRate: 68,
   travelRate: 70,
-  travelHours: 16,
+  // Miles to site. Everything about travel derives from this one number.
+  siteMiles: 0,
   dismantlePercentOfErect: 70,
 
   productionKey: "conventional",
   crewSize: 4,
   phaseModeOn: false,
+  // The four faces are placeholders, not data. Days stay at zero until the
+  // takeoff says a face is actually covered - a phase plan invented before
+  // anyone gripped an elevation is worse than an empty one.
   phases: [
-    { id: 1, phase: "North elevation", days: 2, crews: 1, menPerCrew: 4 },
-    { id: 2, phase: "East elevation", days: 1, crews: 1, menPerCrew: 4 },
-    { id: 3, phase: "South elevation", days: 2, crews: 1, menPerCrew: 4 },
+    { id: 1, phase: "North", days: 0, crews: 1, menPerCrew: 4 },
+    { id: 2, phase: "East", days: 0, crews: 1, menPerCrew: 4 },
+    { id: 3, phase: "South", days: 0, crews: 1, menPerCrew: 4 },
+    { id: 4, phase: "West", days: 0, crews: 1, menPerCrew: 4 },
   ],
 
   approvedAlternates: [],
@@ -123,8 +129,10 @@ export const DEFAULT_ESTIMATE_STATE: EstimateState = {
 
   laborMarkupPercent: 35,
   rentalsDirectCostPercent: 40,
-  miscRevenue: 6800,
-  miscCost: 4200,
+  // Misc is whatever this job needs that nothing else covers. Invented
+  // defaults landed in the bid without anyone choosing them.
+  miscRevenue: 0,
+  miscCost: 0,
 
   derived: null,
 };

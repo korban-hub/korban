@@ -11,6 +11,7 @@ import {
   type MaterialDefaults,
   type MaterialItem,
   type LaborDefaults,
+  type LaborRateSet,
   type PricingDefaults,
   type ProposalDefaults,
   type AlternateRateDefaults,
@@ -250,24 +251,51 @@ export default function BackendPage() {
 
         {/* 5. Labor */}
         <BackendTile title="Labor Defaults" subtitle="Feeds Estimate Review labor cost and the schedule" onSave={() => { saveBackendSection("labor", labor); flashSaved("Labor Defaults"); }}>
-          <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Estimate Rates</p>
-          <div className="grid grid-cols-2 gap-3">
-            <FieldRow label="Erect / Dismantle" hint="Applied to erect and dismantle hours">
-              <MoneyInput value={labor.erectHourlyRate} onChange={(v) => setLabor({ ...labor, erectHourlyRate: v })} suffix="/hr" />
-            </FieldRow>
-            <FieldRow label="Travel" hint="Travel carries its own rate">
-              <MoneyInput value={labor.travelHourlyRate} onChange={(v) => setLabor({ ...labor, travelHourlyRate: v })} suffix="/hr" />
-            </FieldRow>
+          <p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Rate Set In Use</p>
+          <p className="mb-2 text-[10px] leading-4 text-zinc-600">
+            Both sets are kept so a GC asking what this would cost non-union is one click,
+            not a re-entry of every rate. The active set is what estimates price at.
+          </p>
+          <SegmentedControl
+            value={labor.activeRateSet === "union" ? "Union" : "Non-Union"}
+            options={["Union", "Non-Union"]}
+            onChange={(v) => {
+              const key = v === "Union" ? "union" : "nonUnion";
+              setLabor({ ...labor, activeRateSet: key, ...labor[key] });
+            }}
+          />
+
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <RateSetTile
+              label="Union"
+              active={labor.activeRateSet === "union"}
+              rates={labor.union}
+              onChange={(next) => setLabor({ ...labor, union: next, ...(labor.activeRateSet === "union" ? next : {}) })}
+            />
+            <RateSetTile
+              label="Non-Union"
+              active={labor.activeRateSet === "nonUnion"}
+              rates={labor.nonUnion}
+              onChange={(next) => setLabor({ ...labor, nonUnion: next, ...(labor.activeRateSet === "nonUnion" ? next : {}) })}
+            />
           </div>
+
           <FieldRow label="Dismantle as % of Erect" hint="Confirmed at 70% by the material audit. Dismantle is never entered by hand.">
             <PercentInput value={labor.dismantlePercentOfErect} onChange={(v) => setLabor({ ...labor, dismantlePercentOfErect: v })} />
           </FieldRow>
 
-          <p className="mt-1 mb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Trade Rates</p>
-          <div className="grid grid-cols-3 gap-3">
-            <FieldRow label="Apprentice"><MoneyInput value={labor.apprenticeRate} onChange={(v) => setLabor({ ...labor, apprenticeRate: v })} suffix="/hr" /></FieldRow>
-            <FieldRow label="Journeyman"><MoneyInput value={labor.journeymanRate} onChange={(v) => setLabor({ ...labor, journeymanRate: v })} suffix="/hr" /></FieldRow>
-            <FieldRow label="Foreman"><MoneyInput value={labor.foremanRate} onChange={(v) => setLabor({ ...labor, foremanRate: v })} suffix="/hr" /></FieldRow>
+          <p className="mt-1 mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Travel &amp; Logistics</p>
+          <p className="mb-2 text-[10px] leading-4 text-zinc-600">
+            Travel is derived from loads, not typed in. Planks set how many truck runs a job
+            takes; miles to site come from the estimate.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Planks per Load"><NumberInput value={labor.planksPerLoad} onChange={(v) => setLabor({ ...labor, planksPerLoad: v })} suffix="planks" /></FieldRow>
+            <FieldRow label="Legs per Load" hint="Loaded out, empty back, empty out at dismantle, loaded home"><NumberInput value={labor.legsPerLoad} onChange={(v) => setLabor({ ...labor, legsPerLoad: v })} suffix="legs" /></FieldRow>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Travel Speed" hint="Truck speed, not car speed"><NumberInput value={labor.travelSpeedMph} onChange={(v) => setLabor({ ...labor, travelSpeedMph: v })} suffix="mph" /></FieldRow>
+            <FieldRow label="Truck Rate"><MoneyInput value={labor.truckHourlyRate} onChange={(v) => setLabor({ ...labor, truckHourlyRate: v })} suffix="/hr" /></FieldRow>
           </div>
 
           <p className="mt-1 mb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Crew & Production</p>
@@ -697,6 +725,37 @@ function MaterialRow({ item, onChange }: { item: MaterialItem; onChange: (item: 
       >
         {item.billsAsRental ? "bills" : "off"}
       </button>
+    </div>
+  );
+}
+
+/** One rate set - union or non-union - as its own tile for side-by-side entry. */
+function RateSetTile({ label, active, rates, onChange }: {
+  label: string; active: boolean; rates: LaborRateSet; onChange: (next: LaborRateSet) => void;
+}) {
+  const rows: { key: keyof LaborRateSet; label: string }[] = [
+    { key: "erectHourlyRate", label: "Erect / dismantle" },
+    { key: "travelHourlyRate", label: "Travel labor" },
+    { key: "apprenticeRate", label: "Apprentice" },
+    { key: "journeymanRate", label: "Journeyman" },
+    { key: "foremanRate", label: "Foreman" },
+  ];
+  return (
+    <div className={`rounded-xl border p-3 ${active ? "border-orange-500/40 bg-orange-500/[0.05]" : "border-zinc-800 bg-black"}`}>
+      <div className="mb-2 flex items-center justify-between">
+        <p className={`font-mono text-[10px] font-bold uppercase tracking-[0.18em] ${active ? "text-orange-300" : "text-zinc-500"}`}>
+          {label}
+        </p>
+        {active && <span className="font-mono text-[8px] uppercase tracking-[0.14em] text-orange-400">in use</span>}
+      </div>
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <div key={row.key} className="grid grid-cols-[1fr_96px] items-center gap-2">
+            <span className="text-[10px] text-zinc-500">{row.label}</span>
+            <MoneyInput value={rates[row.key]} onChange={(v) => onChange({ ...rates, [row.key]: v })} suffix="/hr" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

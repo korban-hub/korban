@@ -87,21 +87,50 @@ export type MaterialDefaults = {
   rules: MaterialRules;
 };
 
+/**
+ * One set of hourly rates. Kept as a block so union and non-union can be
+ * entered side by side and compared - a GC asking "what would this cost
+ * non-union" shouldn't require re-typing every rate.
+ */
+export type LaborRateSet = {
+  apprenticeRate: number;
+  journeymanRate: number;
+  foremanRate: number;
+  /** Applied to erect and dismantle hours on the estimate. */
+  erectHourlyRate: number;
+  /** Travel labor. Separate from the truck rate, which is in logistics. */
+  travelHourlyRate: number;
+};
+
 export type LaborDefaults = {
   installCrewSize: number;
   dismantleCrewSize: number;
   installProductionRate: number;
   dismantleProductionRate: number;
+  /** Which set the estimate uses by default. Per-bid override lives on the estimate. */
+  activeRateSet: "union" | "nonUnion";
+  union: LaborRateSet;
+  nonUnion: LaborRateSet;
+  /** Kept so older records keep working; mirrors the active set. */
   apprenticeRate: number;
   journeymanRate: number;
   foremanRate: number;
-  /** Hourly rate applied to erect and dismantle hours on the estimate. */
   erectHourlyRate: number;
-  /** Travel carries its own rate, usually a little above the erect rate. */
   travelHourlyRate: number;
   /** Dismantle hours as a share of erect hours. Confirmed at 70%. */
   dismantlePercentOfErect: number;
   travelTimeHours: number;
+  /** Planks per truck load. Loads drive every travel figure. */
+  planksPerLoad: number;
+  /**
+   * One-way legs a load travels. Four covers the whole job: loaded out to
+   * site, empty back to yard, empty out again at dismantle, loaded home.
+   */
+  legsPerLoad: number;
+  /** Highway speed used to turn miles into hours. Trucks, not cars. */
+  travelSpeedMph: number;
+  /** Hourly cost of a truck on the road. */
+  truckHourlyRate: number;
   truckDeliveryRate: number;
   mobilizationCost: number;
   dismantleCost: number;
@@ -394,6 +423,21 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     dismantleCrewSize: 4,
     installProductionRate: 25,
     dismantleProductionRate: 35,
+    activeRateSet: "union",
+    union: {
+      apprenticeRate: 48,
+      journeymanRate: 72,
+      foremanRate: 85,
+      erectHourlyRate: 68,
+      travelHourlyRate: 70,
+    },
+    nonUnion: {
+      apprenticeRate: 32,
+      journeymanRate: 48,
+      foremanRate: 60,
+      erectHourlyRate: 45,
+      travelHourlyRate: 47,
+    },
     apprenticeRate: 48,
     journeymanRate: 72,
     foremanRate: 85,
@@ -401,6 +445,10 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     travelHourlyRate: 70,
     dismantlePercentOfErect: 70,
     travelTimeHours: 1,
+    planksPerLoad: 150,
+    legsPerLoad: 4,
+    travelSpeedMph: 45,
+    truckHourlyRate: 75,
     truckDeliveryRate: 425,
     mobilizationCost: 1200,
     dismantleCost: 0,
@@ -570,21 +618,45 @@ function normalizeMaterial(value: unknown): MaterialDefaults {
   return { items: [...merged, ...customItems], rules };
 }
 
-function normalizeLabor(value: unknown): LaborDefaults {
+function normalizeRateSet(value: unknown, d: LaborRateSet): LaborRateSet {
   const r = isRecord(value) ? value : {};
-  const d = DEFAULT_BACKEND_SETTINGS.labor;
   return {
-    installCrewSize: asNumber(r.installCrewSize, d.installCrewSize),
-    dismantleCrewSize: asNumber(r.dismantleCrewSize, d.dismantleCrewSize),
-    installProductionRate: asNumber(r.installProductionRate, d.installProductionRate),
-    dismantleProductionRate: asNumber(r.dismantleProductionRate, d.dismantleProductionRate),
     apprenticeRate: asNumber(r.apprenticeRate, d.apprenticeRate),
     journeymanRate: asNumber(r.journeymanRate, d.journeymanRate),
     foremanRate: asNumber(r.foremanRate, d.foremanRate),
     erectHourlyRate: asNumber(r.erectHourlyRate, d.erectHourlyRate),
     travelHourlyRate: asNumber(r.travelHourlyRate, d.travelHourlyRate),
+  };
+}
+
+function normalizeLabor(value: unknown): LaborDefaults {
+  const r = isRecord(value) ? value : {};
+  const d = DEFAULT_BACKEND_SETTINGS.labor;
+  const activeRateSet = asEnum(r.activeRateSet, d.activeRateSet, ["union", "nonUnion"] as const);
+  // A record written before the split carried flat rates. Seed union from
+  // those rather than dropping what the estimator entered.
+  const union = normalizeRateSet(r.union ?? r, d.union);
+  const nonUnion = normalizeRateSet(r.nonUnion, d.nonUnion);
+  const active = activeRateSet === "union" ? union : nonUnion;
+  return {
+    activeRateSet,
+    union,
+    nonUnion,
+    apprenticeRate: active.apprenticeRate,
+    journeymanRate: active.journeymanRate,
+    foremanRate: active.foremanRate,
+    erectHourlyRate: active.erectHourlyRate,
+    travelHourlyRate: active.travelHourlyRate,
+    installCrewSize: asNumber(r.installCrewSize, d.installCrewSize),
+    dismantleCrewSize: asNumber(r.dismantleCrewSize, d.dismantleCrewSize),
+    installProductionRate: asNumber(r.installProductionRate, d.installProductionRate),
+    dismantleProductionRate: asNumber(r.dismantleProductionRate, d.dismantleProductionRate),
     dismantlePercentOfErect: asNumber(r.dismantlePercentOfErect, d.dismantlePercentOfErect),
     travelTimeHours: asNumber(r.travelTimeHours, d.travelTimeHours),
+    planksPerLoad: asNumber(r.planksPerLoad, d.planksPerLoad),
+    legsPerLoad: asNumber(r.legsPerLoad, d.legsPerLoad),
+    travelSpeedMph: asNumber(r.travelSpeedMph, d.travelSpeedMph),
+    truckHourlyRate: asNumber(r.truckHourlyRate, d.truckHourlyRate),
     truckDeliveryRate: asNumber(r.truckDeliveryRate, d.truckDeliveryRate),
     mobilizationCost: asNumber(r.mobilizationCost, d.mobilizationCost),
     dismantleCost: asNumber(r.dismantleCost, d.dismantleCost),
@@ -735,6 +807,35 @@ export function saveBackendSection<K extends keyof Omit<BackendSettings, "schema
 export function resetBackendSettings(): void {
   if (!canUseStorage()) return;
   window.localStorage.setItem(BACKEND_SETTINGS_KEY, JSON.stringify(DEFAULT_BACKEND_SETTINGS));
+}
+
+/**
+ * Travel, derived from what the job actually ships.
+ *
+ * Loads come from the plank count - planks are the bulk item, so they set how
+ * many truck runs a job takes. Each load goes out and comes back, and the
+ * round trip is priced at truck speed rather than car speed.
+ *
+ * Miles are entered by the estimator today. When the maps integration lands,
+ * only this input changes - everything downstream stays as it is.
+ */
+export function computeTravel(
+  plankCount: number,
+  oneWayMiles: number,
+  settings: BackendSettings = getBackendSettings(),
+): { loads: number; legs: number; legHours: number; hours: number; cost: number } {
+  const { planksPerLoad, legsPerLoad, travelSpeedMph, truckHourlyRate } = settings.labor;
+  const loads = plankCount > 0 ? Math.ceil(plankCount / Math.max(1, planksPerLoad)) : 0;
+  const legHours = travelSpeedMph > 0 ? oneWayMiles / travelSpeedMph : 0;
+  const legs = loads * legsPerLoad;
+  const hours = legs * legHours;
+  return {
+    loads,
+    legs,
+    legHours: Math.round(legHours * 100) / 100,
+    hours: Math.round(hours * 10) / 10,
+    cost: Math.round(hours * truckHourlyRate),
+  };
 }
 
 /** Monthly rental rate for a core piece, by name. One lookup, one home. */

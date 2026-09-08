@@ -1,314 +1,48 @@
 "use client";
-import { KorbanHeader } from "@/components/korban";
-import { useMemo, useState } from "react";
 
-type BidStatus = "Won" | "Lost" | "Still Chasing" | "No Response" | "Not Sent";
-type Timeframe = "This Day" | "This Week" | "This Month" | "This Year";
-type BidStage =
-  | "Budget / ROM"
-  | "Design Development"
-  | "50% CD"
-  | "75% CD"
-  | "100% CD"
-  | "GMP"
-  | "Final Round"
-  | "Awarded";
+/**
+ * Bid Room - the hub.
+ *
+ * An estimator opens this before anything else, so the top of the page is
+ * awareness: what the industry is doing and where the market sits. Below that
+ * is the work - live bids, what's due, what the yard can cover.
+ *
+ * Two kinds of data live here and they are marked differently on purpose.
+ * Bids and inventory come from KORBAN's own records and are real. News and
+ * market figures come from outside feeds that aren't connected yet; those
+ * carry a SAMPLE marker until they are, because a stock price that looks live
+ * and isn't is worse than no stock price at all.
+ */
 
-type BidRound = {
-  label: string;
-  date: string;
-  value: number | null;
-};
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import {
+  createProject,
+  listProjects,
+  setActiveProjectId,
+  seedDemoProject,
+  type ProjectRecord,
+} from "@/lib/projectStore";
+import { getBackendSettings } from "@/lib/backendStore";
 
-const timeframeOptions: Timeframe[] = ["This Day", "This Week", "This Month", "This Year"];
-
-const bidStages: BidStage[] = [
-  "Budget / ROM",
-  "Design Development",
-  "50% CD",
-  "75% CD",
-  "100% CD",
-  "GMP",
-  "Final Round",
-  "Awarded",
+const menuLinks: KorbanMenuLink[] = [
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
+  { href: "/set-scaffold-v2", label: "Set Scaffold" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/margin-review", label: "Margin Review" },
+  { href: "/projects", label: "Projects" },
+  { href: "/backend", label: "Backend" },
 ];
 
-const roundLabels = ["ROM", "50%", "75%", "100%", "GMP", "Final"];
+// -----------------------------------------------------------------------------
+// Outside feeds - structured for live data, sample until connected
+// -----------------------------------------------------------------------------
 
-function makeRounds(
-  baseValue: number,
-  startMonth: string,
-  dayStart: number,
-  startIndex = 0,
-  emptyAll = false
-): BidRound[] {
-  const multipliers = [1, 1.035, 1.018, 1.056, 1.032, 1.071, 1.046];
+type NewsItem = { outlet: string; icon: string; summary: string; sourceUrl: string };
 
-  return roundLabels.map((label, index) => ({
-    label,
-    date: `${startMonth}/${String(dayStart + index * 3).padStart(2, "0")}/26`,
-    value: emptyAll || index < startIndex ? null : Math.round(baseValue * multipliers[index]),
-  }));
-}
-
-const bidPipeline: {
-  project: string;
-  gc: string;
-  contactEmail: string;
-  contactName: string;
-  contactPhone: string;
-  bidDate: string;
-  sentDate: string;
-  status: BidStatus;
-  union: "Union" | "Non-Union";
-  value: number | null;
-  stage: BidStage;
-  timeframe: Timeframe[];
-  rounds: BidRound[];
-}[] = [
-  {
-    project: "Mare Island Apartments",
-    gc: "Turner Construction",
-    contactEmail: "estimating@turner.com",
-    contactName: "Marcus Lee",
-    contactPhone: "(510) 555-0138",
-    bidDate: "06/14/26",
-    sentDate: "06/12/26",
-    status: "Still Chasing",
-    union: "Union",
-    value: 184000,
-    stage: "Final Round",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(171000, "05", 13, 1),
-  },
-  {
-    project: "Napa Retail Shell",
-    gc: "Swinerton",
-    contactEmail: "biddesk@swinerton.com",
-    contactName: "Sarah Grant",
-    contactPhone: "(707) 555-0184",
-    bidDate: "06/18/26",
-    sentDate: "Pending",
-    status: "Not Sent",
-    union: "Non-Union",
-    value: null,
-    stage: "75% CD",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(88500, "05", 18, 0, true),
-  },
-  {
-    project: "Oakland Mixed Use",
-    gc: "Webcor",
-    contactEmail: "precon@webcor.com",
-    contactName: "Daniel Carter",
-    contactPhone: "(415) 555-0199",
-    bidDate: "06/08/26",
-    sentDate: "06/06/26",
-    status: "No Response",
-    union: "Union",
-    value: 241800,
-    stage: "GMP",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(224000, "05", 8, 0),
-  },
-  {
-    project: "Vacaville Senior Living",
-    gc: "Devcon",
-    contactEmail: "estimating@devcon.com",
-    contactName: "Rachel Stone",
-    contactPhone: "(925) 555-0127",
-    bidDate: "05/30/26",
-    sentDate: "05/28/26",
-    status: "Won",
-    union: "Non-Union",
-    value: 136200,
-    stage: "Awarded",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(126000, "04", 21, 2),
-  },
-  {
-    project: "Sacramento Medical TI",
-    gc: "DPR",
-    contactEmail: "precon@dpr.com",
-    contactName: "Anthony Ruiz",
-    contactPhone: "(916) 555-0144",
-    bidDate: "05/22/26",
-    sentDate: "05/20/26",
-    status: "Lost",
-    union: "Union",
-    value: 78900,
-    stage: "100% CD",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(76000, "04", 18, 3),
-  },
-  {
-    project: "Berkeley Housing Phase II",
-    gc: "XL Construction",
-    contactEmail: "bids@xlconstruction.com",
-    contactName: "Tina Wallace",
-    contactPhone: "(408) 555-0166",
-    bidDate: "06/07/26",
-    sentDate: "06/07/26",
-    status: "Won",
-    union: "Non-Union",
-    value: 168400,
-    stage: "Awarded",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(156000, "05", 7, 1),
-  },
-  {
-    project: "San Jose Civic Renovation",
-    gc: "McCarthy",
-    contactEmail: "precon@mccarthy.com",
-    contactName: "Eric Jensen",
-    contactPhone: "(408) 555-0192",
-    bidDate: "06/20/26",
-    sentDate: "06/17/26",
-    status: "Still Chasing",
-    union: "Union",
-    value: 312600,
-    stage: "GMP",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(292000, "05", 16, 0),
-  },
-  {
-    project: "Fairfield Hotel Exterior",
-    gc: "Balfour Beatty",
-    contactEmail: "estimating@balfourbeatty.com",
-    contactName: "Monica Hayes",
-    contactPhone: "(707) 555-0165",
-    bidDate: "06/21/26",
-    sentDate: "Pending",
-    status: "Not Sent",
-    union: "Non-Union",
-    value: null,
-    stage: "50% CD",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(113000, "05", 20, 0, true),
-  },
-  {
-    project: "Walnut Creek Medical Office",
-    gc: "Level 10",
-    contactEmail: "precon@level10gc.com",
-    contactName: "James Porter",
-    contactPhone: "(925) 555-0172",
-    bidDate: "06/03/26",
-    sentDate: "06/01/26",
-    status: "No Response",
-    union: "Non-Union",
-    value: 154900,
-    stage: "100% CD",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(147000, "05", 2, 3),
-  },
-  {
-    project: "Fremont Tech Campus",
-    gc: "Clark Construction",
-    contactEmail: "bids@clarkconstruction.com",
-    contactName: "Lauren Kim",
-    contactPhone: "(510) 555-0188",
-    bidDate: "05/18/26",
-    sentDate: "05/16/26",
-    status: "Lost",
-    union: "Union",
-    value: 402500,
-    stage: "Final Round",
-    timeframe: ["This Month", "This Year"],
-    rounds: makeRounds(375000, "04", 11, 0),
-  },
-  {
-    project: "Richmond School Modernization",
-    gc: "Flint Builders",
-    contactEmail: "estimating@flintbuilders.com",
-    contactName: "David Nguyen",
-    contactPhone: "(510) 555-0114",
-    bidDate: "06/10/26",
-    sentDate: "06/09/26",
-    status: "Won",
-    union: "Union",
-    value: 219700,
-    stage: "Awarded",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(203000, "05", 10, 2),
-  },
-  {
-    project: "Petaluma Mixed Use",
-    gc: "Nibbi Brothers",
-    contactEmail: "precon@nibbi.com",
-    contactName: "Carla Ramos",
-    contactPhone: "(415) 555-0122",
-    bidDate: "06/11/26",
-    sentDate: "06/10/26",
-    status: "Still Chasing",
-    union: "Non-Union",
-    value: 176800,
-    stage: "Final Round",
-    timeframe: ["This Week", "This Month", "This Year"],
-    rounds: makeRounds(164000, "05", 11, 2),
-  },
-];
-
-const inventory = [
-  { item: "Frames", available: 1240, committed: 680, status: "Healthy" },
-  { item: "Planks", available: 3120, committed: 1900, status: "Healthy" },
-  { item: "Cross Braces", available: 1480, committed: 1100, status: "Watch" },
-  { item: "Guardrails", available: 820, committed: 760, status: "Tight" },
-  { item: "Base Plates", available: 960, committed: 540, status: "Healthy" },
-  { item: "Screw Jacks", available: 710, committed: 690, status: "Tight" },
-];
-
-const marketWatch = [
-  {
-    ticker: "URI",
-    name: "United Rentals",
-    move: "+1.8%",
-    price: "$681.42",
-    volume: "812K",
-    dayRange: "$667.20 - $684.91",
-    sector: "Rental Equipment",
-    note: "Equipment rental demand signal",
-  },
-  {
-    ticker: "CAT",
-    name: "Caterpillar",
-    move: "-0.6%",
-    price: "$327.18",
-    volume: "1.9M",
-    dayRange: "$324.75 - $331.40",
-    sector: "Heavy Equipment",
-    note: "Heavy machinery demand",
-  },
-  {
-    ticker: "VMC",
-    name: "Vulcan Materials",
-    move: "+0.9%",
-    price: "$251.80",
-    volume: "704K",
-    dayRange: "$247.92 - $252.66",
-    sector: "Construction Materials",
-    note: "Aggregate / infrastructure signal",
-  },
-  {
-    ticker: "MLM",
-    name: "Martin Marietta",
-    move: "+0.4%",
-    price: "$566.20",
-    volume: "418K",
-    dayRange: "$559.30 - $568.10",
-    sector: "Materials",
-    note: "Public works material demand",
-  },
-];
-
-const constructionIndustryTrend = [
-  { label: "Open", value: 68 },
-  { label: "10a", value: 74 },
-  { label: "12p", value: 71 },
-  { label: "2p", value: 79 },
-  { label: "Now", value: 76 },
-];
-
-const usConstructionNews = [
+const US_NEWS: NewsItem[] = [
   {
     outlet: "ENR",
     icon: "ENR",
@@ -318,676 +52,537 @@ const usConstructionNews = [
   {
     outlet: "Construction Dive",
     icon: "CD",
-    summary: "Healthcare, industrial, and public sector projects continue to drive selective opportunities.",
+    summary: "Healthcare, industrial and public sector projects continue to drive selective opportunities.",
     sourceUrl: "https://www.constructiondive.com",
   },
 ];
 
-const internationalConstructionNews = [
+const WORLD_NEWS: NewsItem[] = [
   {
     outlet: "Global Construction Review",
     icon: "GCR",
-    summary: "Global infrastructure, transportation, and energy projects remain active across major regions.",
+    summary: "Global infrastructure, transportation and energy projects remain active across major regions.",
     sourceUrl: "https://www.globalconstructionreview.com",
   },
   {
     outlet: "World Construction Network",
     icon: "WCN",
-    summary: "Material pricing, labor availability, and project finance continue affecting construction delivery.",
+    summary: "Material pricing, labor availability and project finance continue affecting delivery.",
     sourceUrl: "https://www.worldconstructionnetwork.com",
   },
 ];
 
-// ── Weekly Bid Calendar — new signature element ──
-// Live 7-day strip of upcoming bid due dates, pulled from the same
-// bidPipeline data already on this page (bidDate field), so it stays
-// in sync with everything else automatically.
-const weekDayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+type Ticker = {
+  ticker: string; name: string; move: string; price: string;
+  volume: string; dayRange: string; sector: string; note: string;
+};
 
-function getUpcomingWeek() {
-  const today = new Date("2026-06-18"); // matches current app date context
-  const dayOfWeek = (today.getDay() + 6) % 7; // 0 = Monday
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - dayOfWeek);
+const MARKET: Ticker[] = [
+  { ticker: "URI", name: "United Rentals", move: "+1.8%", price: "$681.42", volume: "812K", dayRange: "$667.20 - $684.91", sector: "Rental Equipment", note: "Equipment rental demand signal" },
+  { ticker: "CAT", name: "Caterpillar", move: "-0.6%", price: "$327.18", volume: "1.9M", dayRange: "$324.75 - $331.40", sector: "Heavy Equipment", note: "Heavy machinery demand" },
+  { ticker: "VMC", name: "Vulcan Materials", move: "+0.9%", price: "$251.80", volume: "704K", dayRange: "$247.92 - $252.66", sector: "Construction Materials", note: "Aggregate and infrastructure signal" },
+  { ticker: "MLM", name: "Martin Marietta", move: "+0.4%", price: "$566.20", volume: "418K", dayRange: "$559.30 - $568.10", sector: "Materials", note: "Public works material demand" },
+];
 
-  return weekDayLabels.map((label, index) => {
-    const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
-    const mm = String(date.getMonth() + 1).padStart(2, "0");
-    const dd = String(date.getDate()).padStart(2, "0");
-    const dateKey = `${mm}/${dd}/26`;
-    const isToday = dateKey === "06/18/26";
+/**
+ * Yard stock. Company-wide inventory tracking isn't built yet, so these are
+ * illustrative counts against the real piece names from Backend.
+ */
+const YARD_STOCK: Record<string, number> = {
+  Frames: 1240,
+  Planks: 3120,
+  "Cross Braces": 1480,
+  Guardrails: 820,
+  "Base Plates": 960,
+  "Screw Jacks": 710,
+};
 
-    return { label, dateKey, dayNumber: date.getDate(), isToday };
-  });
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// -----------------------------------------------------------------------------
+// Motion
+// -----------------------------------------------------------------------------
+
+function KorbanMotionStyles() {
+  return (
+    <style>{`
+      @keyframes korban-scan {
+        0% { transform: translateX(-40%); opacity: 0.5; }
+        85% { opacity: 0.5; }
+        100% { transform: translateX(320%); opacity: 0; }
+      }
+      @keyframes korban-ticker {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(-50%); }
+      }
+      .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
+      .korban-ticker { animation: korban-ticker 38s linear infinite; }
+      .korban-ticker:hover { animation-play-state: paused; }
+      @media (prefers-reduced-motion: reduce) {
+        .korban-scan { animation: none; opacity: 0; }
+        .korban-ticker { animation: none; }
+      }
+    `}</style>
+  );
 }
 
+// -----------------------------------------------------------------------------
+// Page
+// -----------------------------------------------------------------------------
+
 export default function DashboardPage() {
-  const [timeframe, setTimeframe] = useState<Timeframe>("This Month");
-  const [topCompanyTimeframe, setTopCompanyTimeframe] = useState<Timeframe>("This Month");
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [pieceNames, setPieceNames] = useState<string[]>([]);
 
-  const filteredBids = useMemo(() => {
-    return bidPipeline.filter((bid) => bid.timeframe.includes(timeframe));
-  }, [timeframe]);
-
-  const topCompanyBids = useMemo(() => {
-    return bidPipeline.filter((bid) => bid.timeframe.includes(topCompanyTimeframe));
-  }, [topCompanyTimeframe]);
-
-  const activeBids = filteredBids.filter(
-    (bid) =>
-      bid.status === "Still Chasing" ||
-      bid.status === "No Response" ||
-      bid.status === "Not Sent"
-  ).length;
-
-  const bidsSent = filteredBids.filter((bid) => bid.sentDate !== "Pending").length;
-  const noResponse = filteredBids.filter((bid) => bid.status === "No Response").length;
-  const won = filteredBids.filter((bid) => bid.status === "Won").length;
-  const lost = filteredBids.filter((bid) => bid.status === "Lost").length;
-
-  const topCompanies = getTopWonCompanies(topCompanyBids);
-  const marketDirection = getMarketDirection();
-  const upcomingWeek = useMemo(() => getUpcomingWeek(), []);
-
-  const bidsByDate = useMemo(() => {
-    const map = new Map<string, typeof bidPipeline>();
-    bidPipeline.forEach((bid) => {
-      const existing = map.get(bid.bidDate) ?? [];
-      existing.push(bid);
-      map.set(bid.bidDate, existing);
-    });
-    return map;
+  const load = useCallback(() => {
+    try {
+      setProjects(listProjects());
+      setPieceNames(
+        getBackendSettings().material.items.filter((item) => item.isCore).map((item) => item.name)
+      );
+    } catch {
+      // Storage unavailable - the page renders with nothing rather than failing.
+    }
+    setMounted(true);
   }, []);
 
-  function sendReport() {
-    window.print();
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
+
+  /** A project only counts as started once it has a name. */
+  const named = useMemo(
+    () => projects.filter((project) => project.projectName.trim() !== ""),
+    [projects]
+  );
+
+  const week = useMemo(() => {
+    const today = new Date();
+    return Array.from({ length: 7 }, (_, offset) => {
+      const day = new Date(today);
+      day.setDate(today.getDate() + offset);
+      return {
+        label: WEEKDAYS[(day.getDay() + 6) % 7],
+        date: `${day.getMonth() + 1}/${day.getDate()}`,
+        key: day.toLocaleDateString("en-US"),
+        isToday: offset === 0,
+      };
+    });
+  }, []);
+
+  function startProject() {
+    createProject();
+    router.push("/project-plan-desk");
   }
 
+  function openProject(projectId: string) {
+    setActiveProjectId(projectId);
+    router.push("/project-plan-desk");
+  }
+
+  function loadDemo() {
+    seedDemoProject();
+    router.push("/project-plan-desk");
+  }
+
+  if (!mounted) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-korban-base">
+        <p className="font-mono text-[11px] text-zinc-600">Opening bid room...</p>
+      </main>
+    );
+  }
+
+  const marketDirection = getMarketDirection();
+
   return (
-    <main className="min-h-screen bg-[#080604] text-white">
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanMotionStyles />
+
       <KorbanHeader
         title="Bid Room"
-        subtitle="Bid tracking, follow-ups, inventory pressure, and market awareness."
+        subtitle="What the market is doing, what's due, and what the yard can cover."
+        menuLinks={menuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((open) => !open)}
         actionsAlwaysVisible
+        actionsClassName="gap-2.5"
         actions={
           <>
-            <button
-              onClick={sendReport}
-              className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20"
-            >
-              Send Report
-            </button>
-            <a
-              href="/project-plan-desk"
-              className="flex items-center gap-2 rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400"
-            >
-              <span className="text-base leading-none">+</span> Project
-            </a>
+            <KorbanButton variant="ghost" onClick={() => router.push("/projects")}>
+              Bid log
+            </KorbanButton>
+            <KorbanButton variant="primary" onClick={startProject}>
+              + New project
+            </KorbanButton>
           </>
         }
       />
 
-      {/* Subtle inline timeframe filter — replaces the old full-width "Dashboard Timeframe" card */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-900 bg-[#0b0b0b] px-6 py-3">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-600">
-          Filtered by{" "}
-          <span className="font-mono font-bold normal-case tracking-normal text-orange-400">
-            {timeframe}
+      {/* ---- Market ticker. First thing an estimator sees. ---------------- */}
+      <div className="relative overflow-hidden border-b border-zinc-900 bg-black">
+        <div className="pointer-events-none absolute left-0 top-0 z-10 flex h-full items-center gap-2 bg-gradient-to-r from-black via-black to-transparent pr-8 pl-4">
+          <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+          <span className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+            Market
           </span>
-        </p>
-        <TimeframeSelector value={timeframe} onChange={setTimeframe} compact />
+          <span className="rounded border border-zinc-800 px-1.5 font-mono text-[8px] uppercase tracking-[0.14em] text-zinc-700">
+            sample
+          </span>
+        </div>
+        <div className="korban-ticker flex w-max gap-8 py-2 pl-40">
+          {[...MARKET, ...MARKET].map((row, index) => {
+            const up = row.move.startsWith("+");
+            return (
+              <span key={`${row.ticker}-${index}`} className="flex shrink-0 items-baseline gap-2">
+                <span className="font-mono text-[11px] font-bold text-zinc-200">{row.ticker}</span>
+                <span className="font-mono text-[11px] text-zinc-500">{row.price}</span>
+                <span className={`font-mono text-[11px] font-bold ${up ? "text-emerald-400" : "text-red-400"}`}>
+                  {row.move}
+                </span>
+                <span className="font-mono text-[9px] text-zinc-700">{row.sector}</span>
+              </span>
+            );
+          })}
+        </div>
       </div>
 
-      <section className="grid gap-5 bg-[#080604] p-6 xl:grid-cols-[minmax(0,1fr)_440px] 2xl:grid-cols-[minmax(0,1fr)_480px]">
-        <div className="space-y-5">
-          <div className="grid gap-4 md:grid-cols-5">
-            <MetricCard label="Active Bids" value={String(activeBids)} />
-            <MetricCard label="Bid Sent" value={String(bidsSent)} />
-            <MetricCard label="No Response" value={String(noResponse)} />
-            <MetricCard label="Won Jobs" value={String(won)} />
-            <MetricCard label="Lost Jobs" value={String(lost)} />
+      <div className="relative mx-auto w-full max-w-[1600px] px-4 py-4">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.022]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
+            backgroundSize: "26px 26px",
+          }}
+        />
+
+        <div className="relative space-y-3">
+          {/* ---- Awareness row --------------------------------------------- */}
+          <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+            <Panel
+              title="Construction news"
+              right={<SampleTag />}
+            >
+              <div className="grid gap-3 md:grid-cols-2">
+                <NewsColumn heading="United States" items={US_NEWS} />
+                <NewsColumn heading="International" items={WORLD_NEWS} />
+              </div>
+            </Panel>
+
+            <Panel
+              title="Market watch"
+              right={
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`font-mono text-[10px] font-bold ${
+                      marketDirection.up ? "text-emerald-400" : "text-red-400"
+                    }`}
+                  >
+                    {marketDirection.label}
+                  </span>
+                  <SampleTag />
+                </span>
+              }
+              scan={false}
+            >
+              <div className="grid gap-1.5">
+                {MARKET.map((row) => {
+                  const up = row.move.startsWith("+");
+                  return (
+                    <div
+                      key={row.ticker}
+                      className="grid grid-cols-[52px_1fr_auto] items-center gap-3 border-b border-zinc-900/70 py-1.5 last:border-0"
+                    >
+                      <span className="font-mono text-[13px] font-bold text-orange-400">
+                        {row.ticker}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate text-[11px] text-zinc-300">{row.name}</span>
+                        <span className="block truncate font-mono text-[9px] text-zinc-600">
+                          {row.sector}
+                        </span>
+                      </span>
+                      <span className="text-right">
+                        <span className="block font-mono text-[12px] font-bold text-zinc-200">
+                          {row.price}
+                        </span>
+                        <span
+                          className={`block font-mono text-[10px] font-bold ${
+                            up ? "text-emerald-400" : "text-red-400"
+                          }`}
+                        >
+                          {row.move}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
           </div>
 
-          <DashboardCard
-            title="Bid Follow-Up Tracker"
-            rightSlot={
-              <a
-                href="/projects"
-                className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.1em] text-orange-300 transition hover:bg-orange-500/20"
+          {/* ---- The work -------------------------------------------------- */}
+          <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+            <div className="grid items-start gap-3">
+              <Panel
+                title="Bids in progress"
+                right={
+                  <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
+                    {named.length} {named.length === 1 ? "project" : "projects"}
+                  </span>
+                }
               >
-                Bid Log
-              </a>
-            }
-          >
-            <div className="rounded-2xl border border-zinc-800">
-              <table className="w-full table-fixed text-left text-[10px]">
-                <thead className="bg-zinc-950 text-zinc-500">
-                  <tr>
-                    <th className="w-[14%] px-2 py-3">Project</th>
-                    <th className="w-[15%] px-2 py-3">GC / Contact</th>
-                    <th className="w-[8%] px-2 py-3">Bid Date</th>
-                    {roundLabels.map((label) => (
-                      <th key={label} className="w-[7%] px-1 py-3 text-center">
-                        {label}
-                      </th>
-                    ))}
-                    <th className="w-[8%] px-2 py-3">Sent</th>
-                    <th className="w-[9%] px-2 py-3">Result</th>
-                    <th className="w-[8%] px-2 py-3 text-right">Current</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-900 bg-black/60">
-                  {filteredBids.map((bid) => (
-                    <tr
-                      key={bid.project}
-                      onClick={() => setSelectedProject(bid.project)}
-                      className={`cursor-pointer transition hover:bg-orange-500/5 ${
-                        selectedProject === bid.project ? "bg-orange-500/10" : ""
-                      }`}
-                    >
-                      <td className="px-2 py-3 font-semibold text-zinc-200">{bid.project}</td>
-                      <td className="px-2 py-3">
-                        <div className="flex items-center gap-2">
-                          <p className="truncate text-zinc-300">{bid.gc}</p>
-                          <UnionBadge type={bid.union} />
-                        </div>
-                        <p className="truncate text-[9px] text-zinc-600">{bid.contactEmail}</p>
-                        <p className="truncate text-[9px] text-zinc-600">{bid.contactName} · {bid.contactPhone}</p>
-                      </td>
-                      <td className="px-2 py-3 font-mono text-zinc-400">{bid.bidDate}</td>
-                      {bid.rounds.map((round) => (
-                        <td key={`${bid.project}-${round.label}`} className="px-1 py-3 text-center">
-                          <p className="font-mono text-[9px] text-zinc-500">{round.date}</p>
-                          <p className="font-mono text-[9px] text-orange-400">
-                            {round.value === null ? "—" : formatCompactMoney(round.value)}
-                          </p>
-                        </td>
-                      ))}
-                      <td className="px-2 py-3 font-mono text-zinc-400">{bid.sentDate}</td>
-                      <td className="px-2 py-3">
-                        <StatusPill status={bid.status} />
-                      </td>
-                      <td className="px-2 py-3 text-right font-mono text-orange-400">
-                        {bid.value === null ? "—" : formatMoney(bid.value)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </DashboardCard>
-
-          <DashboardCard title="Construction News Feed">
-            <div className="grid gap-5 xl:grid-cols-2">
-              <NewsBlock title="United States Construction News" items={usConstructionNews} />
-              <NewsBlock title="International Construction News" items={internationalConstructionNews} />
-            </div>
-          </DashboardCard>
-        </div>
-
-        <div className="space-y-5">
-          {/* Weekly Bid Calendar — signature element */}
-          <DashboardCard
-            title="This Week's Bid Calendar"
-            accent="sky"
-            rightSlot={
-              <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.14em] text-sky-300">
-                Live
-              </span>
-            }
-          >
-            <div className="grid grid-cols-7 gap-1.5">
-              {upcomingWeek.map((day) => {
-                const dayBids = bidsByDate.get(day.dateKey) ?? [];
-                return (
-                  <div
-                    key={day.dateKey}
-                    className={`flex min-h-[88px] flex-col rounded-xl border p-2 ${
-                      day.isToday
-                        ? "border-sky-500/40 bg-sky-500/10"
-                        : "border-zinc-800 bg-black"
-                    }`}
-                  >
-                    <p
-                      className={`text-[9px] font-bold uppercase tracking-[0.1em] ${
-                        day.isToday ? "text-sky-300" : "text-zinc-600"
-                      }`}
-                    >
-                      {day.label}
+                {named.length === 0 ? (
+                  <div className="px-1 py-5 text-center">
+                    <p className="text-[12px] text-zinc-400">No bids yet.</p>
+                    <p className="mx-auto mt-1.5 max-w-sm text-[11px] leading-[1.6] text-zinc-600">
+                      Start a project and you land on the Plan Desk to fill in the
+                      details. Everything after that builds from what you enter there.
                     </p>
-                    <p
-                      className={`font-mono text-sm font-bold ${
-                        day.isToday ? "text-sky-200" : "text-zinc-400"
-                      }`}
-                    >
-                      {day.dayNumber}
-                    </p>
-                    <div className="mt-1 flex-1 space-y-1">
-                      {dayBids.slice(0, 2).map((bid) => (
-                        <div
-                          key={bid.project}
-                          title={`${bid.project} — ${bid.gc}`}
-                          className="truncate rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-200"
+                    <div className="mt-3 flex justify-center gap-2">
+                      <button
+                        onClick={startProject}
+                        className="rounded bg-orange-500 px-4 py-1.5 font-mono text-[10px] font-bold text-black hover:bg-orange-400"
+                      >
+                        + New project
+                      </button>
+                      <button
+                        onClick={loadDemo}
+                        className="rounded border border-zinc-800 bg-korban-raised px-4 py-1.5 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+                      >
+                        Load demo job
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-1">
+                    <div className="grid grid-cols-[1fr_150px_110px_84px] gap-3 px-1 pb-1">
+                      {["Project", "Customer", "Bid due", "Depth"].map((heading) => (
+                        <span
+                          key={heading}
+                          className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600"
                         >
-                          {bid.project.split(" ")[0]}
-                        </div>
+                          {heading}
+                        </span>
                       ))}
-                      {dayBids.length > 2 && (
-                        <p className="text-[8px] text-zinc-600">+{dayBids.length - 2} more</p>
-                      )}
                     </div>
+                    {named.map((project) => (
+                      <button
+                        key={project.projectId}
+                        onClick={() => openProject(project.projectId)}
+                        className="grid grid-cols-[1fr_150px_110px_84px] items-center gap-3 border-t border-zinc-900/70 px-1 py-1.5 text-left transition hover:bg-orange-500/[0.04]"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-[11.5px] font-semibold text-zinc-200">
+                            {project.projectName}
+                          </span>
+                          <span className="block truncate font-mono text-[9px] text-zinc-600">
+                            {project.projectAddress || "No address"}
+                          </span>
+                        </span>
+                        <span className="truncate text-[11px] text-zinc-400">
+                          {project.customer || <span className="text-zinc-700">Not set</span>}
+                        </span>
+                        <span className="font-mono text-[11px] text-zinc-400">
+                          {project.bidDueDate || <span className="text-zinc-700">-</span>}
+                        </span>
+                        <span className="font-mono text-[10px] text-orange-300/80">
+                          {project.estimateDepth === "quick-bid"
+                            ? "Quick"
+                            : project.estimateDepth === "full-bid"
+                            ? "Full"
+                            : "Korban"}
+                        </span>
+                      </button>
+                    ))}
                   </div>
-                );
-              })}
-            </div>
+                )}
+              </Panel>
 
-            <div className="mt-3 space-y-1.5">
-              {Array.from(bidsByDate.entries())
-                .filter(([date]) => upcomingWeek.some((day) => day.dateKey === date))
-                .flatMap(([, bids]) => bids)
-                .slice(0, 3)
-                .map((bid) => (
-                  <div
-                    key={bid.project}
-                    className="flex items-center justify-between rounded-lg border border-sky-500/15 bg-sky-500/5 px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-[11px] font-semibold text-zinc-200">{bid.project}</p>
-                      <p className="text-[9px] text-zinc-500">{bid.gc} · Due {bid.bidDate}</p>
-                    </div>
-                    <StatusPill status={bid.status} />
-                  </div>
-                ))}
-            </div>
-          </DashboardCard>
-
-          <DashboardCard title="Inventory Track">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-              {inventory.map((row) => {
-                const percent = Math.min(100, Math.round((row.committed / row.available) * 100));
-
-                return (
-                  <div key={row.item} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold">{row.item}</p>
-                      <InventoryStatus status={row.status} />
-                    </div>
-
-                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-zinc-900">
+              <Panel title="This week" scan={false}>
+                <div className="grid grid-cols-7 gap-1.5">
+                  {week.map((day) => {
+                    const due = named.filter((project) => project.bidDueDate === day.date);
+                    return (
                       <div
-                        className="h-full rounded-full bg-orange-500"
-                        style={{ width: `${percent}%` }}
-                      />
-                    </div>
-
-                    <div className="mt-2 flex justify-between text-[10px] text-zinc-500">
-                      <span>{row.committed}</span>
-                      <span>{row.available}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </DashboardCard>
-
-          <DashboardCard
-            title={
-              <div>
-                <span>Top 5 GCs</span>
-                <p className="mt-1 text-[10px] normal-case tracking-normal text-zinc-500">
-                  based on current most won jobs
-                </p>
-              </div>
-            }
-            rightSlot={
-              <TimeframeSelector
-                value={topCompanyTimeframe}
-                onChange={setTopCompanyTimeframe}
-                compact
-              />
-            }
-          >
-            <div className="space-y-3">
-              {topCompanies.map((company, index) => (
-                <div
-                  key={`${company.name}-${index}`}
-                  className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-black p-3"
-                >
-                  <div>
-                    <p className="text-sm font-semibold text-zinc-200">
-                      {index + 1}. {company.name}
-                    </p>
-                    <p className="text-[11px] text-zinc-500">Won jobs: {company.wonJobs}</p>
-                  </div>
-                  <p className="font-mono text-sm font-bold text-orange-400">
-                    {formatMoney(company.value)}
-                  </p>
+                        key={day.key}
+                        className={`rounded border px-1.5 py-2 text-center ${
+                          day.isToday
+                            ? "border-orange-500/40 bg-orange-500/[0.06]"
+                            : "border-zinc-900 bg-korban-raised"
+                        }`}
+                      >
+                        <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-600">
+                          {day.label}
+                        </p>
+                        <p
+                          className={`font-mono text-[13px] font-bold ${
+                            day.isToday ? "text-orange-300" : "text-zinc-400"
+                          }`}
+                        >
+                          {day.date}
+                        </p>
+                        <p className="mt-0.5 font-mono text-[9px] text-zinc-700">
+                          {due.length > 0 ? `${due.length} due` : "-"}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
+              </Panel>
             </div>
-          </DashboardCard>
 
-          <DashboardCard title="Construction Market Watch">
-            <div className="mb-4 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-                Construction Industry Overall
-              </p>
-              <div className="mt-2 flex items-end justify-between gap-4">
-                <div>
-                  <p
-                    className={`font-mono text-3xl font-bold ${
-                      marketDirection.isUp ? "text-emerald-400" : "text-red-400"
-                    }`}
+            {/* ---- Yard ---------------------------------------------------- */}
+            <Panel
+              title="Inventory track"
+              right={
+                <span className="flex items-center gap-2">
+                  <a
+                    href="/inventory"
+                    className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600 hover:text-orange-300"
                   >
-                    {marketDirection.averageMove}
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    Overall day direction:{" "}
-                    <span className={marketDirection.isUp ? "text-emerald-400" : "text-red-400"}>
-                      {marketDirection.isUp ? "Up" : "Down"}
-                    </span>
-                  </p>
-                </div>
-
-                <MiniMarketChart points={constructionIndustryTrend} />
-              </div>
-            </div>
-
-            <div className="mb-4 h-px bg-orange-500/20" />
-
-            <div className="grid gap-3">
-              {marketWatch.map((stock) => (
-                <div key={stock.ticker} className="rounded-2xl border border-zinc-800 bg-black p-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-mono text-lg font-bold text-orange-400">{stock.ticker}</p>
-                      <p className="text-[11px] text-zinc-500">{stock.name}</p>
+                    full yard
+                  </a>
+                  <SampleTag />
+                </span>
+              }
+              scan={false}
+            >
+              <p className="mb-2 px-1 text-[10px] leading-[1.5] text-zinc-600">
+                Stock against what open bids would commit. Company-wide tracking
+                connects here once it exists.
+              </p>
+              <div className="grid gap-1">
+                {(pieceNames.length ? pieceNames : Object.keys(YARD_STOCK)).map((name) => {
+                  const available = YARD_STOCK[name] ?? 0;
+                  // Nothing is committed until real bids carry material, so
+                  // pressure reads at zero rather than at an invented number.
+                  const committed = 0;
+                  const pressure = available > 0 ? committed / available : 0;
+                  return (
+                    <div key={name} className="border-b border-zinc-900/70 py-1.5 last:border-0">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-[11px] text-zinc-300">{name}</span>
+                        <span className="font-mono text-[11px] text-zinc-400">
+                          <span className="font-bold text-zinc-200">
+                            {available.toLocaleString()}
+                          </span>
+                          <span className="mx-1 text-zinc-700">/</span>
+                          <span className={committed > 0 ? "text-orange-300" : "text-zinc-700"}>
+                            {committed > 0 ? committed.toLocaleString() : "0"}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-900">
+                        <div
+                          className={`h-full transition-[width] duration-500 ${
+                            pressure > 0.85
+                              ? "bg-red-500"
+                              : pressure > 0.6
+                              ? "bg-amber-500"
+                              : "bg-orange-500"
+                          }`}
+                          style={{ width: `${Math.min(100, pressure * 100)}%` }}
+                        />
+                      </div>
                     </div>
-
-                    <p
-                      className={`font-mono text-sm font-bold ${
-                        stock.move.startsWith("+") ? "text-emerald-400" : "text-red-400"
-                      }`}
-                    >
-                      {stock.move}
-                    </p>
-                  </div>
-
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-zinc-500">
-                    <p>Price: <span className="font-mono text-zinc-300">{stock.price}</span></p>
-                    <p>Vol: <span className="font-mono text-zinc-300">{stock.volume}</span></p>
-                    <p>Range: <span className="font-mono text-zinc-300">{stock.dayRange}</span></p>
-                    <p>Sector: <span className="font-mono text-zinc-300">{stock.sector}</span></p>
-                  </div>
-
-                  <p className="mt-2 text-[11px] text-zinc-500">{stock.note}</p>
-                </div>
-              ))}
-            </div>
-          </DashboardCard>
+                  );
+                })}
+              </div>
+            </Panel>
+          </div>
         </div>
-      </section>
+      </div>
     </main>
   );
 }
 
-function getTopWonCompanies(bids: typeof bidPipeline) {
-  const wonBids = bids.filter((bid) => bid.status === "Won");
+// -----------------------------------------------------------------------------
+// Pieces
+// -----------------------------------------------------------------------------
 
-  const grouped = wonBids.reduce<Record<string, { name: string; wonJobs: number; value: number }>>(
-    (acc, bid) => {
-      if (!acc[bid.gc]) {
-        acc[bid.gc] = { name: bid.gc, wonJobs: 0, value: 0 };
-      }
-
-      acc[bid.gc].wonJobs += 1;
-      acc[bid.gc].value += bid.value ?? 0;
-
-      return acc;
-    },
-    {}
-  );
-
-  const results = Object.values(grouped)
-    .sort((a, b) => b.wonJobs - a.wonJobs || b.value - a.value)
-    .slice(0, 5);
-
-  while (results.length < 5) {
-    results.push({
-      name: "Pending More Won Bid Data",
-      wonJobs: 0,
-      value: 0,
-    });
-  }
-
-  return results;
-}
-
-function getMarketDirection() {
-  const total = marketWatch.reduce((sum, stock) => sum + Number(stock.move.replace("%", "")), 0);
-  const average = total / marketWatch.length;
-  const sign = average >= 0 ? "+" : "";
-
-  return {
-    averageMove: `${sign}${average.toFixed(2)}%`,
-    isUp: average >= 0,
-  };
-}
-
-function formatMoney(value: number) {
-  return value.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
-}
-
-function formatCompactMoney(value: number) {
-  if (value >= 1000000) return `$${(value / 1000000).toFixed(1)}M`;
-  return `$${Math.round(value / 1000)}K`;
-}
-
-function MetricCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-3xl border border-orange-500/20 bg-black p-5">
-      <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">{label}</p>
-      <h2 className="mt-3 font-mono text-4xl font-bold text-orange-500">{value}</h2>
-    </div>
-  );
-}
-
-function DashboardCard({
-  title,
-  children,
-  rightSlot,
-  accent = "orange",
+function Panel({
+  title, right, scan = true, children,
 }: {
-  title: React.ReactNode;
+  title: string;
+  right?: React.ReactNode;
+  scan?: boolean;
   children: React.ReactNode;
-  rightSlot?: React.ReactNode;
-  accent?: "orange" | "sky";
 }) {
-  const titleColor = accent === "sky" ? "text-sky-300" : "text-orange-400";
-
   return (
-    <section className="rounded-3xl border border-zinc-800 bg-[#0b0b0b] p-5 shadow-2xl">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <h2 className={`text-sm font-bold uppercase tracking-[0.25em] ${titleColor}`}>{title}</h2>
-        {rightSlot}
+    <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+      <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+      <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
+      {scan && (
+        <span
+          aria-hidden
+          className="korban-scan pointer-events-none absolute -top-px left-0 h-px w-[36%]"
+          style={{ background: "linear-gradient(90deg,transparent,#F97316,transparent)" }}
+        />
+      )}
+      <div className="flex items-center justify-between gap-3 pb-2">
+        <h2 className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+          {title}
+        </h2>
+        {right}
       </div>
-      {children}
+      <div className="rounded border border-zinc-900 bg-black p-2.5">{children}</div>
     </section>
   );
 }
 
-function TimeframeSelector({
-  value,
-  onChange,
-  compact = false,
-}: {
-  value: Timeframe;
-  onChange: (value: Timeframe) => void;
-  compact?: boolean;
-}) {
+/** Marks anything coming from a feed that isn't connected yet. */
+function SampleTag() {
   return (
-    <div className="flex flex-wrap justify-end gap-1.5">
-      {timeframeOptions.map((option) => (
-        <button
-          key={option}
-          onClick={() => onChange(option)}
-          className={`rounded-lg border ${
-            compact ? "px-2 py-1 text-[9px]" : "px-3 py-1.5 text-[10px]"
-          } font-bold transition ${
-            value === option
-              ? "border-orange-500 bg-orange-500 text-black"
-              : "border-zinc-800 bg-black text-zinc-500 hover:border-orange-500/50"
-          }`}
-        >
-          {option}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function UnionBadge({ type }: { type: "Union" | "Non-Union" }) {
-  if (type === "Union") {
-    return (
-      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-orange-500/40 bg-orange-500/10 text-[9px] font-bold text-orange-300">
-        U
-      </span>
-    );
-  }
-
-  return (
-    <span className="flex h-5 min-w-7 shrink-0 items-center justify-center rounded-md border border-zinc-500/40 bg-zinc-500/10 px-1 text-[9px] font-bold text-zinc-300">
-      NU
+    <span
+      title="Placeholder until a live feed is connected"
+      className="rounded border border-zinc-800 px-1.5 font-mono text-[8px] uppercase tracking-[0.14em] text-zinc-700"
+    >
+      sample
     </span>
   );
 }
 
-function StatusPill({ status }: { status: BidStatus }) {
-  const styles: Record<BidStatus, string> = {
-    Won: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-    Lost: "border-red-500/30 bg-red-500/10 text-red-300",
-    "Still Chasing": "border-zinc-400/30 bg-zinc-400/10 text-zinc-300",
-    "No Response": "border-yellow-500/30 bg-yellow-500/10 text-yellow-300",
-    "Not Sent": "border-zinc-700 bg-zinc-900 text-zinc-400",
-  };
-
-  return (
-    <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${styles[status]}`}>
-      {status}
-    </span>
-  );
-}
-
-function InventoryStatus({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    Healthy: "text-emerald-300",
-    Watch: "text-yellow-300",
-    Tight: "text-red-300",
-  };
-
-  return <span className={`text-[10px] font-bold ${styles[status]}`}>{status}</span>;
-}
-
-function MiniMarketChart({
-  points,
-}: {
-  points: { label: string; value: number }[];
-}) {
-  const max = Math.max(...points.map((point) => point.value));
-  const min = Math.min(...points.map((point) => point.value));
-  const spread = Math.max(1, max - min);
-
-  const svgPoints = points
-    .map((point, index) => {
-      const x = (index / (points.length - 1)) * 100;
-      const y = 100 - ((point.value - min) / spread) * 75 - 10;
-      return `${x},${y}`;
-    })
-    .join(" ");
-
-  return (
-    <div className="w-36">
-      <svg viewBox="0 0 100 100" className="h-20 w-full overflow-visible">
-        <polyline
-          points={svgPoints}
-          fill="none"
-          stroke="#f97316"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          opacity="0.75"
-        />
-        {points.map((point, index) => {
-          const x = (index / (points.length - 1)) * 100;
-          const y = 100 - ((point.value - min) / spread) * 75 - 10;
-
-          return <circle key={point.label} cx={x} cy={y} r="2.2" fill="#fb923c" />;
-        })}
-      </svg>
-
-      <div className="flex justify-between text-[9px] text-zinc-600">
-        {points.map((point) => (
-          <span key={point.label}>{point.label}</span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function NewsBlock({
-  title,
-  items,
-}: {
-  title: string;
-  items: {
-    outlet: string;
-    icon: string;
-    summary: string;
-    sourceUrl: string;
-  }[];
-}) {
+function NewsColumn({ heading, items }: { heading: string; items: NewsItem[] }) {
   return (
     <div>
-      <h3 className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-500">
-        {title}
-      </h3>
-
-      <div className="space-y-2">
+      <p className="mb-1.5 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+        {heading}
+      </p>
+      <div className="grid gap-1.5">
         {items.map((item) => (
-          <div
-            key={`${item.outlet}-${item.summary}`}
-            className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-3"
+          <a
+            key={item.outlet}
+            href={item.sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="group grid grid-cols-[36px_1fr] gap-2.5 rounded border border-zinc-900 bg-korban-raised p-2 transition hover:border-zinc-700"
           >
-            <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-orange-500/30 bg-black font-mono text-[10px] font-bold text-orange-400">
-                {item.icon}
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-zinc-300">{item.outlet}</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">
-                  {item.summary}
-                </p>
-              </div>
-
-              <a
-                href={item.sourceUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="shrink-0 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[10px] font-bold text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
-              >
-                Source
-              </a>
-            </div>
-          </div>
+            <span className="flex h-7 w-9 items-center justify-center rounded border border-zinc-800 bg-black font-mono text-[9px] font-bold text-orange-400">
+              {item.icon}
+            </span>
+            <span className="min-w-0">
+              <span className="block text-[10.5px] font-semibold text-zinc-300 group-hover:text-orange-300">
+                {item.outlet}
+              </span>
+              <span className="block text-[10px] leading-[1.5] text-zinc-600">{item.summary}</span>
+            </span>
+          </a>
         ))}
       </div>
     </div>
   );
+}
+
+function getMarketDirection() {
+  const total = MARKET.reduce((sum, row) => sum + Number(row.move.replace("%", "")), 0);
+  const up = total >= 0;
+  return { up, label: `${up ? "+" : ""}${total.toFixed(1)}% net` };
 }

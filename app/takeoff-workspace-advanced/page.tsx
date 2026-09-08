@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { alignOverlayRows, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
+import { alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
 import { GuidedSteps, type GuideStep } from "@/components/guided-steps";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// -- Types --------------------------------------------------------------------
 type PageTag        = "Floor Plan" | "Elevation View" | "Section View";
 type ActiveTab      = "floor" | "elevation" | "section";
 /** Top-level tabs are now bid depths; tools live as panels inside each. */
@@ -27,7 +27,7 @@ type FloorLevel = {
   linealFeet: number; color: string;
   tracePoints: Pt[]; traceClosed: boolean; traceMode: boolean; stored: boolean;
   /**
-   * Per-level anchor point — a fixed feature (column, corner, grid
+   * Per-level anchor point - a fixed feature (column, corner, grid
    * intersection) that appears on every level's sheet. All levels get
    * shifted so their reference points coincide, which is what makes
    * floors traced from different pages stack correctly.
@@ -43,9 +43,9 @@ type ElevGripArea = {
   /**
    * Which floors this gripped region actually spans. The grip already
    * measures the height; these say which levels that measurement
-   * corresponds to — the missing link that lets Korban derive a run's
+   * corresponds to - the missing link that lets Korban derive a run's
    * base elevation (e.g. a podium wall tagged From: Level 4 starts at
-   * whatever height the Level 1→4 grip measured). Null = untagged,
+   * whatever height the Level 1-4 grip measured). Null = untagged,
    * which behaves exactly as before: ground to top of grip.
    */
   fromLevelId: string | null;
@@ -61,6 +61,11 @@ type FrameItem = { partNo: string; description: string; qty: number; };
 
 type SectionView = {
   id: string; label: string;
+  /**
+   * topOfWallDistance is the WALL'S OWN HEIGHT in feet. The top working deck
+   * lands a worker's reach below it, which the frame engine subtracts. It is
+   * not a clearance measurement - naming it "distance" is a holdover.
+   */
   wallOffset: number; topOfWallDistance: number;
   frameWidth: ScaffoldWidth;
   wallOutline: Pt[]; wallComplete: boolean;
@@ -89,8 +94,9 @@ function getFrameParts(width: ScaffoldWidth): FrameItem[] {
     { partNo:frame3PartNo, description:`3' H Frame ${width}`,     qty:0 },
     { partNo:"AL1S",       description:"Screw Jack w/ Base",      qty:0 },
     { partNo:"BP1",        description:"Fixed Base Plate",        qty:0 },
-    { partNo:"B82",        description:"8×2 Cross Brace",         qty:0 },
+    { partNo:"B82",        description:"8x2 Cross Brace",         qty:0 },
     { partNo:"GR8",        description:"8' Guard Rail",           qty:0 },
+    { partNo:"CPS",        description:"Coupling Pin",            qty:0 },
     { partNo:"BR12L",      description:"12\" Side Bracket",       qty:0 },
     { partNo:"BR20L",      description:"20\" Side Bracket",       qty:0 },
     { partNo:"BR30S",      description:"30\" Side Bracket",       qty:0 },
@@ -108,7 +114,7 @@ function makeElevData(dirs: string[]): ElevationData[] {
 
 /**
  * A courtyard reuses the exact same shape as building elevations, so all
- * the existing grip/tag logic works on it unchanged — it's just stored
+ * the existing grip/tag logic works on it unchanged - it's just stored
  * and totalled separately. Faces default to N/E/S/W but the estimator
  * decides which are actually used; three walls and an open side is
  * common, so unused faces simply never get gripped.
@@ -132,6 +138,14 @@ const menuLinks: KorbanMenuLink[] = [
   { href:"/set-scaffold-v2",          label:"Set Scaffold"      },
 ];
 
+/** Turns a width label into feet. "3'-6"" is 3.5, "5'" is 5. */
+function parseFt(v: string): number {
+  const feetInches = v.match(/(\d+)['\u2032]\s*-?\s*(\d+)/);
+  if (feetInches) return parseInt(feetInches[1]) + parseInt(feetInches[2]) / 12;
+  const n = parseFloat(v.replace(/[^0-9.]/g, ""));
+  return isFinite(n) ? n : 0;
+}
+
 // Haversine-style pixel perimeter calculation
 function calcPerimeterFt(pts: Pt[], puf: number): number {
   if (pts.length < 2 || puf <= 0) return 0;
@@ -143,7 +157,7 @@ function calcPerimeterFt(pts: Pt[], puf: number): number {
   return parseFloat((total / puf).toFixed(1));
 }
 
-// ── Tooltip component ─────────────────────────────────────────────────────────
+// -- Tooltip component --------------------------------------------------------
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
   const [show, setShow] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>|null>(null);
@@ -161,10 +175,10 @@ function Tooltip({ text, children }: { text: string; children: React.ReactNode }
   );
 }
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
+// -- Main Page ----------------------------------------------------------------
 export default function TakeoffWorkspaceAdvancedPage() {
   const [activeTab,      setActiveTab]      = useState<ActiveTab>("elevation");
-  // Which bid depth is open. Higher depths build on lower ones — work
+  // Which bid depth is open. Higher depths build on lower ones - work
   // carries forward, never backward.
   const [depthTab,       setDepthTab]       = useState<DepthTab>("quick-bid");
   const [guideHidden,    setGuideHidden]    = useState(false);
@@ -202,7 +216,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [elevStored,    setElevStored]    = useState(false);
   const [dupSouth,      setDupSouth]      = useState(false);
   const [dupWest,       setDupWest]       = useState(false);
-  // Courtyards — interior voids gripped like elevations but stored and
+  // Courtyards - interior voids gripped like elevations but stored and
   // totalled separately. activeZone is "building" (shown as
   // "Exterior" in the UI) or a courtyard id.
   const [courtyards,    setCourtyards]    = useState<Courtyard[]>([]);
@@ -235,11 +249,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const bs = getBackendSettings();
       setBackendSettings(bs);
       const wallOff = bs?.scaffold?.wallOffset ?? 1;
-      const topOfWall = bs?.scaffold?.workerReachHeight ?? 6;
+      // Top of Wall is the wall's own height. The top working deck lands a
+      // worker's reach below it, which the frame engine subtracts - seeding
+      // this with the reach height made every section one frame tall.
+      const topOfWall = getActiveElevation()?.wallHeight ?? 0;
       const fw: ScaffoldWidth = "3'";
       setSections([{ id:"aa", label:"A-A", wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     } catch {
-      setSections([{ id:"aa", label:"A-A", wallOffset:1, topOfWallDistance:6, frameWidth:"3'", wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts("3'"), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
+      setSections([{ id:"aa", label:"A-A", wallOffset:1, topOfWallDistance:0, frameWidth:"3'", wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts("3'"), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     }
   }, []);
 
@@ -261,7 +278,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     return canvas.toDataURL("image/jpeg",0.82);
   }
 
-  // Real fit — calculates zoom from image natural size vs container
+  // Real fit - calculates zoom from image natural size vs container
   function fitToViewer() {
     if (!imgRef.current || !viewerRef.current) return;
     const containerRect = viewerRef.current.getBoundingClientRect();
@@ -303,10 +320,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
     catch {} finally { setRenderingPage(false); }
   }
 
-  // Arrow-key page navigation — ← / → step through plan pages, same as the
-  // toolbar's ‹ › buttons. Ignored while typing in an input/textarea so it
-  // doesn't hijack normal text editing (e.g. the measurement input, level
-  // name fields).
+  // Arrow-key page navigation - left / right step through plan pages, same as
+  // the toolbar's chevron buttons. Ignored while typing in an input/textarea
+  // so it doesn't hijack normal text editing (e.g. the measurement input,
+  // level name fields).
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -340,7 +357,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
       // extracted, and only when the tab doesn't already have a scale set.
       // Previously this overwrote unconditionally, so clicking a thumbnail
       // that had been extracted before scale was set would silently wipe
-      // the scale you'd just locked — the "scale doesn't persist" bug.
+      // the scale you'd just locked - the "scale doesn't persist" bug.
       setTabScales(prev=>{
         const current = prev[activeTab];
         if (current?.locked) return prev;
@@ -350,7 +367,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     } catch {} finally { setRenderingPage(false); }
   }
 
-  // ── Scale ─────────────────────────────────────────────────────────────────
+  // -- Scale ------------------------------------------------------------------
   const scale=tabScales[activeTab];
   function setScale(u:Partial<ScaleState>) { setTabScales(p=>({...p,[activeTab]:{...p[activeTab],...u}})); }
 
@@ -369,18 +386,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setScale({ locked:true, pageUnitsPerFoot:px/ft, label:scale.measurementInput, pickingPoint:null, point1:null, point2:null });
   }
 
-  // ── Elevation grip helpers ────────────────────────────────────────────────
+  // -- Elevation grip helpers -------------------------------------------------
   /**
    * Derives how high off the ground a run tagged "From: <level>" starts,
    * by summing the measured heights of grips that cover the levels below
    * it. This is the whole point of the From/To tagging: the grips already
    * measure heights, the tags say which floors those measurements cover,
    * so a podium wall tagged From: Level 4 learns it starts 32' up from
-   * the Level 1→4 grip's own measurement — no height typed anywhere.
+   * the Level 1-4 grip's own measurement - no height typed anywhere.
    *
    * Returns 0 for untagged grips or anything starting at the lowest
    * level, which preserves today's behaviour (ground to top of grip).
-   * Returns null when a level below is referenced but never gripped —
+   * Returns null when a level below is referenced but never gripped -
    * per the "no grip, no coverage" rule, that's surfaced to the user
    * rather than guessed at.
    */
@@ -399,7 +416,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const i = floorLevels.findIndex(l => l.id === levelId);
         return f >= 0 && t >= 0 && i >= f && i < t;
       });
-      if (!covering) return null; // no grip covering that level — can't know
+      if (!covering) return null; // no grip covering that level - can't know
       const span = Math.max(1,
         floorLevels.findIndex(l => l.id === covering.toLevelId) -
         floorLevels.findIndex(l => l.id === covering.fromLevelId));
@@ -411,10 +428,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
   function calcGripArea(w:number, h:number, puf:number): Partial<ElevGripArea> {
     const lf=parseFloat((w/puf).toFixed(1));
     const heightFt=parseFloat((h/puf).toFixed(1));
-    const fh=backendSettings?.scaffold?.frameHeight??6.333;
     const reach=backendSettings?.scaffold?.workerReachHeight??6;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
     const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
-    const frameTall=Math.max(1,Math.ceil((heightFt-reach)/fh));
+    // Same frame engine the rest of the app uses, so a grip can't disagree
+    // with Set Scaffold about how many frames a leg takes.
+    const makeup=computeFrameMakeup(Math.max(0, heightFt-reach), jackMax);
+    const frameTall=Math.max(1, makeup.frameTall);
     const bayCount=Math.ceil(lf/bayLen);
     const legs=bayCount+1;
     return { lf, heightFt, frameTall, legs, bayCount };
@@ -425,30 +445,61 @@ export default function TakeoffWorkspaceAdvancedPage() {
     if (!src) return;
     const next=elevData.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:false})) }:ed);
     setElevData(next);
-    // Persist immediately with the fresh array — duplicating and then
+    // Persist immediately with the fresh array - duplicating and then
     // needing a separate Store click afterward (which could read stale
     // state) was the "have to click Store twice" bug.
     storeElevations(next);
   }
 
-  // ── Section auto-populate inventory ──────────────────────────────────────
+  // -- Section auto-populate inventory ----------------------------------------
+  /**
+   * Quantities for one section, counted the way the material audit
+   * established: braces, planks, guardrails and coupling pins all repeat at
+   * every jump. Counting them once at ground level - which is what this did
+   * before - understated each by roughly the jump count.
+   *
+   * Jumps come from the same frame-makeup engine Set Scaffold and Estimate
+   * Review use, so a section can never disagree with them about how tall the
+   * run is. Rules come from Backend so each company can set its own standard.
+   */
   function autoPopulateSectionInventory(secId:string, wallPts:Pt[], puf:number|null) {
     if (!puf||wallPts.length<2) return;
     let totalLF=0;
     for (let i=0;i<wallPts.length-1;i++) {
       totalLF+=Math.sqrt((wallPts[i+1].x-wallPts[i].x)**2+(wallPts[i+1].y-wallPts[i].y)**2)/puf;
     }
-    const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
-    const fh=backendSettings?.scaffold?.frameHeight??6.333;
-    const reach=backendSettings?.scaffold?.workerReachHeight??6;
-    const plankPB=3;
-    const bayCount=Math.ceil(totalLF/bayLen);
-    const legs=bayCount+1;
     const sec=sections.find(s=>s.id===secId); if(!sec) return;
-    const topOfWall=sec.topOfWallDistance??6;
-    const frameTall=Math.max(1,Math.ceil((topOfWall-reach)/fh))||7;
+
+    const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
+    const reach=backendSettings?.scaffold?.workerReachHeight??6;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
+
+    const rules=backendSettings?.material?.rules;
+    const bracesPerBayPerJump=rules?.crossBracesPerBayPerJump??2;
+    const railTop=rules?.guardrailTopPerBay??4;
+    const railMid=rules?.guardrailIntermediatePerBay??2;
+    const pinsPerFrame=rules?.couplingPinsPerFrame??2;
+
+    const bayCount=Math.max(1,Math.ceil(totalLF/bayLen));
+    const legs=bayCount+1;
+
+    // Planks per deck follow scaffold width, not a hardcoded 3.
+    const plankPB=planksPerBayForWidth(parseFt(sec.frameWidth));
+
+    // Top of Wall is the wall height; the top deck sits a worker's reach below.
+    const wallHeight=sec.topOfWallDistance||0;
+    const makeup=computeFrameMakeup(Math.max(0, wallHeight-reach), jackMax);
+    const frameTall=Math.max(1, makeup.frameTall);
+
     const totalFrames=legs*frameTall;
-    const totalPlanks=bayCount*plankPB;
+    const totalPlanks=bayCount*plankPB*frameTall;
+    const totalBraces=bayCount*frameTall*bracesPerBayPerJump;
+    // Top jump gets the full set; every jump below gets the intermediate rail.
+    const totalRails=bayCount*(railTop+Math.max(0,frameTall-1)*railMid);
+    // Every frame joint takes pins except the topmost - guardrail posts
+    // occupy those sockets instead.
+    const totalPins=legs*Math.max(0,frameTall-1)*pinsPerFrame;
+
     setSections(prev=>prev.map(s=>s.id===secId?{
       ...s,
       totalLF:parseFloat(totalLF.toFixed(1)),
@@ -457,18 +508,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
         if(i===0) return {...f,qty:totalFrames};
         if(f.partNo==="AL1S") return {...f,qty:legs};
         if(f.partNo==="BP1")  return {...f,qty:legs};
-        if(f.partNo==="B82")  return {...f,qty:bayCount};
-        if(f.partNo==="GR8")  return {...f,qty:bayCount};
+        if(f.partNo==="B82")  return {...f,qty:totalBraces};
+        if(f.partNo==="GR8")  return {...f,qty:totalRails};
+        if(f.partNo==="CPS")  return {...f,qty:totalPins};
         if(f.partNo==="WP10") return {...f,qty:totalPlanks};
         return f;
       }),
     }:s));
   }
 
-  // ── Viewer mouse handlers ─────────────────────────────────────────────────
+  // -- Viewer mouse handlers --------------------------------------------------
   function handleViewerMouseDown(e:React.MouseEvent<HTMLDivElement>) {
     const pt=getImgPt(e); if(!pt) return;
-    // Reference-point pick takes priority over every other mode — one
+    // Reference-point pick takes priority over every other mode - one
     // click sets the anchor for that level and exits pick mode.
     if (refPickLevelId) {
       setFloorLevels(prev=>prev.map(l=>l.id===refPickLevelId?{...l,refPoint:pt,stored:false}:l));
@@ -522,7 +574,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     }
   }
 
-  // ── Store ─────────────────────────────────────────────────────────────────
+  // -- Store ------------------------------------------------------------------
   function ensureBase() {
     if (!localStorage.getItem("korbanProjectData_v1")) {
       const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:0, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
@@ -552,7 +604,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         alignedPoints: level.tracePoints,
       }));
       // Shift every level so its reference point coincides with the
-      // anchor level's — this is what makes floors traced on different
+      // anchor level's - this is what makes floors traced on different
       // pages stack into one correct building.
       const rows = alignOverlayRows(rawRows);
       const keyRow = rows.find(r=>r.isKeyFloor) ?? rows[0];
@@ -576,7 +628,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     try {
       ensureBase();
       const elev=getActiveElevation();
-      // Build elevation heights from grips — each area contributes
+      // Build elevation heights from grips - each area contributes
       const elevationHeights=src.map(ed=>{
         const filled=ed.areas.filter(a=>a.rect&&a.heightFt>0);
         const avgH=filled.length?filled.reduce((s,a)=>s+a.heightFt,0)/filled.length:0;
@@ -599,7 +651,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const maxFrameTall=Math.max(...src.flatMap(e=>e.areas.map(a=>a.frameTall||7)),7);
       const puf=tabScales.elevation.pageUnitsPerFoot;
       const existing=elev.overlayGeometry??{ elevationName:elev.elevationName, levelName:"Main Level", tracedPerimeter:[], overlayPoints:[], wallSegments:[], referencePoints:[], elevationPoints:[], fullOverlayRows:[], elevationRefs:[], scale:null };
-      // Courtyards — same per-face summary as building elevations, but
+      // Courtyards - same per-face summary as building elevations, but
       // stored under their own key so totals can include or exclude them.
       const storedCourtyards = courtyards.map(cy=>({
         id: cy.id,
@@ -629,7 +681,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   // Converts a traced wall outline from raw page/image pixels into
-  // feet-space points — x = linear footage along the wall, y = height in
+  // feet-space points - x = linear footage along the wall, y = height in
   // feet, both relative to the outline's own lowest-left point. Doing the
   // conversion once here (using whichever scale was actually active when
   // the trace was made) means Set Scaffold V2 never has to guess which
@@ -646,10 +698,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const elev=getActiveElevation();
       const sec=sections.find(s=>s.id===activeSection)??sections[0];
       if(!sec) return;
-      const makeupStr=sec.frameMakeup.filter(f=>f.qty>0).map(f=>`${f.qty} × ${f.description}`).join("\n");
+      const makeupStr=sec.frameMakeup.filter(f=>f.qty>0).map(f=>`${f.qty} x ${f.description}`).join("\n");
 
       // Use whichever scale was actually used to trace this section's
-      // wall outline — the Section tab's own scale if set, otherwise
+      // wall outline - the Section tab's own scale if set, otherwise
       // fall back to the Floor Plan scale (matches autoPopulateSectionInventory).
       const tracePuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
       const wallOutlineFt = (sec.wallOutline.length >= 2 && tracePuf && tracePuf > 0)
@@ -679,7 +731,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const label=SECTION_LABELS[sections.length];
     const id=label.replace("-","").toLowerCase();
     const wallOff=backendSettings?.scaffold?.wallOffset??1;
-    const topOfWall=backendSettings?.scaffold?.workerReachHeight??6;
+    // Wall height, not worker reach - see the note on SectionView.
+    const topOfWall=getActiveElevation()?.wallHeight??0;
     const fw:ScaffoldWidth="3'";
     setSections(prev=>[...prev,{ id, label, wallOffset:wallOff, topOfWallDistance:topOfWall, frameWidth:fw, wallOutline:[], wallComplete:false, scaffoldSide:"left", frameMakeup:getFrameParts(fw), totalLF:0, totalLegs:0, totalFrames:0, totalPlanks:0 }]);
     setActiveSection(id);
@@ -720,12 +773,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
         actions={
           <>
             <button onClick={storeAll} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/10">Store All</button>
-            <a href="/korban-review" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Review Estimate →</a>
+            <a href="/korban-review" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Review Estimate &rarr;</a>
           </>
         }
       />
 
-      {/* Depth tabs — the bid type you're working at. All three are always
+      {/* Depth tabs - the bid type you're working at. All three are always
           visible; a depth you haven't worked yet simply opens with its
           inputs blank. Work carries forward to deeper tiers, never back. */}
       <div className="flex items-end gap-1 border-b border-zinc-900 bg-[#0b0b0b] px-6 pt-2">
@@ -755,16 +808,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
           );
         })}
         <div className="ml-auto flex items-center gap-3 text-[10px]">
-          {scale.locked&&<span className="font-mono text-orange-400 opacity-70">⊠ {scale.label}</span>}
+          {scale.locked&&<span className="font-mono text-orange-400 opacity-70">[lock] {scale.label}</span>}
         </div>
       </div>
 
-      {/* Tools available at this depth — Quick Bid is a form, so it has none.
+      {/* Tools available at this depth - Quick Bid is a form, so it has none.
           Sub-tabs carry a light grey tint to sit below the depth tabs
           without competing with the orange accent. */}
       {depthTab!=="quick-bid" && (
       <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0f0f0f] px-6 py-1.5">
-        {([{id:"floor",label:"Floor Plan",icon:"⊞"},{id:"elevation",label:"Elevations",icon:"↕"},{id:"section",label:"Section View",icon:"✂"}] as {id:ActiveTab;label:string;icon:string}[])
+        {([{id:"floor",label:"Floor Plan",icon:"\u229e"},{id:"elevation",label:"Elevations",icon:"\u2195"},{id:"section",label:"Section View",icon:"\u2702"}] as {id:ActiveTab;label:string;icon:string}[])
           .filter(tool=>{
             if(depthTab==="full-bid")   return tool.id!=="section";
             return true;
@@ -783,7 +836,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           );
         })}
         <span className="ml-auto text-[9.5px] text-zinc-600">
-          {depthTab==="full-bid"   && "Guided capture — Korban traces, you confirm."}
+          {depthTab==="full-bid"   && "Guided capture - Korban traces, you confirm."}
           {depthTab==="korban-bid" && "Full manual control, plus section views."}
         </span>
       </div>
@@ -805,7 +858,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
             done: anyTraced },
           { id:"ref", title:"Set reference points", anchor:"reference-point",
-            body:"Pick the same fixed feature on each level — a column or grid intersection that appears on every sheet.",
+            body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
             why:"This is what stacks the floors correctly. Without it Korban can't tell a real step-back from a shaky trace.",
             done: allRefs },
           { id:"grip", title:"Grip the elevations",
@@ -842,10 +895,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </div>
                     <div className="flex items-center justify-between mt-1 px-0.5">
                       <p className="text-[8px] font-mono text-zinc-600">Pg {pg.pageNumber}</p>
-                      {pg.scale.locked&&<span className="text-[7px] text-orange-400">⊠</span>}
+                      {pg.scale.locked&&<span className="text-[7px] text-orange-400">[lock]</span>}
                     </div>
                   </div>
-                  <button onClick={()=>setExtractedPages(prev=>prev.filter(p=>p.id!==pg.id))} className="absolute top-1 right-1 hidden group-hover:flex h-4 w-4 items-center justify-center rounded-full bg-zinc-900 text-[8px] text-zinc-500 hover:text-red-400">✕</button>
+                  <button onClick={()=>setExtractedPages(prev=>prev.filter(p=>p.id!==pg.id))} className="absolute top-1 right-1 hidden group-hover:flex h-4 w-4 items-center justify-center rounded-full bg-zinc-900 text-[8px] text-zinc-500 hover:text-red-400">&times;</button>
                 </div>
               ))}
             </div>
@@ -856,12 +909,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
         <section className="flex flex-1 flex-col overflow-hidden">
           {/* Toolbar */}
           <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-wrap">
-            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading…":"Upload Plans"}</button>
+            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading...":"Upload Plans"}</button>
             <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
 
             {totalPages>1&&(
               <div className="flex items-center gap-1">
-                <button onClick={()=>goToPage(currentPageNo-1)} disabled={currentPageNo<=1||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">‹</button>
+                <button onClick={()=>goToPage(currentPageNo-1)} disabled={currentPageNo<=1||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">&lsaquo;</button>
                 <input
                   type="text" inputMode="numeric"
                   value={pageNoInput}
@@ -875,12 +928,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   className="w-10 rounded border border-zinc-800 bg-zinc-900 text-center text-[10px] font-mono text-zinc-300 outline-none focus:border-orange-500/50 py-0.5"
                 />
                 <span className="text-[10px] font-mono text-zinc-600">/ {totalPages}</span>
-                <button onClick={()=>goToPage(currentPageNo+1)} disabled={currentPageNo>=totalPages||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">›</button>
+                <button onClick={()=>goToPage(currentPageNo+1)} disabled={currentPageNo>=totalPages||renderingPage} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white disabled:opacity-30 text-xs">&rsaquo;</button>
               </div>
             )}
 
             <div className="flex items-center gap-1">
-              <button onClick={()=>setViewerZoom(z=>Math.max(0.1,z-0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
+              <button onClick={()=>setViewerZoom(z=>Math.max(0.1,z-0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">&minus;</button>
               <span className="text-[9px] font-mono text-zinc-600 w-8 text-center">{Math.round(viewerZoom*100)}%</span>
               <button onClick={()=>setViewerZoom(z=>Math.min(4,z+0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
               <button onClick={fitToViewer} className="rounded border border-zinc-800 px-1.5 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
@@ -900,7 +953,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
               <>
                 <button data-guide="scale" onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
                   className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
-                  ⟷ Scale {scale.pickingPoint?`— pt ${scale.pickingPoint}`:""}
+                  &#10231; Scale {scale.pickingPoint?`- pt ${scale.pickingPoint}`:""}
                 </button>
                 {scale.point1&&scale.point2&&(
                   <div className="flex items-center gap-1">
@@ -913,7 +966,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             ):(
               <div className="flex items-center gap-1.5">
                 <div className="flex items-center gap-1 rounded-lg border border-orange-500/40 bg-orange-500/5 px-2.5 py-1.5" style={{boxShadow:"0 0 10px rgba(249,115,22,0.2)"}}>
-                  <span className="text-[10px] text-orange-500">⊠</span>
+                  <span className="text-[10px] text-orange-500">[lock]</span>
                   <span className="text-[10px] font-mono text-orange-300 font-bold">{scale.label}</span>
                 </div>
                 <button onClick={()=>setScale({locked:false,point1:null,point2:null,pickingPoint:null})} className="rounded-lg border border-zinc-700 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">Unlock</button>
@@ -926,7 +979,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 <div className="h-4 w-px bg-zinc-800"/>
                 <button onClick={()=>setGripMode(m=>!m)}
                   className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
-                  {gripMode?`● Drag Area ${selectedArea} on ${selectedElev}`:"Add Grip"}
+                  {gripMode?`Drag Area ${selectedArea} on ${selectedElev}`:"Add Grip"}
                 </button>
               </>
             )}
@@ -940,7 +993,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 <div className="h-4 w-px bg-zinc-800"/>
                 <button onClick={()=>setWallOutlineMode(m=>!m)}
                   className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${wallOutlineMode?"border-blue-500 bg-blue-500/15 text-blue-300":"border-zinc-700 text-zinc-400 hover:border-blue-500/40"}`}>
-                  {wallOutlineMode?"● Wall Outline":"Start Wall Outline"}
+                  {wallOutlineMode?"Wall Outline":"Start Wall Outline"}
                 </button>
                 {activeSec?.wallOutline?.length>0&&!activeSec.wallComplete&&(
                   <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
@@ -961,16 +1014,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
             onDoubleClick={handleViewerDblClick}
             style={{cursor:isCapturing?"crosshair":"default"}}>
 
-            {/* Scale required — pinned, unmissable. Nothing measured on this
+            {/* Scale required - pinned, unmissable. Nothing measured on this
                 tab means anything until scale is locked, so this stays until
                 it is. */}
             {viewerUrl&&!scale.locked&&(
               <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center px-6 pt-3">
                 <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-yellow-500/50 bg-yellow-500/10 px-4 py-2.5 shadow-lg backdrop-blur-sm">
-                  <span className="text-base leading-none">⚠</span>
+                  <span className="text-base leading-none">&#9888;</span>
                   <div>
                     <p className="text-[11px] font-bold text-yellow-300">Set scale before measuring</p>
-                    <p className="text-[10px] text-yellow-500/80">Click <span className="font-bold">⟷ Scale</span>, pick two points a known distance apart, then enter that distance.</p>
+                    <p className="text-[10px] text-yellow-500/80">Click <span className="font-bold">Scale</span>, pick two points a known distance apart, then enter that distance.</p>
                   </div>
                   <button onClick={()=>setScale({pickingPoint:1,point1:null,point2:null})}
                     className="ml-1 rounded-lg bg-yellow-400 px-3 py-1.5 text-[10px] font-bold text-black transition hover:bg-yellow-300">
@@ -983,12 +1036,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
             {!viewerUrl&&!pdfLoading&&(
               <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)handleFile(f);}}
                 className="flex h-full w-full flex-col items-center justify-center gap-3 cursor-pointer">
-                <span className="text-5xl opacity-15">📐</span>
+                <span className="text-5xl opacity-15">&#128208;</span>
                 <p className="text-sm font-bold text-zinc-500">Upload Plans to begin</p>
-                <p className="text-xs text-zinc-700">PDF, JPG or PNG · Click or drag</p>
+                <p className="text-xs text-zinc-700">PDF, JPG or PNG &middot; Click or drag</p>
               </div>
             )}
-            {pdfLoading&&<div className="flex h-full items-center justify-center"><p className="text-xs text-zinc-600">Opening…</p></div>}
+            {pdfLoading&&<div className="flex h-full items-center justify-center"><p className="text-xs text-zinc-600">Opening...</p></div>}
 
             {viewerUrl&&(
               <div className="relative" style={{transform:`scale(${viewerZoom})`,transformOrigin:"top center",userSelect:"none"}}>
@@ -1019,7 +1072,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     );
                   })}
 
-                  {/* Per-level reference points — the anchors that make
+                  {/* Per-level reference points - the anchors that make
                       levels stack correctly. Drawn as a distinct yellow
                       crosshair so they're never confused with trace points. */}
                   {activeTab==="floor"&&floorLevels.map(lvl=>{
@@ -1070,7 +1123,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       <line x1={scale.point1.x} y1={scale.point1.y-12*mk} x2={scale.point1.x} y2={scale.point1.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
                       <circle cx={scale.point1.x} cy={scale.point1.y} r={4*mk} fill="#f97316"/>
                       <circle cx={scale.point1.x} cy={scale.point1.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
-                      <text x={scale.point1.x+12*mk} y={scale.point1.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">①</text>
+                      <text x={scale.point1.x+12*mk} y={scale.point1.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">1</text>
                     </g>
                     );
                   })()}
@@ -1082,7 +1135,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       <line x1={scale.point2.x} y1={scale.point2.y-12*mk} x2={scale.point2.x} y2={scale.point2.y+12*mk} stroke="#f97316" strokeWidth={1.5*mk}/>
                       <circle cx={scale.point2.x} cy={scale.point2.y} r={4*mk} fill="#f97316"/>
                       <circle cx={scale.point2.x} cy={scale.point2.y} r={9*mk} fill="none" stroke="#f97316" strokeWidth={0.8*mk} opacity="0.4"/>
-                      <text x={scale.point2.x+12*mk} y={scale.point2.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">②</text>
+                      <text x={scale.point2.x+12*mk} y={scale.point2.y-10*mk} fontSize={9*mk} fill="#f97316" fontFamily="monospace" fontWeight="bold">2</text>
                     </g>
                     );
                   })()}
@@ -1095,8 +1148,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     return (
                       <g key={a.id}>
                         <rect x={a.rect.x} y={a.rect.y} width={a.rect.w} height={a.rect.h} fill="rgba(249,115,22,0.10)" stroke={isActiveElev?"#f97316":"#71717a"} strokeWidth={isActiveElev?"1.5":"1"}/>
-                        <text x={a.rect.x+4} y={a.rect.y+13} fontSize="8.5" fill="#f97316" fontFamily="monospace" fontWeight="bold">{ed.direction} A{a.areaIndex}: {a.lf}LF × {a.heightFt}'</text>
-                        <text x={a.rect.x+4} y={a.rect.y+24} fontSize="7.5" fill="#fb923c" fontFamily="monospace">{a.legs} legs · {a.frameTall} frames tall</text>
+                        <text x={a.rect.x+4} y={a.rect.y+13} fontSize="8.5" fill="#f97316" fontFamily="monospace" fontWeight="bold">{ed.direction} A{a.areaIndex}: {a.lf}LF x {a.heightFt}&apos;</text>
+                        <text x={a.rect.x+4} y={a.rect.y+24} fontSize="7.5" fill="#fb923c" fontFamily="monospace">{a.legs} legs &middot; {a.frameTall} frames per leg</text>
                       </g>
                     );
                   }))}
@@ -1107,12 +1160,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       {scale.locked&&tabScales.elevation.pageUnitsPerFoot&&(()=>{
                         const puf=tabScales.elevation.pageUnitsPerFoot!;
                         const lf=(liveGrip.w/puf).toFixed(1), ht=(liveGrip.h/puf).toFixed(1);
-                        return <text x={liveGrip.x+4} y={liveGrip.y+14} fontSize="9" fill="#f97316" fontFamily="monospace" fontWeight="bold">{lf}LF × {ht}'</text>;
+                        return <text x={liveGrip.x+4} y={liveGrip.y+14} fontSize="9" fill="#f97316" fontFamily="monospace" fontWeight="bold">{lf}LF x {ht}&apos;</text>;
                       })()}
                     </g>
                   )}
                 </svg>
-                {renderingPage&&<div className="absolute inset-0 flex items-center justify-center"><p className="text-xs text-zinc-500 bg-black/60 px-3 py-1.5 rounded-lg">Loading…</p></div>}
+                {renderingPage&&<div className="absolute inset-0 flex items-center justify-center"><p className="text-xs text-zinc-500 bg-black/60 px-3 py-1.5 rounded-lg">Loading...</p></div>}
               </div>
             )}
           </div>
@@ -1121,11 +1174,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
         {/* Right panel */}
         <aside className="flex w-[250px] flex-shrink-0 flex-col border-l border-zinc-900 bg-[#080604] overflow-y-auto">
 
-          {/* ── FLOOR PLAN ── */}
+          {/* -- FLOOR PLAN -- */}
           {activeTab==="floor"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
-                {/* Reference point — its own step. It's an anchor shared
+                {/* Reference point - its own step. It's an anchor shared
                     across levels, not a property of any one outline, so it
                     sits above the level list rather than inside a tile. */}
                 <div data-guide="reference-point" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
@@ -1136,7 +1189,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </span>
                   </div>
                   <p className="mb-2 text-[10px] leading-relaxed text-zinc-500">
-                    Pick the same fixed feature on every level — a column, a grid intersection, a corner.
+                    Pick the same fixed feature on every level - a column, a grid intersection, a corner.
                     It&apos;s what lines the floors up with each other.
                   </p>
                   <div className="space-y-1">
@@ -1145,15 +1198,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{background:level.color}} />
                         <span className="min-w-0 flex-1 truncate text-[10px] text-zinc-400">{level.levelName}</span>
                         <span className={`text-[8px] font-mono ${level.refPoint?"text-yellow-400":"text-zinc-700"}`}>
-                          {level.refPoint?"set":"—"}
+                          {level.refPoint?"set":"-"}
                         </span>
                         <button onClick={()=>{setActiveLevel(level.id);setRefPickLevelId(refPickLevelId===level.id?null:level.id);}}
                           className={`rounded-lg border px-2 py-0.5 text-[9px] font-bold transition ${refPickLevelId===level.id?"animate-pulse border-yellow-400/60 bg-yellow-400/10 text-yellow-300":"border-zinc-700 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"}`}>
-                          {refPickLevelId===level.id?"Click plan…":level.refPoint?"Redo":"Pick"}
+                          {refPickLevelId===level.id?"Click plan...":level.refPoint?"Redo":"Pick"}
                         </button>
                         {level.refPoint&&(
                           <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,refPoint:null}:l))}
-                            className="text-[9px] text-zinc-700 hover:text-red-400">✕</button>
+                            className="text-[9px] text-zinc-700 hover:text-red-400">&times;</button>
                         )}
                       </div>
                     ))}
@@ -1172,14 +1225,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <input value={level.levelName} onClick={e=>e.stopPropagation()}
                           onChange={e=>setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,levelName:e.target.value}:l))}
                           className="flex-1 min-w-0 bg-transparent text-[10px] font-bold text-zinc-200 outline-none border-b border-zinc-700 pb-0.5"/>
-                        {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.filter((_,j)=>j!==i));}} className="text-[9px] text-zinc-700 hover:text-red-400">✕</button>}
+                        {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.filter((_,j)=>j!==i));}} className="text-[9px] text-zinc-700 hover:text-red-400">&times;</button>}
                       </div>
 
-                      {/* LF — auto-calculated, condensed to one inline row */}
+                      {/* LF - auto-calculated, condensed to one inline row */}
                       <div onClick={e=>e.stopPropagation()} className="flex items-center gap-2">
                         <label className="text-[9px] text-zinc-600 flex-shrink-0">Lineal Feet</label>
                         {level.traceClosed&&level.linealFeet>0
-                          ? <span className="text-[8px] text-emerald-400 flex-shrink-0">✓ Auto</span>
+                          ? <span className="text-[8px] text-emerald-400 flex-shrink-0">Auto</span>
                           : <span className="text-[8px] text-zinc-700 flex-shrink-0 whitespace-nowrap">Trace to calc</span>}
                         <input value={level.linealFeet||""} placeholder="--"
                           readOnly={level.traceClosed&&level.linealFeet>0}
@@ -1187,7 +1240,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           className={`flex-1 min-w-0 rounded-lg border px-2 py-1 text-right text-[10px] font-mono outline-none ${level.traceClosed&&level.linealFeet>0?"border-emerald-500/30 bg-emerald-500/5 text-emerald-300":"border-zinc-800 bg-zinc-900 text-orange-300 focus:border-orange-500/50"}`}/>
                       </div>
 
-                      {/* Key floor — an explicit choice on every level, rather
+                      {/* Key floor - an explicit choice on every level, rather
                           than implied by one being named "Main". This is the
                           floor whose outline drives linear feet/quantities. */}
                       <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>({...l,isKeyFloor:l.id===level.id})));}}
@@ -1196,10 +1249,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           {level.isKeyFloor&&<span className="h-1.5 w-1.5 rounded-full bg-orange-500" />}
                         </span>
                         <span className={`text-[9px] ${level.isKeyFloor?"text-orange-300":"text-zinc-500"}`}>
-                          {level.isKeyFloor?"Key floor — drives quantities":"Use as key floor"}
+                          {level.isKeyFloor?"Key floor - drives quantities":"Use as key floor"}
                         </span>
                       </button>
-
 
                       {/* Start / Close / Store per level */}
                       <div className="flex gap-1.5" onClick={e=>e.stopPropagation()}>
@@ -1216,20 +1268,20 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         }}
                           disabled={level.tracePoints.length<3||level.traceClosed}
                           className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${level.traceClosed?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-zinc-500"} disabled:opacity-30`}>
-                          {level.traceClosed?"✓":"Close"}
+                          {level.traceClosed?"Done":"Close"}
                         </button>
                         <button onClick={()=>setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,stored:true,traceMode:false}:l))}
                           disabled={!level.traceClosed&&level.tracePoints.length===0}
                           className={`flex-1 rounded-lg border px-2 py-1.5 text-[9px] font-bold transition ${level.stored?"border-emerald-500/40 bg-emerald-500/10 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300"} disabled:opacity-30`}>
-                          {level.stored?"✓":"Store"}
+                          {level.stored?"Stored":"Store"}
                         </button>
                       </div>
 
-                      {/* Undo Point — only while actively tracing this level */}
+                      {/* Undo Point - only while actively tracing this level */}
                       {level.traceMode&&!level.traceClosed&&level.tracePoints.length>0&&(
                         <button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.map(l=>l.id===level.id?{...l,tracePoints:l.tracePoints.slice(0,-1)}:l));}}
                           className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[9px] font-bold text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300">
-                          ↩ Undo Point ({level.tracePoints.length} placed)
+                          Undo Point ({level.tracePoints.length} placed)
                         </button>
                       )}
                     </div>
@@ -1243,7 +1295,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
                 {/* Overlay preview */}
                 {allLevelPoints.length>0&&(() => {
-                  // Preview the ACTUAL aligned stacking, not raw traces —
+                  // Preview the ACTUAL aligned stacking, not raw traces -
                   // this is the visual confirmation that reference points
                   // are lining the floors up correctly.
                   const previewRows = alignOverlayRows(floorLevels.map((l,i)=>({
@@ -1261,7 +1313,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   const missingRef = floorLevels.filter(l=>l.tracePoints.length>=2&&!l.refPoint);
                   return (
                   <div className="rounded-xl border border-zinc-800 bg-black overflow-hidden">
-                    <p className="text-[9px] text-zinc-500 uppercase tracking-wider px-3 pt-3 pb-1.5">Overlay Preview · Aligned Stack</p>
+                    <p className="text-[9px] text-zinc-500 uppercase tracking-wider px-3 pt-3 pb-1.5">Overlay Preview &middot; Aligned Stack</p>
                     <div className="px-3 pb-3">
                       <svg viewBox="0 0 200 150" className="w-full rounded-lg bg-zinc-950">
                         {previewRows.map(r=>{
@@ -1272,7 +1324,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       </svg>
                       {missingRef.length>0&&(
                         <p className="mt-2 rounded-lg border border-yellow-500/25 bg-yellow-500/5 px-2 py-1.5 text-[8px] leading-relaxed text-yellow-400">
-                          ⚠ {missingRef.length} level{missingRef.length>1?"s":""} missing a reference point — {missingRef.length>1?"they":"it"} can&apos;t be stacked accurately until one is picked.
+                          {missingRef.length} level{missingRef.length>1?"s":""} missing a reference point - {missingRef.length>1?"they":"it"} can&apos;t be stacked accurately until one is picked.
                         </p>
                       )}
                       {floorLevels.filter(l=>l.linealFeet>0).map(l=>(
@@ -1287,12 +1339,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 })()}
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{overlayStored?"✓ Overlay Stored":"Store Overlay"}</button>
+                <button onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{overlayStored?"Overlay Stored":"Store Overlay"}</button>
               </div>
             </div>
           )}
 
-          {/* ── ELEVATIONS ── */}
+          {/* -- ELEVATIONS -- */}
           {activeTab==="elevation"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
@@ -1300,7 +1352,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   {activeCourtyard ? `${activeCourtyard.name} Heights` : "Elevation Heights"}
                 </p>
 
-                {/* Zone — the building itself, or a courtyard. Courtyards are
+                {/* Zone - the building itself, or a courtyard. Courtyards are
                     gripped exactly like elevations but stored separately so
                     their quantities can be toggled in or out of totals. */}
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-2 space-y-2">
@@ -1342,24 +1394,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 <div className="flex gap-1 flex-wrap">
                   {ELEVATION_DIRS.map(dir=>{
                     // A face counts as "in use" once something's gripped on
-                    // it — courtyards often have an open side that never is.
+                    // it - courtyards often have an open side that never is.
                     const face=activeFaces.find(f=>f.direction===dir);
                     const used=face?.areas.some(a=>a.rect&&a.lf>0);
                     return (
                     <button key={dir} onClick={()=>{setSelectedElev(dir);setSelectedArea(1);setGripMode(false);}}
                       className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":used?"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-orange-500/40":"border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-orange-500/40"}`}>
-                      {dir}{used&&selectedElev!==dir?" ·":""}
+                      {dir}{used&&selectedElev!==dir?" \u00b7":""}
                     </button>
                     );
                   })}
                 </div>
 
-                {/* Duplicate toggles — North→South, East→West */}
+                {/* Duplicate toggles - North to South, East to West */}
                 {activeZone==="building"&&selectedElev==="North"&&(
                   <div className="flex items-center gap-2">
                     <button onClick={()=>{duplicateElevation("North","South");setDupSouth(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupSouth?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
-                      {dupSouth?"✓ Copied to South — click to re-copy":"Duplicate → South"}
+                      {dupSouth?"Copied to South - click to re-copy":"Duplicate to South"}
                     </button>
                   </div>
                 )}
@@ -1367,12 +1419,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   <div className="flex items-center gap-2">
                     <button onClick={()=>{duplicateElevation("East","West");setDupWest(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupWest?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
-                      {dupWest?"✓ Copied to West — click to re-copy":"Duplicate → West"}
+                      {dupWest?"Copied to West - click to re-copy":"Duplicate to West"}
                     </button>
                   </div>
                 )}
 
-                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " — Coverage Areas" : " Elevation"}</p>
+                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " - Coverage Areas" : " Elevation"}</p>
 
                 {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
                   const hasData=area.rect&&area.lf>0;
@@ -1382,7 +1434,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                       <div className="flex items-center justify-between mb-2">
                         <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>{depthTab==="korban-bid" ? `Area ${area.areaIndex}` : `${selectedElev} Elevation`}</span>
-                        {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">✕ Clear</button>}
+                        {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>}
                       </div>
 
                       {hasData?(
@@ -1393,10 +1445,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           </div>
                           <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
                             <p className="text-[7px] text-zinc-600 uppercase">Height</p>
-                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.heightFt}'</p>
+                            <p className="font-mono text-[11px] text-orange-300 font-bold">{area.heightFt}&apos;</p>
                           </div>
                           <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
-                            <p className="text-[7px] text-zinc-600 uppercase">Frames↑</p>
+                            <p className="text-[7px] text-zinc-600 uppercase">Frames/leg</p>
                             <p className="font-mono text-[11px] text-orange-300 font-bold">{area.frameTall}</p>
                           </div>
                           <div className="text-center rounded-lg border border-zinc-800 bg-black p-1.5">
@@ -1412,7 +1464,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <p className="text-[9px] text-zinc-600 mb-2">{isSelected?"Select Start then drag on drawing":"Click to select area"}</p>
                       )}
 
-                      {/* Level range — optional. Says which floors this
+                      {/* Level range - optional. Says which floors this
                           gripped region spans, so Korban can derive where
                           the run actually starts vertically. */}
                       <div onClick={e=>e.stopPropagation()} className="mb-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
@@ -1421,14 +1473,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           <select value={area.fromLevelId ?? ""}
                             onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,fromLevelId:v}:a)}:ed));}}
                             className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
-                            <option value="">From…</option>
+                            <option value="">From...</option>
                             {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
                           </select>
-                          <span className="text-[8px] text-zinc-600">→</span>
+                          <span className="text-[8px] text-zinc-600">&rarr;</span>
                           <select value={area.toLevelId ?? ""}
                             onChange={e=>{const v=e.target.value||null;updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,toLevelId:v}:a)}:ed));}}
                             className="flex-1 min-w-0 rounded border border-zinc-800 bg-black px-1 py-1 text-[8px] font-mono text-orange-300 outline-none focus:border-orange-500/50">
-                            <option value="">To…</option>
+                            <option value="">To...</option>
                             {floorLevels.map(l=><option key={l.id} value={l.id}>{l.levelName}</option>)}
                           </select>
                         </div>
@@ -1436,7 +1488,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           if (!area.fromLevelId) return null;
                           const base = deriveRunBaseFt(area, currentElevData.areas);
                           if (base === null) return (
-                            <p className="mt-1 text-[8px] leading-tight text-yellow-500">⚠ A level below this isn&apos;t gripped — base height unknown.</p>
+                            <p className="mt-1 text-[8px] leading-tight text-yellow-500">A level below this isn&apos;t gripped - base height unknown.</p>
                           );
                           return (
                             <p className="mt-1 text-[8px] font-mono text-emerald-400">
@@ -1459,7 +1511,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <button onClick={()=>updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,stored:true}:a)}:ed))}
                           disabled={!hasData}
                           className={`flex-1 rounded-lg border px-1.5 py-1.5 text-[8px] font-bold transition ${area.stored?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40"} disabled:opacity-30`}>
-                          {area.stored?"✓":"Store"}
+                          {area.stored?"Stored":"Store"}
                         </button>
                       </div>
                     </div>
@@ -1484,7 +1536,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
                 {/* Summary */}
                 <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                  <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">All Elevations → Set Scaffold</p>
+                  <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">All Elevations to Set Scaffold</p>
                   {ELEVATION_DIRS.map(dir=>{
                     const ed=elevData.find(e=>e.direction===dir);
                     const filled=ed?.areas.filter(a=>a.rect&&a.lf>0)??[];
@@ -1495,21 +1547,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       <div key={dir} className={`py-1 border-b border-zinc-900 last:border-0 ${filled.length?"":"opacity-40"}`}>
                         <div className="flex justify-between text-[9px]">
                           <span className="text-zinc-500 font-bold">{dir}</span>
-                          <span className={`font-mono ${filled.length?"text-orange-300":"text-zinc-700"}`}>{filled.length?`${totalLF.toFixed(0)}LF`:"—"}</span>
+                          <span className={`font-mono ${filled.length?"text-orange-300":"text-zinc-700"}`}>{filled.length?`${totalLF.toFixed(0)}LF`:"-"}</span>
                         </div>
-                        {filled.length>0&&<p className="text-[8px] text-zinc-600">{totalLegs} legs · {avgFT} frames tall</p>}
+                        {filled.length>0&&<p className="text-[8px] text-zinc-600">{totalLegs} legs &middot; {avgFT} frames per leg</p>}
                       </div>
                     );
                   })}
                 </div>
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"✓ Stored":"Store Elevations"}</button>
+                <button onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"Stored":"Store Elevations"}</button>
               </div>
             </div>
           )}
 
-          {/* ── SECTION VIEW ── */}
+          {/* -- SECTION VIEW -- */}
           {activeTab==="section"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
@@ -1540,7 +1592,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       </div>
                     </div>
 
-                    {/* Wall offset + top of wall */}
+                    {/* Wall offset + top of wall height */}
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="text-[9px] text-zinc-500 block mb-1">Wall Offset</label>
@@ -1549,23 +1601,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
                       </div>
                       <div>
-                        <label className="text-[9px] text-zinc-500 block mb-1">Top of Wall</label>
+                        <label className="text-[9px] text-zinc-500 block mb-1">Top of Wall Ht.</label>
                         <input value={activeSec.topOfWallDistance} type="number" step="0.5" min="0"
-                          onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,topOfWallDistance:parseFloat(e.target.value)||6}:s))}
+                          onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,topOfWallDistance:parseFloat(e.target.value)||0}:s))}
                           className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
                       </div>
                     </div>
+                    <p className="text-[8px] leading-relaxed text-zinc-600">
+                      Wall height from grade. The top working deck lands a worker&apos;s reach below it -
+                      set that in Backend &gt; Scaffold Defaults.
+                    </p>
 
                     {/* Wall outline status */}
                     {activeSec.wallOutline.length>0&&(
                       <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-2.5 flex items-center justify-between">
-                        <span className="text-[9px] text-blue-300">{activeSec.wallComplete?"✓ Wall complete":"Wall outline in progress…"}</span>
+                        <span className="text-[9px] text-blue-300">{activeSec.wallComplete?"Wall complete":"Wall outline in progress..."}</span>
                         <button onClick={()=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[],wallComplete:false,totalLF:0,totalLegs:0,totalFrames:0,totalPlanks:0}:s))}
                           className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>
                       </div>
                     )}
 
-                    {/* Scaffold side toggle — appears once wall outline is complete */}
+                    {/* Scaffold side toggle - appears once wall outline is complete */}
                     {activeSec.wallComplete&&(
                       <div>
                         <label className="text-[9px] text-zinc-500 block mb-1.5">Scaffold Side (relative to wall)</label>
@@ -1582,6 +1638,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       </div>
                     )}
 
+                    {/* Quantities this section produced. Shown here so the
+                        per-jump counts are visible without leaving the tab. */}
+                    {activeSec.wallComplete&&activeSec.totalLF>0&&(
+                      <div className="rounded-xl border border-zinc-800 bg-black p-2.5">
+                        <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-1.5">Section Quantities</p>
+                        {activeSec.frameMakeup.filter(f=>f.qty>0).map(f=>(
+                          <div key={f.partNo} className="flex items-center gap-2 py-0.5">
+                            <span className="w-11 shrink-0 font-mono text-[8px] text-orange-400">{f.partNo}</span>
+                            <span className="flex-1 truncate text-[9px] text-zinc-500">{f.description}</span>
+                            <span className="font-mono text-[10px] font-bold text-orange-300">{f.qty.toLocaleString()}</span>
+                          </div>
+                        ))}
+                        <p className="mt-1.5 border-t border-zinc-900 pt-1.5 font-mono text-[8px] text-zinc-600">
+                          {activeSec.totalLF} LF &middot; {activeSec.totalLegs} legs &middot; {activeSec.totalLegs>0?Math.round(activeSec.totalFrames/activeSec.totalLegs):0} frames per leg
+                        </p>
+                      </div>
+                    )}
+
                     {/* Start / Complete / Store */}
                     <div className="flex gap-1.5">
                       <button onClick={()=>setWallOutlineMode(true)}
@@ -1591,18 +1665,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
                         disabled={!activeSec.wallOutline||activeSec.wallOutline.length<2||activeSec.wallComplete}
                         className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${activeSec.wallComplete?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-emerald-500/40"} disabled:opacity-30`}>
-                        {activeSec.wallComplete?"✓ Done":"Complete"}
+                        {activeSec.wallComplete?"Done":"Complete"}
                       </button>
                       <button onClick={storeSection}
                         className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${sectionStored?"border-emerald-500/40 bg-emerald-500/10 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-orange-500/40 hover:text-orange-300"}`}>
-                        {sectionStored?"✓":"Store"}
+                        {sectionStored?"Stored":"Store"}
                       </button>
                     </div>
                   </>
                 )}
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={storeSection} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${sectionStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{sectionStored?"✓ Stored":"Store Section"}</button>
+                <button onClick={storeSection} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${sectionStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{sectionStored?"Stored":"Store Section"}</button>
               </div>
             </div>
           )}

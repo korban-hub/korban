@@ -570,7 +570,7 @@ function SlideFrame({
           {title && (
             <h2
               className="mt-1 text-[36px] font-semibold uppercase leading-none tracking-[0.05em] text-white"
-              style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+              style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
             >
               {title}
             </h2>
@@ -603,14 +603,14 @@ const coverSlide: Slide = {
       <Rise active={phase > 0}>
         <p
           className="text-[12px] font-semibold uppercase tracking-[0.42em] text-orange-500"
-          style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+          style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
         >
           Korban
         </p>
       </Rise>
       <h1
         className="mt-3 min-h-[70px] text-[68px] font-semibold uppercase leading-[0.95] tracking-[0.02em] text-white"
-        style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+        style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
       >
         <Typed text={data.projectName} active={phase > 0} delay={180} msPerChar={38} />
       </h1>
@@ -675,7 +675,9 @@ const scopeSlide: Slide = {
               })}
             </div>
             <span className="font-mono text-[10px] text-zinc-600">
-              {data.elevationsCovered.length >= 4
+              {data.elevationsCovered.length === 0
+                ? "not yet recorded"
+                : data.elevationsCovered.length >= 4
                 ? "full perimeter"
                 : `${data.elevationsCovered.length} of 4 faces`}
             </span>
@@ -898,7 +900,7 @@ const closingSlide: Slide = {
     <div className="flex h-full flex-col items-center justify-center text-center">
       <h2
         className="min-h-[58px] text-[56px] font-semibold uppercase leading-none tracking-[0.04em] text-white"
-        style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+        style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
       >
         <Typed text="Ready when you are" active={phase > 0} delay={120} msPerChar={46} />
       </h2>
@@ -923,7 +925,7 @@ const closingSlide: Slide = {
       <Rise active={phase > 0} delay={1750}>
         <p
           className="mt-8 max-w-2xl text-[22px] font-semibold uppercase leading-[1.15] tracking-[0.04em] text-orange-400"
-          style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+          style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
         >
           Everything you need is in this bid. Say the word and we&apos;re on site.
         </p>
@@ -932,7 +934,7 @@ const closingSlide: Slide = {
       <Rise active={phase > 0} delay={2100}>
         <p
           className="mt-7 text-[11px] font-semibold uppercase tracking-[0.42em] text-orange-500"
-          style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+          style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
         >
           Korban
         </p>

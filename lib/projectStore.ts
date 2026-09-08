@@ -275,6 +275,22 @@ export type ProjectRecord = {
   projectAddress: string;
   customer: string;
   estimator: string;
+  /**
+   * The estimator's own bid number. Every company numbers bids differently,
+   * so this is entered, never generated - KORBAN has no business deciding
+   * what a contractor calls their own proposal.
+   */
+  proposalNumber: string;
+  /** GC on the job. Often the same as customer, sometimes not. */
+  generalContractor: string;
+  /** Who the proposal is addressed to. Printed on page one. */
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  /** When the bid is due. Printed as the proposal date. */
+  bidDueDate: string;
+  /** Union or non-union for this job. Defaults from Backend, overridable here. */
+  unionStatus: string;
   updatedAt: string;
   schemaVersion: number;
   /** Estimate depth — see EstimateDepth. Defaults to korban-bid for
@@ -722,6 +738,39 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
   };
 }
 
+/** A new elevation. No coverage, no height, no quantities until measured. */
+function createEmptyElevation(): ProjectElevation {
+  return {
+    elevationId: DEMO_ELEVATION_ID,
+    elevationName: "North",
+    levelName: "Main Level",
+    linearFeet: 0,
+    wallHeight: 0,
+    phase: "Main",
+    mobilization: "Base Bid",
+    overlayGeometry: null,
+    scale: null,
+    scaffoldInput: defaultScaffoldInput,
+    quantityEngine: calculateQuantityEngine({
+      linearFeet: 0,
+      wallHeight: 0,
+      ...defaultScaffoldInput,
+    }),
+    sectionView: {
+      frameMakeup: "",
+      selectedRun: "",
+      wallOffset: defaultScaffoldInput.wallOffset,
+      sectionType: "A-A",
+      wallOutline: [],
+      scaffoldSide: "left",
+      draftingAdditions: [],
+    },
+    elevationBreakdown: [],
+    courtyards: [],
+    includeCourtyards: true,
+  };
+}
+
 function createDemoElevation(): ProjectElevation {
   const linearFeet = 540;
   const wallHeight = 44 + 4 / 12;
@@ -758,15 +807,64 @@ function createDemoElevation(): ProjectElevation {
   };
 }
 
+/**
+ * A new project. Everything blank, because nothing has been entered yet.
+ *
+ * This used to be createDemoProject, and normalizeProject fell back to its
+ * values field by field - so any project missing a name inherited "Mare
+ * Island Apartments" and Turner Construction, and there was no way to tell a
+ * real entry from a leftover. The demo still exists below, but it has to be
+ * asked for by name now; it can no longer leak into a real bid.
+ */
+export function createEmptyProject(
+  projectId: string,
+  projectName = "",
+): ProjectRecord {
+  return {
+    projectId,
+    projectName,
+    projectAddress: "",
+    customer: "",
+    estimator: "",
+    proposalNumber: "",
+    generalContractor: "",
+    contactName: "",
+    contactEmail: "",
+    contactPhone: "",
+    bidDueDate: "",
+    unionStatus: "",
+    updatedAt: nowIso(),
+    schemaVersion: 2,
+    estimateDepth: "quick-bid",
+    takeoff: {
+      levels: [
+        {
+          levelId: DEMO_LEVEL_ID,
+          levelName: "Main Level",
+          elevations: [createEmptyElevation()],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * The Mare Island job, kept for demos and screenshots. Nothing falls back to
+ * it - it only exists when seedDemoProject() is called deliberately.
+ */
 function createDemoProject(): ProjectRecord {
   return {
-    projectId: DEMO_PROJECT_ID,
-    projectName: "Mare Island Apartments",
+    ...createEmptyProject(DEMO_PROJECT_ID, "Mare Island Apartments"),
     projectAddress: "Mare Island, Vallejo, CA",
     customer: "Turner Construction",
+    generalContractor: "Turner Construction",
     estimator: "H. Pierre",
-    updatedAt: nowIso(),
-    schemaVersion: 1,
+    proposalNumber: "KRB-260614-001",
+    contactName: "Marcus Lee",
+    contactEmail: "estimating@turner.com",
+    contactPhone: "(510) 555-0138",
+    bidDueDate: "06/14/26",
+    unionStatus: "Union",
     estimateDepth: "korban-bid",
     takeoff: {
       levels: [
@@ -845,7 +943,10 @@ function normalizeElevation(value: unknown): ProjectElevation {
 }
 
 function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): ProjectRecord {
-  const fallback = createDemoProject();
+  // Blank, not the demo. A missing field means nobody entered it, and saying
+  // so is the whole point - inheriting another job's customer is not a default,
+  // it's a lie the estimator can't see.
+  const fallback = createEmptyProject(fallbackProjectId);
   const record = isRecord(value) ? value : {};
   const takeoffRecord = isRecord(record.takeoff) ? record.takeoff : {};
   const levels = asArray<unknown>(takeoffRecord.levels);
@@ -856,7 +957,7 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
       return {
         levelId: asString(level.levelId, levelIndex === 0 ? DEMO_LEVEL_ID : `level-${levelIndex + 1}`),
         levelName: asString(level.levelName, levelIndex === 0 ? "Main Level" : `Level ${levelIndex + 1}`),
-        elevations: elevations.length ? elevations : [createDemoElevation()],
+        elevations: elevations.length ? elevations : [createEmptyElevation()],
       };
     })
     .filter((level): level is ProjectLevel => Boolean(level));
@@ -867,8 +968,15 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     projectAddress: asString(record.projectAddress, fallback.projectAddress),
     customer: asString(record.customer, fallback.customer),
     estimator: asString(record.estimator, fallback.estimator),
+    proposalNumber: asString(record.proposalNumber, fallback.proposalNumber),
+    generalContractor: asString(record.generalContractor, fallback.generalContractor),
+    contactName: asString(record.contactName, fallback.contactName),
+    contactEmail: asString(record.contactEmail, fallback.contactEmail),
+    contactPhone: asString(record.contactPhone, fallback.contactPhone),
+    bidDueDate: asString(record.bidDueDate, fallback.bidDueDate),
+    unionStatus: asString(record.unionStatus, fallback.unionStatus),
     updatedAt: asString(record.updatedAt, nowIso()),
-    schemaVersion: asNumber(record.schemaVersion, 1),
+    schemaVersion: asNumber(record.schemaVersion, 2),
     estimateDepth: DEPTH_ORDER.includes(record.estimateDepth as EstimateDepth)
       ? (record.estimateDepth as EstimateDepth)
       : "korban-bid",
@@ -886,8 +994,10 @@ function normalizeProjectData(value: unknown): ProjectData {
     normalized[projectId] = normalizeProject(project, projectId);
   });
 
-  if (!normalized[DEMO_PROJECT_ID]) {
-    normalized[DEMO_PROJECT_ID] = createDemoProject();
+  // An empty install starts with one blank project, not the demo. Use
+  // seedDemoProject() when a populated example is actually wanted.
+  if (Object.keys(normalized).length === 0) {
+    normalized[DEMO_PROJECT_ID] = createEmptyProject(DEMO_PROJECT_ID);
   }
 
   return normalized;
@@ -949,6 +1059,55 @@ export function getActiveProject(): ProjectRecord {
   }
 
   return project;
+}
+
+/**
+ * Creates a project and makes it active. The only way a bid should begin -
+ * everything downstream reads the record this writes.
+ */
+export function createProject(projectName = ""): ProjectRecord {
+  const projectId = `prj-${Date.now().toString(36)}`;
+  const project = createEmptyProject(projectId, projectName);
+  const data = getProjectData();
+  data[projectId] = project;
+  saveProjectData(data);
+  setActiveProjectId(projectId);
+  return project;
+}
+
+/** Merge-writes fields onto the active project. Used by the project header. */
+export function updateActiveProject(updates: Partial<ProjectRecord>): ProjectRecord {
+  const current = getActiveProject();
+  const next = { ...current, ...updates, updatedAt: nowIso() };
+  saveActiveProject(next);
+  return next;
+}
+
+export function deleteProject(projectId: string) {
+  const data = getProjectData();
+  delete data[projectId];
+  saveProjectData(data);
+  if (getActiveProjectId() === projectId) {
+    const remaining = Object.keys(data)[0];
+    if (remaining) setActiveProjectId(remaining);
+    else createProject();
+  }
+}
+
+/** Populates the Mare Island example. Only ever called deliberately. */
+export function seedDemoProject(): ProjectRecord {
+  const project = createDemoProject();
+  const data = getProjectData();
+  data[project.projectId] = project;
+  saveProjectData(data);
+  setActiveProjectId(project.projectId);
+  return project;
+}
+
+export function listProjects(): ProjectRecord[] {
+  return Object.values(getProjectData()).sort((a, b) =>
+    (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")
+  );
 }
 
 export function saveActiveProject(project: ProjectRecord) {

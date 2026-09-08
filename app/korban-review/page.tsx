@@ -181,7 +181,7 @@ export default function KorbanReviewPage() {
             </svg>
             <span
               className="uppercase text-[#F97316]"
-              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "22px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
+              style={{ fontFamily: "var(--font-title), sans-serif", fontSize: "22px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
             >
               Korban
             </span>
@@ -237,7 +237,7 @@ export default function KorbanReviewPage() {
             <div>
               <h1
                 className="text-[30px] font-semibold uppercase leading-none tracking-[0.04em] text-white"
-                style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
               >
                 {projectName}
               </h1>
@@ -340,7 +340,7 @@ function DepthPanel({
             />
             <h2
               className="text-[19px] font-semibold uppercase leading-none tracking-[0.05em] text-white"
-              style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+              style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
             >
               {meta.name}
             </h2>

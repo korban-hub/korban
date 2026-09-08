@@ -1,7 +1,5 @@
 @import "tailwindcss";
-@theme inline {
-  --font-title: var(--font-title);
-}
+
 :root {
   --background: #070604;
   --foreground: #ededed;
@@ -23,6 +21,11 @@
   --korban-accent-subtle: rgba(249, 115, 22, 0.1);
   --korban-accent-muted: rgba(249, 115, 22, 0.3);
   --korban-glow: rgba(249, 115, 22, 0.35);
+
+  /* KORBAN paper tokens - the proposal prints on stock, not on screen */
+  --korban-paper: #f6f4f0;
+  --korban-paper-rule: #d8d4cb;
+  --korban-ink: #141312;
 }
 
 @theme inline {
@@ -38,8 +41,20 @@
   --color-korban-accent: var(--korban-accent);
   --color-korban-accent-hover: var(--korban-accent-hover);
   --color-korban-border-accent: var(--korban-border-accent);
+  --color-korban-paper: var(--korban-paper);
+  --color-korban-paper-rule: var(--korban-paper-rule);
+  --color-korban-ink: var(--korban-ink);
+
   --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+
+  /*
+   * Every number in KORBAN reads in Fira Code - quantities, rates, hours,
+   * dollars, job codes. It was already being loaded in layout.tsx, but
+   * font-mono still pointed at Geist Mono, so nothing that asked for mono
+   * ever got it. Geist Mono stays reachable as font-geist-mono if anything
+   * still wants it.
+   */
+  --font-mono: var(--font-fira-code);
 }
 
 body {

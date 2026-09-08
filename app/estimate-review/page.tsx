@@ -8,10 +8,9 @@ import {
   type KorbanMenuLink,
 } from "@/components/korban";
 import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
-import { getBackendSettings, getPieceRate, type BackendSettings } from "@/lib/backendStore";
+import { computeTravel, getBackendSettings, getPieceRate, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
 import {
-  ALTERNATE_DESCRIPTIONS,
   ALTERNATE_ORDER,
   DEFAULT_ALTERNATE_SETTINGS,
   priceAllAlternates,
@@ -50,48 +49,54 @@ type BidRoundPhase =
 
 type TabKey = "breakdown" | "proposal";
 
-const revisionHistory: { phase: BidRoundPhase; date: string; amount: number; note: string }[] = [
-  { phase: "Budget / ROM", date: "05/02/26", amount: 171500, note: "Early budget number based on conceptual scaffold LF." },
-  { phase: "50% CD", date: "05/13/26", amount: 184250, note: "Updated for expanded elevations and access conditions." },
-  { phase: "75% CD", date: "05/24/26", amount: 192600, note: "Added revised plank counts and labor assumptions." },
-  { phase: "100% CD", date: "06/02/26", amount: 201300, note: "Adjusted for final drawing set and rental duration." },
-  { phase: "GMP", date: "06/08/26", amount: 198900, note: "Value engineering review reduced misc. scope exposure." },
-  { phase: "Final Round", date: "06/14/26", amount: 196750, note: "Final internal review before submission." },
-];
+/**
+ * Bid rounds are recorded, not invented. This list used to hold six fabricated
+ * rounds with dollar amounts and dates, presented as this project's history -
+ * the most misleading thing on the page. Nothing writes revisions yet, so it
+ * starts empty and the panel says so.
+ */
+type BidRevision = { phase: BidRoundPhase; date: string; amount: number; note: string };
+const revisionHistory: BidRevision[] = [];
 
 const bidRoundPhases: BidRoundPhase[] = [
   "Budget / ROM", "50% CD", "75% CD", "100% CD", "GMP", "Final Round", "Awarded",
 ];
 
-const baseEstimate = {
-  projectName: "Mare Island Apartments",
-  projectAddress: "Mare Island, Vallejo, CA",
-  customer: "Turner Construction",
-  contactName: "Marcus Lee",
-  contactEmail: "estimating@turner.com",
-  contactPhone: "(510) 555-0138",
-  estimator: "H. Pierre",
-  bidDate: "06/14/26",
-  proposalNumber: "KRB-260614-001",
-  projectType: "Frame Scaffold",
-  unionStatus: "Union",
-  totalLinearFeet: 1240,
-  bays: 124,
-  legs: 125,
-  jumps: 4,
-  frames: 496,
-  planks: 620,
-  crossBraces: 496,
-  guardrails: 372,
-  basePlates: 125,
-  screwJacks: 125,
-  couplingPins: 750,
-  truckLoads: 3,
-  deliveryTrips: 2,
-  pickupTrips: 2,
+/**
+ * The empty shape of an estimate. Every field is blank or zero on purpose.
+ *
+ * This used to hold a full demo job - Turner Construction, Marcus Lee, 1,240
+ * LF, 496 frames - and every field fell back to it individually. A project
+ * with no takeoff silently showed someone else's numbers, and there was no way
+ * to tell a real figure from a leftover. Blank is the honest answer, and the
+ * UI says so rather than filling the gap.
+ */
+const EMPTY_ESTIMATE = {
+  projectName: "",
+  projectAddress: "",
+  customer: "",
+  contactName: "",
+  contactEmail: "",
+  contactPhone: "",
+  estimator: "",
+  bidDate: "",
+  proposalNumber: "",
+  projectType: "",
+  unionStatus: "",
+  totalLinearFeet: 0,
+  bays: 0,
+  legs: 0,
+  jumps: 0,
+  frames: 0,
+  planks: 0,
+  crossBraces: 0,
+  guardrails: 0,
+  basePlates: 0,
+  screwJacks: 0,
+  couplingPins: 0,
 };
 
-type EstimateData = typeof baseEstimate;
+type EstimateData = typeof EMPTY_ESTIMATE;
 
 const estimateMenuLinks: KorbanMenuLink[] = [
   { href: "/", label: "Bid Room" },
@@ -222,6 +227,10 @@ export default function EstimateReviewPage() {
   const [elevationBreakdownRows, setElevationBreakdownRows] = useState<
     { elevation: string; approxLinearFeet: number }[]
   >([]);
+  /** Every face the takeoff knows about, covered or not. Drives the phase plan. */
+  const [allElevationRows, setAllElevationRows] = useState<
+    { elevation: string; approxLinearFeet: number }[]
+  >([]);
   const [partialExteriorMarkupPercent, setPartialExteriorMarkupPercent] = useState(6);
   /** Traced plan outline, used by the bid presentation. Empty at Quick Bid. */
   const [planOutline, setPlanOutline] = useState<{ x: number; y: number }[]>([]);
@@ -248,7 +257,12 @@ export default function EstimateReviewPage() {
 
   const [erectRate, setErectRate] = useState(DEFAULT_ESTIMATE_STATE.erectRate);
   const [travelRate, setTravelRate] = useState(DEFAULT_ESTIMATE_STATE.travelRate);
-  const [travelHours, setTravelHours] = useState(DEFAULT_ESTIMATE_STATE.travelHours);
+  /**
+   * One-way miles to site. The only travel figure an estimator enters - loads,
+   * trips, hours and cost all derive from it. Replaced by a maps lookup once
+   * the integration lands; nothing downstream changes when it does.
+   */
+  const [siteMiles, setSiteMiles] = useState(0);
   const [dismantlePercent, setDismantlePercent] = useState(DEFAULT_ESTIMATE_STATE.dismantlePercentOfErect);
 
   const [productionKey, setProductionKey] = useState<ProductionKey>(DEFAULT_ESTIMATE_STATE.productionKey);
@@ -275,29 +289,38 @@ export default function EstimateReviewPage() {
       const project = getActiveProject();
       const elevation = getActiveElevation();
       const quantityEngine = elevation.quantityEngine;
-
+      const backendSettings = getBackendSettings();
       setStoredEstimate({
-        ...baseEstimate,
-        projectName: project.projectName || baseEstimate.projectName,
-        projectAddress: project.projectAddress || baseEstimate.projectAddress,
-        customer: project.customer || baseEstimate.customer,
-        estimator: project.estimator || baseEstimate.estimator,
-        totalLinearFeet: elevation.linearFeet ?? baseEstimate.totalLinearFeet,
-        bays: quantityEngine.bayCount ?? baseEstimate.bays,
-        legs: quantityEngine.legCount ?? baseEstimate.legs,
-        jumps: quantityEngine.jumps ?? baseEstimate.jumps,
-        frames: quantityEngine.frameCount ?? baseEstimate.frames,
-        planks: quantityEngine.plankCount ?? baseEstimate.planks,
-        crossBraces: quantityEngine.crossBraceCount ?? baseEstimate.crossBraces,
-        guardrails: quantityEngine.guardrailCount ?? baseEstimate.guardrails,
-        basePlates: quantityEngine.basePlateCount ?? baseEstimate.basePlates,
-        screwJacks: quantityEngine.screwJackCount ?? baseEstimate.screwJacks,
-        couplingPins: quantityEngine.couplingPinCount ?? baseEstimate.couplingPins,
+        ...EMPTY_ESTIMATE,
+        projectName: project.projectName ?? "",
+        projectAddress: project.projectAddress ?? "",
+        customer: project.customer ?? "",
+        contactName: project.contactName,
+        contactEmail: project.contactEmail,
+        contactPhone: project.contactPhone,
+        estimator: project.estimator ?? "",
+        bidDate: project.bidDueDate,
+        proposalNumber: project.proposalNumber,
+        projectType: backendSettings.scaffold.scaffoldType ?? "",
+        unionStatus: project.unionStatus || backendSettings.company.unionDefault,
+        totalLinearFeet: elevation.linearFeet ?? 0,
+        bays: quantityEngine.bayCount ?? 0,
+        legs: quantityEngine.legCount ?? 0,
+        jumps: quantityEngine.jumps ?? 0,
+        frames: quantityEngine.frameCount ?? 0,
+        planks: quantityEngine.plankCount ?? 0,
+        crossBraces: quantityEngine.crossBraceCount ?? 0,
+        guardrails: quantityEngine.guardrailCount ?? 0,
+        basePlates: quantityEngine.basePlateCount ?? 0,
+        screwJacks: quantityEngine.screwJackCount ?? 0,
+        couplingPins: quantityEngine.couplingPinCount ?? 0,
       });
 
-      setElevationBreakdownRows(
-        (elevation.elevationBreakdown || []).filter((row) => row.approxLinearFeet > 0)
+      const coveredRows = (elevation.elevationBreakdown || []).filter(
+        (row) => row.approxLinearFeet > 0
       );
+      setElevationBreakdownRows(coveredRows);
+      setAllElevationRows(elevation.elevationBreakdown || []);
 
       const width = elevation.scaffoldInput?.scaffoldWidth ?? 3;
       setScaffoldWidth(width);
@@ -323,7 +346,6 @@ export default function EstimateReviewPage() {
           : keyFloor?.alignedPoints ?? anyFloor?.alignedPoints ?? []
       );
 
-      const backendSettings = getBackendSettings();
       const saved = loadEstimateState();
       setBackend(backendSettings);
 
@@ -346,7 +368,7 @@ export default function EstimateReviewPage() {
       setBidDepth(saved.bidDepth);
       setRentalDays(saved.rentalDays);
       setConsumables(saved.consumables);
-      setTravelHours(saved.travelHours);
+      setSiteMiles(saved.siteMiles);
       setProductionKey(saved.productionKey);
       setCrewSize(saved.crewSize);
       setPhaseModeOn(saved.phaseModeOn);
@@ -370,7 +392,7 @@ export default function EstimateReviewPage() {
     };
   }, []);
 
-  const estimate = storedEstimate ?? baseEstimate;
+  const estimate = storedEstimate ?? EMPTY_ESTIMATE;
 
   /**
    * Every alternate is priced from the takeoff, selected or not, so the tiles
@@ -423,7 +445,9 @@ export default function EstimateReviewPage() {
 
     const erectCost = erectHours * erectRate;
     const dismantleCost = dismantleHours * erectRate;
-    const travelCost = travelHours * travelRate;
+    // Travel follows the loads this job actually ships.
+    const travel = computeTravel(estimate.planks, siteMiles);
+    const travelCost = travel.cost;
     const laborCost = erectCost + dismantleCost + travelCost;
 
     const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
@@ -441,13 +465,13 @@ export default function EstimateReviewPage() {
     return {
       rentalMonths, frameRental, plankRental, consumablesRevenue, rentalsRevenue,
       productionDays, phaseDays, erectHours, dismantleHours,
-      erectCost, dismantleCost, travelCost, laborCost,
+      erectCost, dismantleCost, travelCost, laborCost, travel,
       laborRevenue, alternateRevenue, finalBid, totalPieces,
     };
   }, [
     alternatePricing, approvedAlternates, consumables, crewSize, dismantlePercent, erectRate, estimate,
     frameRate, laborMarkupPercent, miscRevenue, phaseModeOn, phases, plankRate,
-    rentalDays, selectedProduction.days, travelHours, travelRate,
+    rentalDays, selectedProduction.days, siteMiles, travelRate,
   ]);
 
   // -- Persist ----------------------------------------------------------------
@@ -455,7 +479,7 @@ export default function EstimateReviewPage() {
     if (!isHydrated) return;
     saveEstimateState({
       bidDepth, rentalDays, frameRate, plankRate, consumables,
-      erectRate, travelRate, travelHours,
+      erectRate, travelRate, siteMiles,
       dismantlePercentOfErect: dismantlePercent,
       productionKey, crewSize, phaseModeOn, phases,
       approvedAlternates,
@@ -473,7 +497,7 @@ export default function EstimateReviewPage() {
         consumablesRevenue: totals.consumablesRevenue,
         erectHours: totals.erectHours,
         dismantleHours: totals.dismantleHours,
-        travelHours,
+        travelHours: totals.travel.hours,
         erectCost: totals.erectCost,
         dismantleCost: totals.dismantleCost,
         travelCost: totals.travelCost,
@@ -485,12 +509,46 @@ export default function EstimateReviewPage() {
   }, [
     alternateSettings, approvedAlternates, bidDepth, consumables, crewSize, dismantlePercent,
     erectRate, estimate, frameRate, isHydrated, phaseModeOn, phases, plankRate, productionKey,
-    rentalDays, totals, travelHours, travelRate,
+    rentalDays, totals, siteMiles, travelRate,
   ]);
 
+  /**
+   * The phase plan follows the takeoff. Every face is listed so the plan reads
+   * as a complete picture, but only faces with recorded coverage carry days -
+   * the rest stay at zero and say so. Days split by linear-foot share, so a
+   * face carrying twice the run gets twice the time.
+   */
+  useEffect(() => {
+    if (!isHydrated) return;
+    const covered = allElevationRows.filter((row) => row.approxLinearFeet > 0);
+    if (covered.length === 0) return;
+
+    const totalLf = covered.reduce((sum, row) => sum + row.approxLinearFeet, 0);
+    const budget = selectedProduction.days;
+
+    setPhases((current) => {
+      // Only rebuild when the plan doesn't already match the faces on record,
+      // so an estimator's hand edits survive a re-render.
+      const sameShape =
+        current.length === allElevationRows.length &&
+        current.every((row, index) => row.phase === allElevationRows[index]?.elevation);
+      if (sameShape && current.some((row) => row.days > 0)) return current;
+
+      return allElevationRows.map((row, index) => {
+        const share = totalLf > 0 ? row.approxLinearFeet / totalLf : 0;
+        return {
+          id: index + 1,
+          phase: row.elevation,
+          days: row.approxLinearFeet > 0 ? Math.max(1, Math.round(budget * share)) : 0,
+          crews: 1,
+          menPerCrew: crewSize,
+        };
+      });
+    });
+  }, [isHydrated, allElevationRows, selectedProduction.days, crewSize]);
+
   const activeRevision =
-    revisionHistory.find((revision) => revision.phase === bidRoundPhase) ??
-    revisionHistory[revisionHistory.length - 1];
+    revisionHistory.find((revision) => revision.phase === bidRoundPhase) ?? null;
 
   const elevationPricing = useMemo(() => {
     const totalEnteredLf = elevationBreakdownRows.reduce((sum, row) => sum + row.approxLinearFeet, 0);
@@ -573,7 +631,10 @@ export default function EstimateReviewPage() {
       header={
         <KorbanHeader
           title="Estimate Review"
-          subtitle={`${estimate.projectName} · ${estimate.proposalNumber}`}
+          subtitle={
+            [estimate.projectName, estimate.proposalNumber].filter(Boolean).join(" \u00b7 ") ||
+            "No project loaded"
+          }
           menuLinks={estimateMenuLinks}
           menuOpen={menuOpen}
           onMenuToggle={() => setMenuOpen((current) => !current)}
@@ -626,8 +687,9 @@ export default function EstimateReviewPage() {
               <LaborPanel
                 erectHours={totals.erectHours}
                 dismantleHours={totals.dismantleHours}
-                travelHours={travelHours}
-                setTravelHours={setTravelHours}
+                travel={totals.travel}
+                siteMiles={siteMiles}
+                setSiteMiles={setSiteMiles}
                 erectRate={erectRate}
                 setErectRate={setErectRate}
                 travelRate={travelRate}
@@ -652,6 +714,10 @@ export default function EstimateReviewPage() {
                 addPhase={addPhase}
                 removePhase={removePhase}
                 selectedProductionDays={selectedProduction.days}
+                coverageByFace={Object.fromEntries(
+                  allElevationRows.map((row) => [row.elevation, row.approxLinearFeet])
+                )}
+                hasCoverage={allElevationRows.some((row) => row.approxLinearFeet > 0)}
                 phaseDays={totals.phaseDays}
                 erectHours={totals.erectHours}
                 dismantleHours={totals.dismantleHours}
@@ -852,7 +918,7 @@ function TotalBox({ label, value }: { label: string; value: number }) {
       <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-orange-300/70">{label}</span>
       <span
         className="text-[24px] font-semibold leading-none text-orange-400"
-        style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+        style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
       >
         {formatMoney(rolled)}
       </span>
@@ -888,7 +954,9 @@ function MiniInput({
       )}
       {prefix && <span className="relative font-mono text-[9px] text-zinc-600">{prefix}</span>}
       <input
-        value={value}
+        // Never hand React undefined - a saved record written before a field
+        // existed would flip the input from uncontrolled to controlled.
+        value={Number.isFinite(value) ? value : 0}
         onChange={(event) => onChange(Number(event.target.value || 0))}
         onFocus={() => {
           entryValue.current = value;
@@ -935,7 +1003,7 @@ function TextField({
         />
       )}
       <input
-        value={value}
+        value={value ?? ""}
         onChange={(event) => onChange(event.target.value)}
         onFocus={() => {
           entryValue.current = value;
@@ -1183,12 +1251,14 @@ function BigQuantity({
 // ----------------------------------------------------------------------
 
 function LaborPanel({
-  erectHours, dismantleHours, travelHours, setTravelHours,
+  erectHours, dismantleHours, travel, siteMiles, setSiteMiles,
   erectRate, setErectRate, travelRate, setTravelRate,
   erectCost, dismantleCost, travelCost, laborCost, dismantlePercent,
 }: {
-  erectHours: number; dismantleHours: number; travelHours: number;
-  setTravelHours: (hours: number) => void;
+  erectHours: number; dismantleHours: number;
+  travel: { loads: number; legs: number; legHours: number; hours: number; cost: number };
+  siteMiles: number;
+  setSiteMiles: (miles: number) => void;
   erectRate: number; setErectRate: (rate: number) => void;
   travelRate: number; setTravelRate: (rate: number) => void;
   erectCost: number; dismantleCost: number; travelCost: number; laborCost: number;
@@ -1244,11 +1314,17 @@ function LaborPanel({
       <div className="my-1.5 h-px bg-zinc-800" />
 
       <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1">
-        <span className="text-[11px] text-zinc-300">Travel</span>
+        <div>
+          <span className="text-[11px] text-zinc-300">Travel</span>
+          <p className="font-mono text-[9px] text-zinc-700">
+            {siteMiles > 0
+              ? `${travel.loads} load${travel.loads === 1 ? "" : "s"} \u00b7 ${travel.legs} legs \u00b7 ${travel.hours} hrs`
+              : "Enter miles to site"}
+          </p>
+        </div>
         <span className="flex items-center gap-1 font-mono text-[9px] text-zinc-600">
-          <MiniInput value={travelHours} onChange={setTravelHours} width="w-12" />
-          hrs ×
-          <MiniInput value={travelRate} onChange={setTravelRate} prefix="$" width="w-14" />
+          <MiniInput value={siteMiles} onChange={setSiteMiles} width="w-14" />
+          mi to site
         </span>
         <span className="text-right font-mono text-[12px] font-bold text-zinc-200">
           {formatMoney(travelCost)}
@@ -1267,7 +1343,8 @@ function LaborPanel({
 function ProductionPanel({
   productionKey, setProductionKey, crewSize, setCrewSize, phaseModeOn, setPhaseModeOn,
   phases, updatePhase, renamePhase, addPhase, removePhase,
-  selectedProductionDays, phaseDays, erectHours, dismantleHours, dismantlePercent,
+  selectedProductionDays, coverageByFace, hasCoverage,
+  phaseDays, erectHours, dismantleHours, dismantlePercent,
 }: {
   productionKey: ProductionKey;
   setProductionKey: (key: ProductionKey) => void;
@@ -1281,6 +1358,8 @@ function ProductionPanel({
   addPhase: () => void;
   removePhase: (id: number) => void;
   selectedProductionDays: number;
+  coverageByFace: Record<string, number>;
+  hasCoverage: boolean;
   phaseDays: number;
   erectHours: number;
   dismantleHours: number;
@@ -1340,7 +1419,7 @@ function ProductionPanel({
         <div className="flex flex-wrap items-baseline gap-4 border-t border-zinc-900 pt-2">
           <p
             className="text-[22px] font-semibold leading-none text-zinc-200"
-            style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+            style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
           >
             {selectedProductionDays} days
           </p>
@@ -1366,36 +1445,84 @@ function ProductionPanel({
             ))}
           </div>
 
+          {!hasCoverage && (
+            <p className="border-t border-zinc-900 px-1 py-2 font-mono text-[10px] leading-[1.6] text-zinc-600">
+              No elevation coverage recorded yet. Grip the faces that need
+              scaffold in Takeoff Workspace and the phase plan fills in from
+              what you actually measured.
+            </p>
+          )}
+
           {phases.map((row) => {
             const manHours = row.days * row.crews * row.menPerCrew * HOURS_PER_DAY;
+            const faceLf = coverageByFace[row.phase] ?? 0;
+            // A face nobody gripped isn't a zero-day phase - it's not in scope.
+            // Saying so is more useful than showing an editable row of zeros.
+            const inScope = faceLf > 0;
             return (
               <div
                 key={row.id}
-                className="grid grid-cols-[1fr_52px_52px_72px_76px_24px] items-center gap-2 border-t border-zinc-900/70 px-1 py-1"
+                className={`grid grid-cols-[1fr_52px_52px_72px_76px_24px] items-center gap-2 border-t border-zinc-900/70 px-1 py-1 ${
+                  inScope ? "" : "opacity-40"
+                }`}
               >
-                <span className="flex min-w-0 rounded border border-transparent px-1 py-0.5 focus-within:border-zinc-800 focus-within:bg-[#0f0f0f]">
-                  <TextField
-                    value={row.phase}
-                    onChange={(next) => renamePhase(row.id, next)}
-                    className="text-[11px] text-zinc-300"
-                  />
+                <span className="flex min-w-0 items-baseline gap-2">
+                  <span className="truncate text-[11px] text-zinc-300">{row.phase}</span>
+                  {inScope ? (
+                    <span className="shrink-0 font-mono text-[9px] text-zinc-600">
+                      {Math.round(faceLf).toLocaleString()} LF
+                    </span>
+                  ) : (
+                    <span className="shrink-0 font-mono text-[9px] text-zinc-700">not in scope</span>
+                  )}
                 </span>
-                <MiniInput value={row.days} onChange={(v) => updatePhase(row.id, "days", v)} width="w-full" />
-                <MiniInput value={row.crews} onChange={(v) => updatePhase(row.id, "crews", v)} width="w-full" />
-                <MiniInput value={row.menPerCrew} onChange={(v) => updatePhase(row.id, "menPerCrew", v)} width="w-full" />
-                <span className="text-right font-mono text-[11px] font-bold text-zinc-300">
-                  {manHours.toLocaleString()}
-                </span>
+                {inScope ? (
+                  <>
+                    <MiniInput value={row.days} onChange={(v) => updatePhase(row.id, "days", v)} width="w-full" />
+                    <MiniInput value={row.crews} onChange={(v) => updatePhase(row.id, "crews", v)} width="w-full" />
+                    <MiniInput value={row.menPerCrew} onChange={(v) => updatePhase(row.id, "menPerCrew", v)} width="w-full" />
+                    <span className="text-right font-mono text-[11px] font-bold text-zinc-300">
+                      {manHours.toLocaleString()}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-right font-mono text-[11px] text-zinc-700">&mdash;</span>
+                    <span className="text-right font-mono text-[11px] text-zinc-700">&mdash;</span>
+                    <span className="text-right font-mono text-[11px] text-zinc-700">&mdash;</span>
+                    <span className="text-right font-mono text-[11px] text-zinc-700">&mdash;</span>
+                  </>
+                )}
                 <button
                   onClick={() => removePhase(row.id)}
                   className="text-center font-mono text-[10px] text-zinc-700 hover:text-red-400"
                   aria-label={`Remove ${row.phase}`}
                 >
-                  ✕
+                  &times;
                 </button>
               </div>
             );
           })}
+
+          {/* Total across every face in scope. */}
+          {hasCoverage && (
+            <div className="grid grid-cols-[1fr_52px_52px_72px_76px_24px] items-center gap-2 border-t border-zinc-800 px-1 py-1.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                {phases.filter((row) => (coverageByFace[row.phase] ?? 0) > 0).length === phases.length
+                  ? "Full exterior"
+                  : "Faces in scope"}
+              </span>
+              <span className="text-right font-mono text-[11px] font-bold text-orange-300">
+                {phaseDays}
+              </span>
+              <span />
+              <span />
+              <span className="text-right font-mono text-[11px] font-bold text-orange-300">
+                {erectHours.toLocaleString()}
+              </span>
+              <span />
+            </div>
+          )}
 
           <div className="mt-1.5 flex items-center justify-between gap-3 border-t border-zinc-800 px-1 pt-1.5">
             <button
@@ -1435,41 +1562,45 @@ function RevisionHistory({
 }: {
   bidRoundPhase: BidRoundPhase;
   setBidRoundPhase: (phase: BidRoundPhase) => void;
-  activeRevision: { phase: BidRoundPhase; date: string; amount: number; note: string };
+  activeRevision: BidRevision | null;
 }) {
   return (
-    <section className="relative mt-3 rounded-lg border border-zinc-800 bg-[#070604] px-3 py-2">
+    <section className="relative mt-3 rounded-lg border border-zinc-800 bg-korban-base px-3 py-2">
       <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
       <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <h3 className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
-          Revision history
+          Bid round
         </h3>
-        {revisionHistory.map((revision) => {
-          const active = revision.phase === bidRoundPhase;
+        {bidRoundPhases.map((phase) => {
+          const active = phase === bidRoundPhase;
+          const recorded = revisionHistory.find((revision) => revision.phase === phase);
           return (
             <button
-              key={revision.phase}
-              onClick={() => setBidRoundPhase(revision.phase)}
-              title={revision.note}
+              key={phase}
+              onClick={() => setBidRoundPhase(phase)}
+              title={recorded?.note}
               className={`rounded border px-2.5 py-1 font-mono text-[10px] transition ${
                 active
                   ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
-                  : "border-zinc-800 bg-[#0f0f0f] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                  : "border-zinc-800 bg-korban-raised text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
               }`}
             >
-              <span className="font-medium">{revision.phase}</span>
-              <span className="ml-1.5">{formatMoney(revision.amount)}</span>
+              <span className="font-medium">{phase}</span>
+              {recorded && <span className="ml-1.5">{formatMoney(recorded.amount)}</span>}
             </button>
           );
         })}
         <span className="ml-auto font-mono text-[9px] text-zinc-600">
-          {activeRevision.date} · {activeRevision.note}
+          {activeRevision
+            ? `${activeRevision.date} - ${activeRevision.note}`
+            : "No rounds submitted yet - history builds as prices go out"}
         </span>
       </div>
     </section>
   );
 }
+
 
 // ----------------------------------------------------------------------
 // Partial exterior
@@ -1632,11 +1763,9 @@ function ProposalTab({
     companyEmail: backend?.estimator.estimatorEmail || company.email,
     // Trade word for the cost slide. Swaps when KORBAN adds trades beyond scaffold.
     trade: "scaffold",
-    // Faces in scope. Falls back to the full perimeter until the takeoff
-    // exposes a per-elevation selection.
-    elevationsCovered: elevationBreakdownRows.length
-      ? elevationBreakdownRows.map((row) => row.elevation)
-      : ["North", "East", "South", "West"],
+    // Only faces with recorded coverage. An empty list is honest - a deck
+    // that claims full perimeter on a job nobody gripped is not.
+    elevationsCovered: elevationBreakdownRows.map((row) => row.elevation),
     linearFeet: estimate.totalLinearFeet,
     wallHeight: wallHeight || estimate.jumps * 6.333 + 6,
     frames: estimate.frames,
@@ -1910,7 +2039,7 @@ function AlternateTile({
               {result.title}
             </p>
             <p className="mt-0.5 text-[10px] leading-4 text-zinc-500">
-              {ALTERNATE_DESCRIPTIONS[id]}
+              {result.description}
             </p>
             <p className="mt-1 font-mono text-[9px] text-zinc-600">{result.basis}</p>
           </div>
@@ -2228,7 +2357,7 @@ function SheetHeading({ children, className = "" }: { children: React.ReactNode;
       <span className="h-3 w-[3px] shrink-0 bg-orange-500" />
       <span
         className="text-[13px] font-semibold uppercase leading-none tracking-[0.16em]"
-        style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+        style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
       >
         {children}
       </span>
@@ -2314,7 +2443,7 @@ function ProposalSheet({
             <div className="flex items-end gap-2">
               <span
                 className="text-[26px] font-semibold uppercase leading-none tracking-[0.16em] text-white"
-                style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
               >
                 {companyName}
               </span>
@@ -2324,9 +2453,11 @@ function ProposalSheet({
               </span>
             </div>
             <div className="text-right">
-              <p className="font-mono text-[12px] font-bold text-orange-400">{estimate.proposalNumber}</p>
+              <p className="font-mono text-[12px] font-bold text-orange-400">
+              {estimate.proposalNumber || "\u2014"}
+            </p>
               <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-zinc-500">
-                {estimate.bidDate}
+                {estimate.bidDate || "\u2014"}
               </p>
             </div>
           </div>
@@ -2337,7 +2468,7 @@ function ProposalSheet({
               <p className="font-mono text-[7.5px] uppercase tracking-[0.2em] text-[#8a857d]">Project</p>
               <p
                 className="mt-1 text-[19px] font-semibold uppercase leading-none tracking-[0.03em]"
-                style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
               >
                 {estimate.projectName}
               </p>
@@ -2349,7 +2480,9 @@ function ProposalSheet({
 
             <LiveBlock field="customer" activeField={activeField}>
               <p className="font-mono text-[7.5px] uppercase tracking-[0.2em] text-[#8a857d]">Prepared for</p>
-              <p className="mt-1 text-[12px] font-semibold">{estimate.customer}</p>
+              <p className="mt-1 text-[12px] font-semibold">
+                {estimate.customer || <span className="text-[#a5a099]">Customer not set</span>}
+              </p>
               <p className="text-[9.5px] text-[#4a4741]">{estimate.contactName}</p>
               <p className="font-mono text-[8.5px] text-[#8a857d]">{estimate.contactPhone}</p>
               <p className="font-mono text-[8.5px] text-[#8a857d]">{estimate.contactEmail}</p>
@@ -2439,7 +2572,7 @@ function ProposalSheet({
                     {alternate.title}
                   </p>
                   <p className="mt-0.5 text-[9px] leading-[1.6] text-[#5a564f]">
-                    {ALTERNATE_DESCRIPTIONS[alternate.id]}
+                    {alternate.description}
                   </p>
                   <p className="mt-0.5 font-mono text-[8px] text-[#8a857d]">{alternate.basis}</p>
                   {alternate.proposalNote && (
@@ -2468,7 +2601,7 @@ function ProposalSheet({
               </span>
               <span
                 className="text-[24px] font-semibold leading-none text-orange-600"
-                style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
               >
                 {formatMoney(finalBid)}
               </span>
@@ -2480,7 +2613,7 @@ function ProposalSheet({
             <span className="h-3 w-[3px] shrink-0 bg-orange-500" />
             <span
               className="bg-orange-500/25 px-1.5 text-[13px] font-semibold uppercase leading-none tracking-[0.16em]"
-              style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+              style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
             >
               Notes
             </span>
@@ -2552,7 +2685,7 @@ function ProposalSheet({
               <div key={term.title} className="grid grid-cols-[18px_1fr] gap-3">
                 <span
                   className="mt-[1px] text-[11px] font-semibold leading-none text-orange-500/70"
-                  style={{ fontFamily: "'Barlow Condensed', ui-sans-serif, system-ui" }}
+                  style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
                 >
                   {String(index + 1).padStart(2, "0")}
                 </span>
@@ -2643,7 +2776,9 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-zinc-900/70 py-1">
       <span className="text-[10px] text-zinc-600">{label}</span>
-      <span className="truncate text-right text-[11px] font-semibold text-zinc-300">{value}</span>
+      <span className="truncate text-right text-[11px] font-semibold text-zinc-300">
+        {orBlank(value)}
+      </span>
     </div>
   );
 }
@@ -2657,6 +2792,20 @@ function FigureRow({ label, value }: { label: string; value: number }) {
       </span>
     </div>
   );
+}
+
+/**
+ * Renders a value, or a faint marker when there isn't one. Used anywhere a
+ * blank is a real answer - an unnamed customer, an untraced elevation - so
+ * the gap reads as a gap instead of as data.
+ */
+function orBlank(value: string | number | undefined | null, placeholder = "Not set") {
+  if (value === null || value === undefined) return <span className="text-zinc-700">{placeholder}</span>;
+  if (typeof value === "string" && value.trim() === "")
+    return <span className="text-zinc-700">{placeholder}</span>;
+  if (typeof value === "number" && value === 0)
+    return <span className="text-zinc-700">{placeholder}</span>;
+  return <>{value}</>;
 }
 
 function formatMoney(value: number) {
