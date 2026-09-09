@@ -33,9 +33,10 @@ import { loadEstimateState, type EstimateDerived } from "@/lib/estimateState";
 const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
+  { href: "/margin-review", label: "Margin Review" },
   { href: "/set-scaffold-v2", label: "Set Scaffold" },
   { href: "/korban-review", label: "Korban Review" },
-  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/estimate-review", label: "Estimate" },
   { href: "/backend", label: "Backend" },
 ];
 
@@ -211,6 +212,9 @@ export default function ProjectPlanDeskPage() {
                 </p>
               )}
             </div>
+            <KorbanButton variant="ghost" onClick={() => router.push("/margin-review")}>
+              Margins
+            </KorbanButton>
             <KorbanButton
               variant="primary"
               onClick={() => router.push("/takeoff-workspace-advanced")}

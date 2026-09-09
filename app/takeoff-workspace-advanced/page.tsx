@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import { KorbanGuidance, KorbanHeader, type KorbanGuidanceFlag, type KorbanGuidanceStep, type KorbanMenuLink } from "@/components/korban";
 import { alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
-import { GuidedSteps, type GuideStep } from "@/components/guided-steps";
 
 // -- Types --------------------------------------------------------------------
 type PageTag        = "Floor Plan" | "Elevation View" | "Section View";
@@ -773,7 +772,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         actions={
           <>
             <button onClick={storeAll} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/10">Store All</button>
-            <a href="/korban-review" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Review Estimate &rarr;</a>
+            <a href="/set-scaffold-v2" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Scaffold Layout &rarr;</a>
           </>
         }
       />
@@ -846,18 +845,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const anyTraced = floorLevels.some(l=>l.tracePoints.length>=3);
         const allRefs   = floorLevels.length>0 && floorLevels.every(l=>l.refPoint);
         const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
-        const steps: GuideStep[] = [
-          { id:"upload", title:"Load the plans", anchor:"upload",
+        const steps: KorbanGuidanceStep[] = [
+          { id:"upload", title:"Load the plans",
             body:"Upload the PDF set for this job. You'll pull the floor plan and elevation sheets out of it as you go.",
             done: Boolean(viewerUrl) },
-          { id:"scale", title:"Set the scale", anchor:"scale",
+          { id:"scale", title:"Set the scale",
             body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
             why:"Nothing measured on this sheet means anything until Korban knows how big a foot is.",
             done: scale.locked },
           { id:"trace", title:"Trace the floor outline",
             body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
             done: anyTraced },
-          { id:"ref", title:"Set reference points", anchor:"reference-point",
+          { id:"ref", title:"Set reference points",
             body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
             why:"This is what stacks the floors correctly. Without it Korban can't tell a real step-back from a shaky trace.",
             done: allRefs },
@@ -866,11 +865,61 @@ export default function TakeoffWorkspaceAdvancedPage() {
             why:"The grip measures height. Height is what decides how many frames go in each leg.",
             done: anyGrip },
           { id:"store", title:"Store the work",
-            body:"Store Overlay on the floor plan, Store Elevations on the elevations. Then Review Estimate.",
+            body:"Store Overlay on the floor plan, Store Elevations on the elevations. Then Scaffold Layout.",
             done: overlayStored || elevStored },
         ];
-        return <GuidedSteps steps={steps} hidden={guideHidden}
-          onToggleHidden={h=>{setGuideHidden(h); try{localStorage.setItem("korbanGuideHidden",h?"1":"0");}catch{}}} />;
+        if (guideHidden) return null;
+        return (
+          <div className="px-6 pt-3">
+            <KorbanGuidance steps={steps} title="Full Bid walkthrough" className="max-w-xl" />
+          </div>
+        );
+      })()}
+
+      {/*
+        * Korban Bid earns the most from advice and had none. What it flags is
+        * different from Full Bid's checklist: not "do this next" but "what you
+        * have does not agree with itself yet".
+        */}
+      {depthTab==="korban-bid" && (() => {
+        const flags: KorbanGuidanceFlag[] = [];
+        const traced = floorLevels.filter(l=>l.tracePoints.length>=3);
+        const grippedFaces = elevData.filter(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
+        const sectioned = sections.filter(s=>s.wallComplete);
+
+        if (!scale.locked && viewerUrl) {
+          flags.push({ tone:"warn", text:"Scale is not locked on this sheet. Nothing measured here means anything until it is." });
+        }
+        if (traced.length>0 && traced.some(l=>!l.refPoint)) {
+          const missing = traced.filter(l=>!l.refPoint).length;
+          flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
+        }
+        if (grippedFaces.length>0 && sectioned.length===0) {
+          flags.push({ tone:"note", text:"Elevations are gripped but no section is drawn. A section is what lets me check the frame configuration against the actual wall rather than assuming it." });
+        }
+        if (traced.length>1 && grippedFaces.length===0) {
+          flags.push({ tone:"note", text:"Floors are traced but nothing is gripped yet. Plan geometry gives me the shape; grips give me the height." });
+        }
+        if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
+          flags.push({ tone:"warn", text:"A section has no wall height, so its frame count falls back to one per leg. Set Top of Wall on that section." });
+        }
+        if (courtyards.length>0 && !includeCourtyards) {
+          flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
+        }
+        if (flags.length===0 && grippedFaces.length>0) {
+          flags.push({ tone:"note", text:"Nothing disagrees. Scale, geometry and sections all line up - this is as tight as a bid gets before the crew arrives." });
+        }
+        // An empty job still deserves an answer. Silence reads as broken.
+        if (flags.length===0) {
+          flags.push({ tone:"note", text: viewerUrl
+            ? "Plans are open and nothing is measured yet. Set the scale, trace the floor, grip the faces that need coverage - I'll tell you when something stops adding up."
+            : "Nothing loaded yet. Upload the plan set and I'll follow along from there, flagging anything that doesn't agree with itself." });
+        }
+        return (
+          <div className="px-6 pt-3">
+            <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-2xl" />
+          </div>
+        );
       })()}
 
       {depthTab==="quick-bid" ? <QuickBidForm /> : (

@@ -115,6 +115,38 @@ export type StockItem = {
   weightLbs: number;
   /** How many the company owns. Zero until entered. */
   owned: number;
+  /**
+   * Planks this piece carries, for brackets. 12" takes 1, 20" takes 2, 30"
+   * takes 3. Zero for everything that isn't a bracket.
+   */
+  plankCapacity?: number;
+};
+
+/**
+ * What a finish demands of the scaffold.
+ *
+ * A plasterer works off a narrow deck; a mason needs room for block, mortar
+ * and a wheelbarrow. The trade being performed decides the frame width and
+ * how many planks go down, so the estimator picks the work and the scaffold
+ * follows. Masonry additionally hangs a bracket to widen the deck further.
+ *
+ * An estimator who changes frame width by hand overrides all of this - the
+ * rule is a sensible default, not a cage.
+ */
+export type FinishRule = {
+  finish: string;
+  scaffoldWidth: number;
+  planksPerJump: number;
+  /** Bracket hung at every jump to widen the deck. Blank for none. */
+  bracketPartNo: string;
+};
+
+export type ObstructionRules = {
+  /** Percentage added on top of normal output. */
+  moderateLaborPercent: number;
+  moderateMaterialPercent: number;
+  heavyLaborPercent: number;
+  heavyMaterialPercent: number;
 };
 
 export type MaterialDefaults = {
@@ -122,6 +154,10 @@ export type MaterialDefaults = {
   rules: MaterialRules;
   /** The full parts catalog with cost, rate, weight and owned counts. */
   stock: StockItem[];
+  /** Which frame and deck each finish calls for. */
+  finishRules: FinishRule[];
+  /** What obstructions cost in labor and material. */
+  obstructions: ObstructionRules;
 };
 
 /**
@@ -391,11 +427,11 @@ function buildDefaultStock(): StockItem[] {
     ["GHB5", "5' Gooser Brace", "", 2],
     ["GHB7", "7' Gooser Brace", "", 2],
     ["GHB10", "10' Gooser Brace", "", 2],
-    ["BR12L", "12\" Side Bracket", "", 2],
-    ["BR20L", "20\" Side Bracket", "", 2],
-    ["BR30S", "30\" Side Bracket", "", 2],
-    ["BR20E", "20\" End Bracket", "", 2],
-    ["BR30E", "30\" End Bracket", "", 2],
+    ["BR12S", "12\" Side Bracket", "Brackets", 2],
+    ["BR20S", "20\" Side Bracket", "Brackets", 2],
+    ["BR30S", "30\" Side Bracket", "Brackets", 2],
+    ["BR20E", "20\" End Bracket", "Brackets", 2],
+    ["BR30E", "30\" End Bracket", "Brackets", 2],
     ["", "1/2\" All Thread", "", 2],
     ["", "1/2\" Nuts", "", 2],
     ["", "1/2\" Redheads", "", 2],
@@ -436,6 +472,11 @@ function buildDefaultStock(): StockItem[] {
     ["", "Wire & Nails", "", 3],
   ];
 
+  // Bracket capacity is a property of the piece, not a rule somewhere else.
+  const capacity: Record<string, number> = {
+    BR12S: 1, BR20S: 2, BR30S: 3, BR20E: 2, BR30E: 3,
+  };
+
   return rows.map(([partNo, description, category, column]) => ({
     id: partNo || description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
     partNo,
@@ -446,8 +487,27 @@ function buildDefaultStock(): StockItem[] {
     rentalRate: 0,
     weightLbs: 0,
     owned: 0,
+    plankCapacity: capacity[partNo] ?? 0,
   }));
 }
+
+export const DEFAULT_FINISH_RULES: FinishRule[] = [
+  { finish: "Plaster / Stucco", scaffoldWidth: 3, planksPerJump: 3, bracketPartNo: "" },
+  { finish: "Paint", scaffoldWidth: 3, planksPerJump: 3, bracketPartNo: "" },
+  { finish: "Siding", scaffoldWidth: 3, planksPerJump: 3, bracketPartNo: "" },
+  { finish: "Metal Panel", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
+  { finish: "Roofing", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
+  { finish: "Inspection / Access", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
+  // Six on the frame plus two on a 20" bracket makes an eight-plank deck.
+  { finish: "Masonry", scaffoldWidth: 5, planksPerJump: 6, bracketPartNo: "BR20S" },
+];
+
+export const DEFAULT_OBSTRUCTION_RULES: ObstructionRules = {
+  moderateLaborPercent: 15,
+  moderateMaterialPercent: 10,
+  heavyLaborPercent: 28,
+  heavyMaterialPercent: 15,
+};
 
 export const DEFAULT_MATERIAL_RULES: MaterialRules = {
   crossBracesPerBayPerJump: 2,
@@ -577,6 +637,8 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     items: buildDefaultMaterialItems(),
     rules: DEFAULT_MATERIAL_RULES,
     stock: buildDefaultStock(),
+    finishRules: DEFAULT_FINISH_RULES,
+    obstructions: DEFAULT_OBSTRUCTION_RULES,
   },
   labor: {
     installCrewSize: 4,
@@ -771,6 +833,7 @@ function normalizeStock(value: unknown): StockItem[] {
       rentalRate: asNumber(row.rentalRate, fallback.rentalRate),
       weightLbs: asNumber(row.weightLbs, fallback.weightLbs),
       owned: asNumber(row.owned, fallback.owned),
+      plankCapacity: asNumber(row.plankCapacity, fallback.plankCapacity ?? 0),
     };
   });
 
@@ -797,14 +860,41 @@ function normalizeStock(value: unknown): StockItem[] {
   return [...merged, ...custom];
 }
 
+function normalizeFinishRules(value: unknown): FinishRule[] {
+  if (!Array.isArray(value) || value.length === 0) return DEFAULT_FINISH_RULES;
+  const rows = value
+    .filter(isRecord)
+    .map((row) => ({
+      finish: asString(row.finish, ""),
+      scaffoldWidth: asNumber(row.scaffoldWidth, 3),
+      planksPerJump: asNumber(row.planksPerJump, 3),
+      bracketPartNo: asString(row.bracketPartNo, ""),
+    }))
+    .filter((row) => row.finish !== "");
+  return rows.length ? rows : DEFAULT_FINISH_RULES;
+}
+
+function normalizeObstructions(value: unknown): ObstructionRules {
+  const r = isRecord(value) ? value : {};
+  const d = DEFAULT_OBSTRUCTION_RULES;
+  return {
+    moderateLaborPercent: asNumber(r.moderateLaborPercent, d.moderateLaborPercent),
+    moderateMaterialPercent: asNumber(r.moderateMaterialPercent, d.moderateMaterialPercent),
+    heavyLaborPercent: asNumber(r.heavyLaborPercent, d.heavyLaborPercent),
+    heavyMaterialPercent: asNumber(r.heavyMaterialPercent, d.heavyMaterialPercent),
+  };
+}
+
 function normalizeMaterial(value: unknown): MaterialDefaults {
   const r = isRecord(value) ? value : {};
   const defaults = buildDefaultMaterialItems();
   const rules = normalizeMaterialRules(r.rules);
   const stock = normalizeStock(r.stock);
+  const finishRules = normalizeFinishRules(r.finishRules);
+  const obstructions = normalizeObstructions(r.obstructions);
 
   if (!Array.isArray(r.items) || r.items.length === 0) {
-    return { items: defaults, rules, stock };
+    return { items: defaults, rules, stock, finishRules, obstructions };
   }
 
   const storedById = new Map<string, unknown>();
@@ -823,7 +913,7 @@ function normalizeMaterial(value: unknown): MaterialDefaults {
       id: String(item.id), name: "Custom Item", isCore: false, unitRate: 0, billsAsRental: false,
     }));
 
-  return { items: [...merged, ...customItems], rules, stock };
+  return { items: [...merged, ...customItems], rules, stock, finishRules, obstructions };
 }
 
 function normalizeRateSet(value: unknown, d: LaborRateSet): LaborRateSet {
@@ -1050,6 +1140,37 @@ export function computeTravel(
 export function getPieceRate(name: string, settings: BackendSettings = getBackendSettings()): number {
   const item = settings.material.items.find((row) => row.name.toLowerCase() === name.toLowerCase());
   return item?.unitRate ?? 0;
+}
+
+/** The scaffold a finish calls for. Undefined when the finish isn't known. */
+export function getFinishRule(
+  finish: string,
+  settings: BackendSettings = getBackendSettings(),
+): FinishRule | undefined {
+  return settings.material.finishRules.find(
+    (rule) => rule.finish.toLowerCase() === finish.toLowerCase()
+  );
+}
+
+/** Labor and material uplift for a level of obstruction, as multipliers. */
+export function getObstructionFactor(
+  level: "none" | "moderate" | "heavy",
+  settings: BackendSettings = getBackendSettings(),
+): { labor: number; material: number } {
+  const rules = settings.material.obstructions;
+  if (level === "moderate") {
+    return {
+      labor: 1 + rules.moderateLaborPercent / 100,
+      material: 1 + rules.moderateMaterialPercent / 100,
+    };
+  }
+  if (level === "heavy") {
+    return {
+      labor: 1 + rules.heavyLaborPercent / 100,
+      material: 1 + rules.heavyMaterialPercent / 100,
+    };
+  }
+  return { labor: 1, material: 1 };
 }
 
 /** One stock row by part number. */

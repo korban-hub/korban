@@ -34,6 +34,7 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
   { href: "/project-plan-desk", label: "Project Plan Desk" },
   { href: "/inventory", label: "Company Inventory" },
+  { href: "/margin-review", label: "Margin Review" },
   { href: "/contacts", label: "Contacts" },
   { href: "/backend", label: "Backend" },
 ];
@@ -306,6 +307,10 @@ export default function BidJobLogPage() {
                   onOpen={() => open(project.projectId)}
                   onStatus={(status) => setStatus(project.projectId, status)}
                   onRemove={() => remove(project)}
+                  onMargins={() => {
+                    setActiveProjectId(project.projectId);
+                    router.push("/margin-review");
+                  }}
                 />
               ))}
             </section>
@@ -328,12 +333,13 @@ export default function BidJobLogPage() {
 // -----------------------------------------------------------------------------
 
 function JobTile({
-  project, onOpen, onStatus, onRemove,
+  project, onOpen, onStatus, onRemove, onMargins,
 }: {
   project: ProjectRecord;
   onOpen: () => void;
   onStatus: (status: BidStatus) => void;
   onRemove: () => void;
+  onMargins: () => void;
 }) {
   const elevation = getFirstElevation(project);
   const progress = getProjectProgress(project, elevation);
@@ -419,13 +425,24 @@ function JobTile({
         </select>
       </div>
 
-      <button
-        onClick={onRemove}
-        className="absolute right-2 top-2 hidden font-mono text-[11px] text-zinc-700 transition hover:text-red-400 group-hover:block"
-        aria-label={`Delete ${project.projectName}`}
-      >
-        &times;
-      </button>
+      {/* Margins are checked against a specific job far more often than in
+          general, so the way in is on the job itself. */}
+      <div className="absolute right-2 top-2 hidden items-center gap-1.5 group-hover:flex">
+        <button
+          onClick={onMargins}
+          title="Open Margin Review for this job"
+          className="rounded border border-zinc-800 bg-black px-1.5 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-orange-500/40 hover:text-orange-300"
+        >
+          margins
+        </button>
+        <button
+          onClick={onRemove}
+          className="font-mono text-[11px] text-zinc-700 transition hover:text-red-400"
+          aria-label={`Delete ${project.projectName}`}
+        >
+          &times;
+        </button>
+      </div>
     </div>
   );
 }

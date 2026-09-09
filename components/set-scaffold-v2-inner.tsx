@@ -5,8 +5,8 @@
 import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { KorbanButton, KorbanHeader, KorbanHeaderMeta, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, saveSectionView, setIncludeCourtyards, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
+import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -22,7 +22,8 @@ const projectInfo = { projectName: "Mare Island Apartments", jobNumber: "KRB-260
 const menuLinks: KorbanMenuLink[] = [
   { href: "/project-plan-desk", label: "Project Plan Desk" },
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
-  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/korban-review", label: "Korban Review" },
+  { href: "/estimate-review", label: "Estimate" },
 ];
 
 const FRAME_TYPES: { id: string; label: string }[] = [
@@ -54,14 +55,31 @@ function pointInPolygon(pt: PlanPoint, poly: PlanPoint[]): boolean {
   }
   return inside;
 }
-function computeOutwardNormal(a: PlanPoint, b: PlanPoint, poly: PlanPoint[]): PlanPoint {
+/**
+ * Which way the scaffold leans off a wall segment.
+ *
+ * Exterior work stands the legs outside the traced line; interior work stands
+ * them inside it. Same trace, same maths, opposite sign - so every leg, tick,
+ * label and corner offset follows from this one function rather than each
+ * caller deciding for itself.
+ */
+function computeOutwardNormal(
+  a: PlanPoint,
+  b: PlanPoint,
+  poly: PlanPoint[],
+  placement: "exterior" | "interior" = "exterior",
+): PlanPoint {
   const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy);
   if (!len) return { x: 0, y: -1 };
   const n1 = { x: dy / len, y: -dx / len }, n2 = { x: -dy / len, y: dx / len };
   const area = signedArea(poly);
   const candidate = area > 0 ? n2 : n1, opp = area > 0 ? n1 : n2;
   const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, td = Math.max(len * 0.05, 2);
-  return pointInPolygon({ x: mx + candidate.x * td, y: my + candidate.y * td }, poly) ? opp : candidate;
+  const outward = pointInPolygon({ x: mx + candidate.x * td, y: my + candidate.y * td }, poly)
+    ? opp
+    : candidate;
+  if (placement === "exterior") return outward;
+  return { x: -outward.x, y: -outward.y };
 }
 function getPrimaryGeometryPoints(elev: ProjectElevation | null): PlanPoint[] {
   const g = elev?.overlayGeometry; if (!g) return [];
@@ -97,7 +115,8 @@ function planksPerBay(width: ScaffoldWidth): number {
 
 // ── Leg computation — NO orphan legs ─────────────────────────────────────────
 function computeLegs(
-  outline: PlanPoint[], widthFt: number, bayFt: number, puf: number
+  outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
+  placement: "exterior" | "interior" = "exterior",
 ): { segIndex: number; legs: LegResult[] }[] {
   const results: { segIndex: number; legs: LegResult[] }[] = [];
   for (let i = 0; i < outline.length; i++) {
@@ -106,7 +125,7 @@ function computeLegs(
     const segLen = Math.sqrt(dx * dx + dy * dy);
     if (segLen <= 0 || puf <= 0 || bayFt <= 0) { results.push({ segIndex: i, legs: [] }); continue; }
     const along = { x: dx / segLen, y: dy / segLen };
-    const normal = computeOutwardNormal(start, end, outline);
+    const normal = computeOutwardNormal(start, end, outline, placement);
     const bayPx = bayFt * puf;
     const wallGap = 1 * puf;
     const tickLen = widthFt * puf;
@@ -171,10 +190,11 @@ function computeLegs(
 
 // ── Three.js 3D model — full building perimeter ───────────────────────────────
 function ScaffoldModel3D({
-  outline, puf, bayFt, widthFt, frameTall, scaffoldWidthFt
+  outline, puf, bayFt, widthFt, frameTall, scaffoldWidthFt, placement = "exterior"
 }: {
   outline: PlanPoint[]; puf: number; bayFt: number; widthFt: number;
   frameTall: number; scaffoldWidthFt: number;
+  placement?: "exterior" | "interior";
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -317,7 +337,7 @@ function ScaffoldModel3D({
       // building, and was putting scaffold on the interior whenever a
       // trace happened to wind the "wrong" way.
       const rawA = outline[si], rawB = outline[(si + 1) % outline.length];
-      const outwardNormal = computeOutwardNormal(rawA, rawB, outline);
+      const outwardNormal = computeOutwardNormal(rawA, rawB, outline, placement);
       const nx = outwardNormal.x, nz = outwardNormal.y;
 
       // Wall panel
@@ -484,7 +504,7 @@ function ScaffoldModel3D({
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
-  }, [outline, bayFt, widthFt, frameTall, scaffoldWidthFt, puf]);
+  }, [outline, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, placement]);
 
   useEffect(() => {
     if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
@@ -925,11 +945,21 @@ export default function SetScaffoldV2Inner() {
     return { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
   }, [outline, effPuf]);
 
+  /**
+   * Which side of the traced line the scaffold stands on. Exterior pushes the
+   * legs outward, interior pulls them in - a tank shell, an atrium or a lift
+   * shaft is the same trace read the other way round.
+   */
+  const placement: "exterior" | "interior" =
+    ((elevation?.sectionView as unknown as Record<string, string>)?.placement === "interior")
+      ? "interior"
+      : "exterior";
+
   // Segment legs with no-orphan rule
   const allSegmentLegs = useMemo(() => {
     if (!scaleOk || !outline.length || effPuf <= 0 || bayLengthFt <= 0) return [];
-    return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf);
-  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf]);
+    return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf, placement);
+  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, placement]);
 
   // Per-leg frame tall — single source of truth is `frameTall`, the same
   // value driving the 3D model and Frame Config Options (derived from
@@ -1100,7 +1130,12 @@ export default function SetScaffoldV2Inner() {
   useEffect(() => {
     function load() {
       try {
-        const e = getActiveElevation(), p = getActiveProject();
+        const raw = getActiveElevation(), p = getActiveProject();
+        // Arriving from Takeoff, quantities exist but no part numbers do.
+        // Writing the ledger on load means the yard sees real parts without
+        // anyone having to touch a control first.
+        const e = writeScaffoldLedger(raw);
+        if ((e.partLedger ?? []).length !== (raw.partLedger ?? []).length) saveActiveElevation(e);
         setElevation(e); setProjectName(p.projectName || projectInfo.projectName);
         const depth = getEstimateDepth();
         setEstimateDepthState(depth);
@@ -1306,8 +1341,87 @@ export default function SetScaffoldV2Inner() {
     const cur = elevation ?? getActiveElevation();
     const si = { ...cur.scaffoldInput, ...updates };
     const qe = calculateQuantityEngine({ linearFeet: cur.linearFeet, wallHeight: cur.wallHeight, ...si, workerReachHeight });
-    const next = { ...cur, scaffoldInput: si, quantityEngine: qe };
+    const withEngine = { ...cur, scaffoldInput: si, quantityEngine: qe };
+    // Set Scaffold is where width, bay length and frame configuration are
+    // decided, so it is the only page that can say which parts those are.
+    // Writing them here is what stops the load list guessing downstream.
+    const next = writeScaffoldLedger(withEngine);
     setElevation(next); saveActiveElevation(next);
+  }
+
+  /**
+   * Turns this elevation's configuration into part numbers.
+   *
+   * The quantity engine counts categories. A yard pulls parts. Only this page
+   * knows the run is 3' wide on 10' bays, which makes the frames FO6L3, the
+   * braces B102 and the planks WP10 - so only this page can write it down.
+   *
+   * Frame configuration is honoured piece by piece: a leg made of one 6'-4"
+   * and one 5' frame writes both part numbers, not two of the tall one.
+   */
+  function writeScaffoldLedger(el: ProjectElevation): ProjectElevation {
+    const si = el.scaffoldInput;
+    const qe = el.quantityEngine;
+    if (!qe || qe.legCount <= 0) return writeLedgerEntries(el, "scaffold", []);
+
+    const parts = partsForConfiguration(si.scaffoldWidth, si.standardBayLength);
+    const legs = qe.legCount;
+    const entries: { partNo: string; qty: number; note?: string }[] = [];
+
+    // Frames, by the actual makeup of a leg rather than one tall stack.
+    const makeup = qe.frameMakeup ?? [];
+    if (makeup.length > 0) {
+      makeup.forEach((piece) => {
+        const partNo = piece.label.startsWith("6")
+          ? parts.frame
+          : piece.label.startsWith("5")
+          ? parts.frame5
+          : parts.frame3;
+        entries.push({
+          partNo,
+          qty: piece.qty * legs,
+          note: `${piece.qty} per leg x ${legs} legs`,
+        });
+      });
+    } else {
+      entries.push({ partNo: parts.frame, qty: qe.frameCount });
+    }
+
+    entries.push({ partNo: parts.plank, qty: qe.plankCount });
+    entries.push({ partNo: parts.brace, qty: qe.crossBraceCount });
+    entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount });
+    entries.push({ partNo: "BP1", qty: qe.basePlateCount });
+    entries.push({ partNo: "AL1S", qty: qe.screwJackCount });
+    entries.push({ partNo: "CPS", qty: qe.couplingPinCount ?? 0 });
+
+    // Anything dropped onto the section drawing is real material too.
+    const drafted = el.sectionView?.draftingAdditions ?? [];
+    const bracketCounts = new Map<string, number>();
+    drafted.forEach((item) => {
+      if (item.kind !== "bracket") return;
+      bracketCounts.set(item.variant, (bracketCounts.get(item.variant) ?? 0) + 1);
+    });
+    bracketCounts.forEach((qty, variant) => {
+      entries.push({ partNo: variant, qty, note: "placed in section view" });
+    });
+
+    // Merge duplicates - two makeup rows can land on the same part number.
+    const merged = new Map<string, { partNo: string; qty: number; note?: string }>();
+    entries.forEach((entry) => {
+      if (!entry.partNo || entry.qty <= 0) return;
+      const existing = merged.get(entry.partNo);
+      if (existing) existing.qty += entry.qty;
+      else merged.set(entry.partNo, { ...entry });
+    });
+
+    return writeLedgerEntries(el, "scaffold", [...merged.values()]);
+  }
+
+  function handleTogglePlacement(next: "exterior" | "interior") {
+    saveSectionView({ placement: next } as never);
+    setElevation(cur =>
+      cur ? { ...cur, sectionView: { ...cur.sectionView, placement: next } as never } : cur
+    );
   }
 
   function handleToggleScaffoldSide(side: "left" | "right") {
@@ -1344,10 +1458,57 @@ export default function SetScaffoldV2Inner() {
             <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
             <KorbanButton as="a" href="/takeoff-workspace-advanced" variant="ghost">← Takeoff</KorbanButton>
             <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
-            <KorbanButton as="a" href="/estimate-review" variant="primary">Estimate Review →</KorbanButton>
+            <KorbanButton as="a" href="/korban-review" variant="primary">Korban Review →</KorbanButton>
           </>
         }
       />
+
+      {/* Where the scaffold stands relative to the trace, and what Korban
+          makes of the job as it is. Both sit above the workspace because both
+          change how everything below them should be read. */}
+      {!isQuickBid && (
+        <div className="flex flex-wrap items-start gap-3 border-b border-zinc-900 bg-[#0b0b0b] px-6 py-2">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+              Scaffold sits
+            </span>
+            {(["exterior", "interior"] as const).map((side) => (
+              <button
+                key={side}
+                onClick={() => handleTogglePlacement(side)}
+                className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium capitalize transition ${
+                  placement === side
+                    ? "border-orange-400/50 bg-orange-400/10 text-orange-200"
+                    : "border-zinc-800 bg-black text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                }`}
+              >
+                {side}
+              </button>
+            ))}
+            <span className="font-mono text-[9px] text-zinc-700">
+              {placement === "interior" ? "legs inside the wall line" : "legs outside the wall line"}
+            </span>
+          </div>
+
+          {(() => {
+            const flags: KorbanGuidanceFlag[] = [];
+            if (!scaleOk) {
+              flags.push({ tone: "warn", text: "No scale on this elevation, so the layout is drawn but not measured. Nothing below is a real dimension until it is set." });
+            }
+            if (outline.length < 3) {
+              flags.push({ tone: "warn", text: "No traced plan on this elevation. I am working from a fallback shape, which is fine for looking at and wrong for pricing." });
+            }
+            if (placement === "interior") {
+              flags.push({ tone: "note", text: "Interior placement puts the legs inside the traced line. Check the corners - an inside corner needs different clearance than an outside one." });
+            }
+            if (scaleOk && outline.length >= 3 && (elevation?.wallHeight ?? 0) <= 0) {
+              flags.push({ tone: "warn", text: "Wall height is zero, so frame configuration falls back to a single jump. Set it in Takeoff and the whole stack rebuilds." });
+            }
+            if (flags.length === 0) return null;
+            return <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-xl" />;
+          })()}
+        </div>
+      )}
 
       {/* Quick Bid — no plan geometry exists at this depth, so there's no
           layout, 3D, or section to show. Counts, frame options, material
@@ -1548,7 +1709,7 @@ export default function SetScaffoldV2Inner() {
               {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs }) => {
                 const segStart = outline[segIndex], segEnd = outline[(segIndex + 1) % outline.length];
                 if (!segStart || !segEnd) return null;
-                const normal = computeOutwardNormal(segStart, segEnd, outline);
+                const normal = computeOutwardNormal(segStart, segEnd, outline, placement);
                 const dx = segEnd.x - segStart.x, dy = segEnd.y - segStart.y, len = Math.sqrt(dx * dx + dy * dy);
                 const wg = 1 * effPuf, tl = scaffoldWidthFt * effPuf;
                 const sl = legs.filter(l => !l.isTurnaroundMirror);
@@ -1839,6 +2000,7 @@ export default function SetScaffoldV2Inner() {
                   widthFt={scaffoldWidthFt}
                   frameTall={liveFrameTall}
                   scaffoldWidthFt={scaffoldWidthFt}
+                  placement={placement}
                 />
               )}
             </div>

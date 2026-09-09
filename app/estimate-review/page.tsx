@@ -679,7 +679,7 @@ export default function EstimateReviewPage() {
     <KorbanManagementShell
       header={
         <KorbanHeader
-          title="Estimate Review"
+          title="Estimate"
           subtitle={
             [estimate.projectName, estimate.proposalNumber].filter(Boolean).join(" \u00b7 ") ||
             "No project loaded"
@@ -1796,6 +1796,8 @@ function ProposalTab({
   const [presenting, setPresenting] = useState(false);
   /** Shows for a moment after the link is copied, then goes away. */
   const [linkCopied, setLinkCopied] = useState(false);
+  /** Set once the bid has been printed, saved or shared. */
+  const [sentPrompt, setSentPrompt] = useState<string | null>(null);
   const focusHandler = (field: string) => (active: boolean) =>
     setActiveField((current) => (active ? field : current === field ? null : current));
 
@@ -1893,7 +1895,7 @@ function ProposalTab({
 
           <AlternatesPanel
             count={approvedAlternates.length}
-            total={totals.alternateRevenue}
+            total={alternateRevenue}
           >
             <div className="grid items-start gap-1.5 md:grid-cols-2">
               {ALTERNATE_ORDER.map((id) => (
@@ -2010,7 +2012,10 @@ function ProposalTab({
                 live fields
               </span>
               <button
-                onClick={() => window.print()}
+                onClick={() => {
+                  window.print();
+                  setSentPrompt("");
+                }}
                 title="Pick Save as PDF in the print dialog to send it as a file"
                 className="rounded border border-zinc-800 bg-korban-raised px-2.5 py-1 font-mono text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
               >
@@ -2030,6 +2035,7 @@ function ProposalTab({
                   try {
                     await navigator.clipboard.writeText(url);
                     setLinkCopied(true);
+                    setSentPrompt(url);
                     window.setTimeout(() => setLinkCopied(false), 2400);
                   } catch {
                     window.prompt("Copy this link", url);
@@ -2045,13 +2051,42 @@ function ProposalTab({
                 {linkCopied ? "Link copied" : "Share link"}
               </button>
               <button
-                onClick={() => setProposalStatus("Ready To Send")}
+                onClick={() => {
+                  setProposalStatus("Ready To Send");
+                  setSentPrompt("");
+                }}
                 className="rounded bg-orange-500 px-2.5 py-1 font-mono text-[10px] font-bold text-black hover:bg-orange-400"
               >
                 Send
               </button>
             </span>
           </div>
+          {/* A bid that has been saved or shared is a bid that wants sending.
+              Saying so here beats the estimator remembering to. */}
+          {sentPrompt !== null && (
+            <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg border border-orange-500/40 bg-orange-500/[0.07] px-3 py-2">
+              <span className="min-w-0 flex-1 text-[11.5px] text-orange-100">
+                Ready to go out. Want me to draft the message?
+              </span>
+              <button
+                onClick={() => {
+                  window.location.href = sentPrompt
+                    ? `/compose-message?link=${encodeURIComponent(sentPrompt)}`
+                    : "/compose-message";
+                }}
+                className="rounded bg-orange-500 px-3 py-1 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
+              >
+                Compose
+              </button>
+              <button
+                onClick={() => setSentPrompt(null)}
+                className="font-mono text-[10px] text-zinc-500 transition hover:text-zinc-300"
+              >
+                not now
+              </button>
+            </div>
+          )}
+
           <ProposalSheet
             estimate={estimate}
             rentalDays={rentalDays}

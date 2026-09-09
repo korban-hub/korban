@@ -235,6 +235,8 @@ export type ProjectElevation = {
    * Defaults to an empty array — purely additive, never required.
    */
   elevationBreakdown: StoredElevationBreakdownRow[];
+  /** Parts this elevation takes, by number. Written by whoever knows them. */
+  partLedger: LedgerEntry[];
   /**
    * Courtyards captured for this elevation — see StoredCourtyard. Kept
    * separate from the building's own elevations so their quantities can
@@ -344,6 +346,32 @@ export function getProjectProgress(
   const hasCoverage = (elevation?.linearFeet ?? 0) > 0;
   return hasScale || hasGeometry || hasCoverage ? "In process" : "Not started";
 }
+
+/**
+ * What this elevation actually takes, by part number.
+ *
+ * The quantity engine counts categories - frames, planks, braces. A yard
+ * pulls part numbers. Everything downstream used to bridge that gap by
+ * guessing: the load list inferred a frame size from scaffold width, which
+ * is right until a job mixes widths and then quietly wrong.
+ *
+ * The ledger closes it. Set Scaffold knows the width, the plank length, the
+ * brace span and the bracket, so Set Scaffold writes the parts down. Load
+ * lists, inventory and pricing read them. Nothing infers a part number from
+ * another page's data again.
+ *
+ * Entries are grouped by source so a writer can replace its own without
+ * touching anyone else's - the same discipline Estimate Review and Margin
+ * Review use on the shared estimate record.
+ */
+export type LedgerEntry = {
+  partNo: string;
+  /** What produced this line. "scaffold", "section", "alternate:stair-tower". */
+  source: string;
+  qty: number;
+  /** Optional note for anything a part number alone doesn't explain. */
+  note?: string;
+};
 
 export type ProjectData = Record<string, ProjectRecord>;
 
@@ -522,6 +550,19 @@ function normalizeCourtyards(value: unknown): StoredCourtyard[] {
       };
     })
     .filter((cy): cy is StoredCourtyard => Boolean(cy));
+}
+
+function normalizeLedger(value: unknown): LedgerEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isRecord)
+    .map((row) => ({
+      partNo: asString(row.partNo, ""),
+      source: asString(row.source, "scaffold"),
+      qty: asNumber(row.qty, 0),
+      note: typeof row.note === "string" ? row.note : undefined,
+    }))
+    .filter((row) => row.partNo !== "" && row.qty > 0);
 }
 
 function normalizeElevationBreakdown(value: unknown): StoredElevationBreakdownRow[] {
@@ -809,6 +850,7 @@ function createEmptyElevation(): ProjectElevation {
       draftingAdditions: [],
     },
     elevationBreakdown: [],
+    partLedger: [],
     courtyards: [],
     includeCourtyards: true,
   };
@@ -845,6 +887,7 @@ function createDemoElevation(): ProjectElevation {
       draftingAdditions: [],
     },
     elevationBreakdown: [],
+    partLedger: [],
     courtyards: [],
     includeCourtyards: true,
   };
@@ -980,6 +1023,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
       draftingAdditions: normalizeSectionDraftingItems(sectionRecord.draftingAdditions),
     },
     elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
+    partLedger: normalizeLedger(record.partLedger),
     courtyards: normalizeCourtyards(record.courtyards),
     // Default to including courtyards in totals — they're real scaffold
     // on the job; the toggle exists to break them out, not hide them.
@@ -1161,6 +1205,58 @@ export function listProjects(): ProjectRecord[] {
 /** First elevation of any project. Used by lists that show many at once. */
 export function getFirstElevation(project: ProjectRecord): ProjectElevation | null {
   return project.takeoff.levels[0]?.elevations[0] ?? null;
+}
+
+/**
+ * Replaces every entry from one source, leaving the rest alone.
+ *
+ * Set Scaffold changing the frame width should rewrite the frames and leave
+ * the section view's brackets and the alternates' toe boards untouched. That
+ * only works if each writer owns a source and never touches another's.
+ */
+export function writeLedgerEntries(
+  elevation: ProjectElevation,
+  source: string,
+  entries: { partNo: string; qty: number; note?: string }[],
+): ProjectElevation {
+  const others = (elevation.partLedger ?? []).filter((row) => row.source !== source);
+  const mine = entries
+    .filter((row) => row.partNo && row.qty > 0)
+    .map((row) => ({ ...row, source, qty: Math.round(row.qty) }));
+  return { ...elevation, partLedger: [...others, ...mine] };
+}
+
+/** Every part on this elevation, one line each, sources folded together. */
+export function readLedger(elevation: ProjectElevation | null): { partNo: string; qty: number }[] {
+  const totals = new Map<string, number>();
+  (elevation?.partLedger ?? []).forEach((row) => {
+    totals.set(row.partNo, (totals.get(row.partNo) ?? 0) + row.qty);
+  });
+  return [...totals.entries()]
+    .map(([partNo, qty]) => ({ partNo, qty }))
+    .sort((a, b) => b.qty - a.qty);
+}
+
+/** One part's count, across every source. Zero when nothing wrote it. */
+export function ledgerCount(elevation: ProjectElevation | null, partNo: string): number {
+  return (elevation?.partLedger ?? [])
+    .filter((row) => row.partNo === partNo)
+    .reduce((sum, row) => sum + row.qty, 0);
+}
+
+/** Which frame, plank and brace a given width and bay length call for. */
+export function partsForConfiguration(scaffoldWidth: number, bayLengthFt: number) {
+  const frame =
+    scaffoldWidth >= 5 ? "FO6L" : scaffoldWidth >= 3.5 ? "FO6L42" : "FO6L3";
+  const frame5 =
+    scaffoldWidth >= 5 ? "FM5" : scaffoldWidth >= 3.5 ? "FO5L42" : "FO5L3";
+  const frame3 =
+    scaffoldWidth >= 5 ? "FM3" : scaffoldWidth >= 3.5 ? "FM342" : "FM33";
+  // Braces span the bay, so the bay length names the part.
+  const brace = bayLengthFt >= 10 ? "B102" : bayLengthFt >= 8 ? "B82" : bayLengthFt >= 7 ? "B72" : "B52";
+  const guardrail = bayLengthFt >= 10 ? "GR10" : bayLengthFt >= 8 ? "GR8" : bayLengthFt >= 7 ? "GR7" : "GR5";
+  const plank = bayLengthFt >= 10 ? "WP10" : bayLengthFt >= 8 ? "WP8" : "WP7";
+  return { frame, frame5, frame3, brace, guardrail, plank };
 }
 
 export function saveActiveProject(project: ProjectRecord) {

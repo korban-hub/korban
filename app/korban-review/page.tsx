@@ -221,7 +221,7 @@ export default function KorbanReviewPage() {
               onClick={() => router.push("/estimate-review")}
               className="rounded-lg bg-orange-500 px-4 py-2 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
             >
-              Complete bid
+              Estimate
             </button>
           </div>
         </div>

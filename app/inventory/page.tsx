@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { getFirstElevation, listProjects, type ProjectRecord } from "@/lib/projectStore";
+import { getFirstElevation, listProjects, readLedger, type ProjectRecord } from "@/lib/projectStore";
 import { getBackendSettings, type StockItem } from "@/lib/backendStore";
 
 const menuLinks: KorbanMenuLink[] = [
@@ -24,17 +24,6 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/projects", label: "Bid Log" },
   { href: "/backend", label: "Backend" },
 ];
-
-/** Which engine count commits which part. Mirrors the load list. */
-const QUANTITY_SOURCE: Record<string, string> = {
-  FO6L3: "frameCount",
-  WP10: "plankCount",
-  B82: "crossBraceCount",
-  GR8: "guardrailCount",
-  BP1: "basePlateCount",
-  AL1S: "screwJackCount",
-  CPS: "couplingPinCount",
-};
 
 const CATEGORY_ORDER = [
   "Frames",
@@ -70,20 +59,17 @@ export default function InventoryPage() {
     return () => window.removeEventListener("focus", load);
   }, [load]);
 
-  /** What each part is committed to, project by project. */
+  /**
+   * What each part is committed to, project by project - read from each
+   * project's ledger rather than inferred from its width.
+   */
   const allocations = useMemo(() => {
     const map = new Map<string, { projectName: string; qty: number }[]>();
     projects.forEach((project) => {
-      const engine = (getFirstElevation(project)?.quantityEngine ?? {}) as unknown as Record<
-        string,
-        number
-      >;
-      Object.entries(QUANTITY_SOURCE).forEach(([partNo, key]) => {
-        const qty = engine[key] ?? 0;
-        if (qty <= 0) return;
-        const list = map.get(partNo) ?? [];
-        list.push({ projectName: project.projectName, qty });
-        map.set(partNo, list);
+      readLedger(getFirstElevation(project)).forEach((row) => {
+        const list = map.get(row.partNo) ?? [];
+        list.push({ projectName: project.projectName, qty: row.qty });
+        map.set(row.partNo, list);
       });
     });
     return map;
@@ -344,10 +330,8 @@ export default function InventoryPage() {
               ) : (
                 <div className="grid gap-1">
                   {projects.map((project) => {
-                    const engine = (getFirstElevation(project)?.quantityEngine ??
-                      {}) as unknown as Record<string, number>;
-                    const pieces = Object.values(QUANTITY_SOURCE).reduce(
-                      (sum, key) => sum + (engine[key] ?? 0),
+                    const pieces = readLedger(getFirstElevation(project)).reduce(
+                      (sum, row) => sum + row.qty,
                       0
                     );
                     return (
@@ -362,7 +346,7 @@ export default function InventoryPage() {
                           {pieces > 0 ? (
                             pieces.toLocaleString()
                           ) : (
-                            <span className="text-zinc-700">no takeoff</span>
+                            <span className="text-zinc-700">no parts yet</span>
                           )}
                         </span>
                       </div>

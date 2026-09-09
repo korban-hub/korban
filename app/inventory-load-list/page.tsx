@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
+import { getActiveElevation, getActiveProject, readLedger } from "@/lib/projectStore";
 import { getBackendSettings, type StockItem } from "@/lib/backendStore";
 
 const menuLinks: KorbanMenuLink[] = [
@@ -25,19 +25,6 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/estimate-review", label: "Estimate Review" },
   { href: "/inventory", label: "Company Inventory" },
 ];
-
-/**
- * Which engine count fills which line. Frame and plank part numbers depend on
- * the scaffold width chosen in Set Scaffold, so those resolve at read time
- * rather than being fixed here.
- */
-const FIXED_SOURCE: Record<string, string> = {
-  B82: "crossBraceCount",
-  GR8: "guardrailCount",
-  BP1: "basePlateCount",
-  AL1S: "screwJackCount",
-  CPS: "couplingPinCount",
-};
 
 type LoadKind = "New Build" | "Add On" | "Return" | "Net Rental";
 const LOAD_KINDS: LoadKind[] = ["New Build", "Add On", "Return", "Net Rental"];
@@ -78,8 +65,8 @@ export default function LoadListPage() {
     name: "", jobNo: "", address: "", customer: "", contact: "",
   });
   const [stock, setStock] = useState<StockItem[]>([]);
-  const [engine, setEngine] = useState<Record<string, number>>({});
-  const [scaffoldWidth, setScaffoldWidth] = useState(3);
+  /** What Set Scaffold wrote. Part numbers, not categories. */
+  const [ledger, setLedger] = useState<Record<string, number>>({});
   const [header, setHeader] = useState<LoadHeader>(EMPTY_HEADER);
   const [counts, setCounts] = useState<Counts>({});
 
@@ -94,8 +81,9 @@ export default function LoadListPage() {
         customer: active.customer,
         contact: active.contactName,
       });
-      setEngine((elevation.quantityEngine ?? {}) as unknown as Record<string, number>);
-      setScaffoldWidth(elevation.scaffoldInput?.scaffoldWidth ?? 3);
+      setLedger(
+        Object.fromEntries(readLedger(elevation).map((row) => [row.partNo, row.qty]))
+      );
       setStock(getBackendSettings().material.stock);
 
       const raw = window.localStorage.getItem(`${LOAD_KEY}:${active.projectId}`);
@@ -143,19 +131,14 @@ export default function LoadListPage() {
     persist(header, next);
   }
 
-  /** The frame part number this job actually uses, by scaffold width. */
-  const dynamicSource = useMemo(() => {
-    const framePart = scaffoldWidth >= 5 ? "FO6L" : scaffoldWidth >= 3.5 ? "FO6L42" : "FO6L3";
-    return { [framePart]: "frameCount", WP10: "plankCount" } as Record<string, string>;
-  }, [scaffoldWidth]);
-
+  /**
+   * Straight from the ledger. This page used to infer a frame size from
+   * scaffold width, which was right until a job mixed widths and then
+   * silently wrong. Set Scaffold knows; this page reads.
+   */
   const ordered = useCallback(
-    (item: StockItem) => {
-      if (!item.partNo) return 0;
-      const key = FIXED_SOURCE[item.partNo] ?? dynamicSource[item.partNo];
-      return key ? engine[key] ?? 0 : 0;
-    },
-    [engine, dynamicSource]
+    (item: StockItem) => (item.partNo ? ledger[item.partNo] ?? 0 : 0),
+    [ledger]
   );
 
   const columns = useMemo(
@@ -389,8 +372,8 @@ export default function LoadListPage() {
 
           {totals.ord === 0 && (
             <p className="font-mono text-[10px] leading-[1.6] text-zinc-700">
-              Nothing ordered yet. Quantities fill in from the takeoff - this sheet never
-              estimates ahead of the measurement.
+              Nothing ordered yet. Parts fill in once Set Scaffold has a configuration -
+              this sheet never estimates ahead of the measurement.
             </p>
           )}
         </div>
