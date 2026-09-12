@@ -1244,7 +1244,44 @@ export function ledgerCount(elevation: ProjectElevation | null, partNo: string):
     .reduce((sum, row) => sum + row.qty, 0);
 }
 
-/** Which frame, plank and brace a given width and bay length call for. */
+/** Bay lengths a fixed cross brace is made in. Anything else is a bastard bay. */
+export const STANDARD_BAY_LENGTHS = [4, 5, 6, 7, 8, 10];
+
+/**
+ * The cross brace for a bay, which depends on two things, not one.
+ *
+ * A brace part number carries the bay length and the frame height it braces:
+ * B104 is a ten-foot bay on a 6'-4" frame, B102 the same bay on a 3' frame.
+ * The 02 series is for 3' frames; 5' and 6'-4" frames both take the 04 series.
+ *
+ * This matters because a leg is rarely one height all the way up. One 6'-4"
+ * plus one 3' takes a B104 and a B102, not two of either - so braces are
+ * counted jump by jump against that jump's frame, never as one part times a
+ * total. Getting this wrong put the wrong brace on every mixed-makeup job.
+ */
+export function braceForBay(bayLengthFt: number, frameHeightFt: number): string {
+  const series = frameHeightFt < 4 ? "2" : "4";
+  const length =
+    bayLengthFt >= 10 ? "10" :
+    bayLengthFt >= 8 ? "8" :
+    bayLengthFt >= 7 ? "7" :
+    bayLengthFt >= 6 ? "6" :
+    bayLengthFt >= 5 ? "5" : "4";
+  return `B${length}${series}`;
+}
+
+/** True when a bay can be closed with a fixed brace rather than guardrail. */
+export function isStandardBay(bayLengthFt: number, tolerance = 0.1): boolean {
+  return STANDARD_BAY_LENGTHS.some((len) => Math.abs(len - bayLengthFt) <= tolerance);
+}
+
+/** The largest standard bay that fits inside a distance. Null if none does. */
+export function largestBayWithin(distanceFt: number): number | null {
+  const fits = STANDARD_BAY_LENGTHS.filter((len) => len <= distanceFt + 0.1);
+  return fits.length ? Math.max(...fits) : null;
+}
+
+/** Which frame, plank, brace and rail a given configuration calls for. */
 export function partsForConfiguration(scaffoldWidth: number, bayLengthFt: number) {
   const frame =
     scaffoldWidth >= 5 ? "FO6L" : scaffoldWidth >= 3.5 ? "FO6L42" : "FO6L3";
@@ -1252,11 +1289,13 @@ export function partsForConfiguration(scaffoldWidth: number, bayLengthFt: number
     scaffoldWidth >= 5 ? "FM5" : scaffoldWidth >= 3.5 ? "FO5L42" : "FO5L3";
   const frame3 =
     scaffoldWidth >= 5 ? "FM3" : scaffoldWidth >= 3.5 ? "FM342" : "FM33";
-  // Braces span the bay, so the bay length names the part.
-  const brace = bayLengthFt >= 10 ? "B102" : bayLengthFt >= 8 ? "B82" : bayLengthFt >= 7 ? "B72" : "B52";
+  // Braces below assume a full-height frame. Mixed makeups resolve per jump
+  // through braceForBay, which is what Set Scaffold uses.
+  const brace = braceForBay(bayLengthFt, 6.333);
+  const braceShort = braceForBay(bayLengthFt, 3);
   const guardrail = bayLengthFt >= 10 ? "GR10" : bayLengthFt >= 8 ? "GR8" : bayLengthFt >= 7 ? "GR7" : "GR5";
   const plank = bayLengthFt >= 10 ? "WP10" : bayLengthFt >= 8 ? "WP8" : "WP7";
-  return { frame, frame5, frame3, brace, guardrail, plank };
+  return { frame, frame5, frame3, brace, braceShort, guardrail, plank };
 }
 
 export function saveActiveProject(project: ProjectRecord) {

@@ -7,7 +7,7 @@ export {
 } from "./KorbanHeader";
 export { KorbanPanel } from "./KorbanPanel";
 export { KorbanMetricTile } from "./KorbanMetricTile";
-export { KorbanGuidance, type KorbanGuidanceFlag, type KorbanGuidanceStep } from "./KorbanGuidance";
+export { KorbanGuidance, type KorbanGuidanceAccent, type KorbanGuidanceFlag, type KorbanGuidanceStep } from "./KorbanGuidance";
 export {
   KorbanEngineeringWorkspace,
   KorbanViewerFrame,

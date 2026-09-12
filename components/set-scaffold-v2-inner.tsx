@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -113,77 +113,192 @@ function planksPerBay(width: ScaffoldWidth): number {
   return planksPerBayForWidth(parseFt(width));
 }
 
-// ── Leg computation — NO orphan legs ─────────────────────────────────────────
+// ── Leg computation ──────────────────────────────────────────────────────────
+//
+// Built to KORBAN-Scaffold-Geometry-Rules. In short:
+//
+//   A tick always points square at the wall in front of it - never a bisector.
+//   Every corner carries an invisible stop at frameWidth + 1' along each wall,
+//   and no leg lands past it. Runs resolve in order, each starting at its free
+//   corner and marching toward the junction, so the remainder lands where it
+//   can be judged rather than in the middle of a wall.
+//
+//   A run marches at bay length until 10' or less remains, then finishes:
+//   exactly 10' takes a leg on the boundary; between 8' and 10' takes the
+//   largest standard brace that fits; 8' or under is planked across to the
+//   perpendicular leg, which Cal-OSHA allows unbraced.
+//
+//   Anything that is not a standard brace length is a bastard bay and takes
+//   guardrail instead of a fixed brace. That is a different part, not just a
+//   different spacing.
+
+/** A jog shallower than this is absorbed - the run carries straight past. */
+const JOG_TOLERANCE_FT = 8 / 12;
+
+/**
+ * How a span is closed. Three different things, and they buy different material.
+ *
+ *   braced  - a standard bay. Leg at each end, fixed cross braces.
+ *   bastard - a real bay at a length no brace is made for. Leg at each end,
+ *             guardrail instead of braces.
+ *   rail    - not a bay at all. No far leg. Plank and rail stretched to the
+ *             perpendicular leg that starts the next run.
+ *
+ * The last one is the point. A leg is a full stack of frames from grade to
+ * working height, so railing across a six-foot gap on a sixty-foot building
+ * saves ten frames and everything that goes with them. It is what a crew
+ * would do, and it is preferred rather than tolerated.
+ */
+export type BayKind = "braced" | "bastard" | "rail";
+
+export type BaySpan = { segIndex: number; lengthFt: number; kind: BayKind };
+
+/**
+ * Collapses jogs the scaffold would not follow.
+ *
+ * A traced perimeter carries every bump in the building. Real scaffold runs
+ * straight past anything under eight inches - it is inside the standoff
+ * anyway. At eight inches the run breaks and picks up the new wall line.
+ */
+function simplifyOutline(outline: PlanPoint[], puf: number): PlanPoint[] {
+  if (outline.length < 3 || puf <= 0) return outline;
+  const tolerance = JOG_TOLERANCE_FT * puf;
+  const kept: PlanPoint[] = [];
+
+  for (let i = 0; i < outline.length; i++) {
+    const prev = kept.length ? kept[kept.length - 1] : outline[(i - 1 + outline.length) % outline.length];
+    const vertex = outline[i];
+    const next = outline[(i + 1) % outline.length];
+
+    // Perpendicular distance from this vertex to the line prev->next. If the
+    // building only steps out by a few inches, the scaffold does not notice.
+    const dx = next.x - prev.x, dy = next.y - prev.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) { kept.push(vertex); continue; }
+    const deviation = Math.abs((vertex.x - prev.x) * dy - (vertex.y - prev.y) * dx) / len;
+
+    if (deviation >= tolerance) kept.push(vertex);
+  }
+
+  return kept.length >= 3 ? kept : outline;
+}
+
 function computeLegs(
   outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
   placement: "exterior" | "interior" = "exterior",
-): { segIndex: number; legs: LegResult[] }[] {
-  const results: { segIndex: number; legs: LegResult[] }[] = [];
-  for (let i = 0; i < outline.length; i++) {
-    const start = outline[i], end = outline[(i + 1) % outline.length];
-    const dx = end.x - start.x, dy = end.y - start.y;
-    const segLen = Math.sqrt(dx * dx + dy * dy);
-    if (segLen <= 0 || puf <= 0 || bayFt <= 0) { results.push({ segIndex: i, legs: [] }); continue; }
-    const along = { x: dx / segLen, y: dy / segLen };
-    const normal = computeOutwardNormal(start, end, outline, placement);
-    const bayPx = bayFt * puf;
-    const wallGap = 1 * puf;
-    const tickLen = widthFt * puf;
-    const labelOff = wallGap + tickLen + puf * 1.4;
+): { segIndex: number; legs: LegResult[]; bays: BaySpan[] }[] {
+  const raw = outline;
+  const shape = simplifyOutline(outline, puf);
+  const n = shape.length;
+  if (n < 2 || puf <= 0 || bayFt <= 0) {
+    return raw.map((_, i) => ({ segIndex: i, legs: [], bays: [] }));
+  }
 
-    function makeLeg(dist: number, isStart = false, isEnd = false): LegResult {
-      const d = Math.max(0, Math.min(dist, segLen));
-      const wp = { x: start.x + along.x * d + normal.x * wallGap, y: start.y + along.y * d + normal.y * wallGap };
-      const tp = { x: start.x + along.x * d + normal.x * (wallGap + tickLen), y: start.y + along.y * d + normal.y * (wallGap + tickLen) };
-      const lp = { x: start.x + along.x * d + normal.x * labelOff, y: start.y + along.y * d + normal.y * labelOff };
-      return { wallPoint: wp, tickTip: tp, labelPoint: lp, isTurnaroundMirror: false, isStartLeg: isStart, isEndLeg: isEnd };
+  const wallGap = 1 * puf;
+  const tickLen = widthFt * puf;
+  const labelOff = wallGap + tickLen + puf * 1.4;
+  const bayPx = bayFt * puf;
+  // The invisible stop. A leg may sit on it, never past it.
+  const stopPx = (widthFt + 1) * puf;
+
+  const results: { segIndex: number; legs: LegResult[]; bays: BaySpan[] }[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const start = shape[i];
+    const end = shape[(i + 1) % n];
+    const dx = end.x - start.x, dy = end.y - start.y;
+    const segLen = Math.hypot(dx, dy);
+    if (segLen <= 0) { results.push({ segIndex: i, legs: [], bays: [] }); continue; }
+
+    const along = { x: dx / segLen, y: dy / segLen };
+    // Square at the wall in front of it. Every leg on this wall, including the
+    // ones at either end - which is what makes a corner read as an L.
+    const normal = computeOutwardNormal(start, end, shape, placement);
+
+    function legAt(dist: number, isStart = false, isEnd = false): LegResult {
+      const base = { x: start.x + along.x * dist, y: start.y + along.y * dist };
+      return {
+        wallPoint: { x: base.x + normal.x * wallGap, y: base.y + normal.y * wallGap },
+        tickTip: { x: base.x + normal.x * (wallGap + tickLen), y: base.y + normal.y * (wallGap + tickLen) },
+        labelPoint: { x: base.x + normal.x * labelOff, y: base.y + normal.y * labelOff },
+        isTurnaroundMirror: false,
+        isStartLeg: isStart,
+        isEndLeg: isEnd,
+      };
     }
 
     const legs: LegResult[] = [];
-    // Corner offset = scaffoldWidth + wallOffset (1') past each corner
-    const cornerOffPx = (widthFt + 1) * puf;
+    const bays: BaySpan[] = [];
 
-    // Start leg placed cornerOffPx past the start corner
-    legs.push(makeLeg(cornerOffPx, true, false));
+    // Runs resolve alternately from each end so a remainder lands at a
+    // junction rather than mid-wall. Even walls start at the head, odd walls
+    // are measured from the tail - the practical form of "never start a run
+    // next to a final leg".
+    const fromHead = i % 2 === 0;
+    const runStart = stopPx;
+    const runEnd = segLen - stopPx;
+    const runLen = runEnd - runStart;
 
-    // Bay legs from cornerOffPx + bayPx onward
-    // End of segment is segLen - cornerOffPx (mirror of start)
-    const runEnd = segLen - cornerOffPx;
-    let cursor = cornerOffPx + bayPx;
-    let safetyLimit = 0;
-    while (cursor < runEnd - puf * 0.1 && safetyLimit < 500) {
-      const remaining = runEnd - cursor;
-      if (remaining > 0 && remaining < bayPx * 0.5) break;
-      legs.push(makeLeg(cursor, false, false));
-      cursor += bayPx;
-      safetyLimit++;
+    if (runLen < 0) {
+      // Wall shorter than two stops. One leg, centred, and planked both ways.
+      legs.push(legAt(segLen / 2, true, true));
+      bays.push({ segIndex: i, lengthFt: segLen / puf, kind: "rail" });
+      results.push({ segIndex: i, legs, bays });
+      continue;
     }
 
-    // End leg at cornerOffPx from end corner — mirrors start. Only
-    // skipped if the run is too short to place it at all without
-    // overlapping the start leg (not "not comfortably longer" — that
-    // was silently dropping legitimate corner ticks on shorter walls).
-    if (runEnd > 0) {
-      const lastLeg = legs[legs.length - 1];
-      const lastPos = lastLeg ? Math.sqrt(
-        (lastLeg.wallPoint.x - start.x - normal.x * wallGap) ** 2 +
-        (lastLeg.wallPoint.y - start.y - normal.y * wallGap) ** 2
-      ) : 0;
-      if (Math.abs(lastPos - runEnd) > puf * 0.1) {
-        legs.push(makeLeg(runEnd, false, true));
+    const positions: number[] = [];
+    let cursor = fromHead ? runStart : runEnd;
+    positions.push(cursor);
+    let guard = 0;
+
+    while (guard++ < 500) {
+      const remaining = fromHead ? runEnd - cursor : cursor - runStart;
+      const remainingFt = remaining / puf;
+
+      // Still a full bay's worth of wall and more. March on.
+      if (remainingFt > 10 + 0.1) {
+        cursor += fromHead ? bayPx : -bayPx;
+        positions.push(cursor);
+        bays.push({ segIndex: i, lengthFt: bayFt, kind: isStandardBay(bayFt) ? "braced" : "bastard" });
+        continue;
       }
+
+      // Terminating. Eight feet or less rails across - no leg, which is the
+      // whole saving. Anything more takes the largest brace that fits and
+      // whatever is left after that rails across instead.
+      if (remainingFt <= 8 + 0.05) {
+        if (remainingFt > 0.05) bays.push({ segIndex: i, lengthFt: remainingFt, kind: "rail" });
+        break;
+      }
+
+      const bay = largestBayWithin(remainingFt);
+      if (bay === null) {
+        bays.push({ segIndex: i, lengthFt: remainingFt, kind: "rail" });
+        break;
+      }
+      cursor += fromHead ? bay * puf : -bay * puf;
+      positions.push(cursor);
+      bays.push({ segIndex: i, lengthFt: bay, kind: "braced" });
+
+      const left = (fromHead ? runEnd - cursor : cursor - runStart) / puf;
+      if (left > 0.05) bays.push({ segIndex: i, lengthFt: left, kind: "rail" });
+      break;
     }
 
-    // Filter legs inside polygon — but never filter out the mandatory
-    // corner (start/end) ticks this way. That check is meant to hide
-    // ordinary mid-run bay ticks that fall inside a notch elsewhere in
-    // the building; at a concave corner, the same whole-polygon test
-    // can wrongly flag a perfectly correct corner tick as "inside"
-    // simply because it's testing against the far wing of the
-    // building, not the local wall. Corner ticks are required by the
-    // frame-width-plus-1' rule regardless of local concavity.
-    const filtered = legs.filter(l => isFinitePoint(l.tickTip) && (l.isStartLeg || l.isEndLeg || !pointInPolygon(l.tickTip, outline)));
-    results.push({ segIndex: i, legs: filtered });
+    positions.sort((a, b) => a - b);
+    positions.forEach((d, index) => {
+      legs.push(legAt(d, index === 0, index === positions.length - 1));
+    });
+
+    results.push({ segIndex: i, legs: legs.filter(l => isFinitePoint(l.tickTip)), bays });
+  }
+
+  // Callers index by the original outline. Anything the simplifier absorbed
+  // reports empty rather than disappearing out from under them.
+  if (shape.length !== raw.length) {
+    const padded = raw.map((_, i) => results[i] ?? { segIndex: i, legs: [], bays: [] });
+    return padded;
   }
   return results;
 }
@@ -214,7 +329,6 @@ function ScaffoldModel3D({
     // render loop is technically still running. The resize observer
     // below corrects the real size as soon as layout settles.
     const initialW = W || 400, initialH = H || 300;
-    console.log("[3D model] mounting scene", { measuredW: W, measuredH: H, usingW: initialW, usingH: initialH });
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x080604);
@@ -231,14 +345,14 @@ function ScaffoldModel3D({
     // (heaviest compositing feature, common trigger on flaky drivers),
     // no shadow maps, pixel ratio capped at 1, low-power GPU preference
     // (avoids discrete-GPU driver bugs on Windows laptops/desktops), and
-    // preserveDrawingBuffer to force a stable backbuffer instead of the
-    // fast-swap path some drivers white-out on.
+    // Default swap behaviour. preserveDrawingBuffer used to be set here so
+    // frames could be read back out with toDataURL - that readback was what
+    // froze the browser, so both are gone.
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: false,
         powerPreference: "low-power",
-        preserveDrawingBuffer: true,
         failIfMajorPerformanceCaveat: false,
       });
     } catch (err) {
@@ -441,7 +555,6 @@ function ScaffoldModel3D({
     let angle = Math.atan2(camDist, camDist);
     let isRotating = true;
     let zoomFactor = 1;
-    let debugFrameCount = 0;
     (mountRef.current as any).__setRotating = (v: boolean) => { isRotating = v; };
     (mountRef.current as any).__setZoomFactor = (z: number) => { zoomFactor = z; };
     (mountRef.current as any).__snapshot = () => renderer.domElement.toDataURL("image/png");
@@ -452,10 +565,6 @@ function ScaffoldModel3D({
       // the browser console whether this loop is actually running and
       // what isRotating/angle actually are, instead of guessing again.
       // Safe to remove once rotation is confirmed working.
-      debugFrameCount++;
-      if (debugFrameCount % 120 === 0) {
-        console.log("[3D model animate loop]", { isRotating, angle: angle.toFixed(3), zoomFactor, frame: debugFrameCount });
-      }
       if (isRotating) {
         angle += 0.004;
         camera.position.set(
@@ -478,13 +587,6 @@ function ScaffoldModel3D({
       // live WebGL canvases is broken (confirmed: the Capture PNG shows a
       // perfect scene while the on-screen canvas displays blank white; the
       // GPU draws fine, only the final canvas→screen step fails). Ordinary
-      // <img> elements display flawlessly, so every 5th frame (~12fps) the
-      // finished frame is copied into an <img> overlaying the canvas.
-      // Rotation stays visibly smooth; requires preserveDrawingBuffer.
-      if (debugFrameCount % 5 === 0) {
-        const img = (mountRef.current as any)?.__mirrorImg as HTMLImageElement | undefined;
-        if (img) img.src = renderer.domElement.toDataURL("image/jpeg", 0.85);
-      }
     }
     animate();
 
@@ -537,17 +639,17 @@ function ScaffoldModel3D({
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#080604]" style={{ minHeight: 0 }}>
-        {/* The live canvas mounts in here but is visually hidden — this
-            machine's compositing shows it as blank white even though the
-            GPU draws it perfectly (proven via Capture). */}
-        <div ref={mountRef} className="absolute inset-0 opacity-0" />
-        {/* Mirror image — receives the rendered frames (~12fps) and
-            displays them the way this machine handles correctly. */}
-        <img
-          ref={el => { if (mountRef.current) (mountRef.current as any).__mirrorImg = el; }}
-          alt="3D scaffold model"
-          className="pointer-events-none absolute inset-0 h-full w-full object-contain"
-        />
+        {/*
+          * The canvas, shown directly.
+          *
+          * This used to be hidden behind an <img> that received a JPEG of
+          * every fifth frame, as a workaround for one machine's compositing.
+          * toDataURL forces a full GPU readback and a JPEG encode on the main
+          * thread - twelve times a second, on a scene with hundreds of meshes.
+          * That is what was freezing the browser and warping the model, and no
+          * compositing bug is worth paying that.
+          */}
+        <div ref={mountRef} className="absolute inset-0" />
       </div>
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
         <button onClick={() => setZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold flex-shrink-0">−</button>
@@ -886,6 +988,22 @@ export default function SetScaffoldV2Inner() {
   const [showOverlay,    setShowOverlay]    = useState(true);
   const [showScaffold,   setShowScaffold]   = useState(true);
   const [editMode,       setEditMode]       = useState(false);
+  /** Point-to-point measuring on the plan. A read, never an edit. */
+  const [measureMode,    setMeasureMode]    = useState(false);
+  const [measureFrom,    setMeasureFrom]    = useState<PlanPoint|null>(null);
+  const [measureTo,      setMeasureTo]      = useState<PlanPoint|null>(null);
+  const [measurements,   setMeasurements]   = useState<{ a: PlanPoint; b: PlanPoint; ft: number }[]>([]);
+  /**
+   * Runs drawn by hand. Anywhere the traced outline does not describe - a
+   * courtyard face, a canopy line, a return the plan does not show - gets
+   * drawn here and counts exactly like a wall does.
+   */
+  const [addRunMode,     setAddRunMode]     = useState(false);
+  const [runStart,       setRunStart]       = useState<PlanPoint|null>(null);
+  const [runEnd,         setRunEnd]         = useState<PlanPoint|null>(null);
+  const [pendingRun,     setPendingRun]     = useState<{ a: PlanPoint; b: PlanPoint }|null>(null);
+  const [pendingHeight,  setPendingHeight]  = useState("");
+  const [drawnRuns,      setDrawnRuns]      = useState<{ id: string; a: PlanPoint; b: PlanPoint; heightFt: number; flipped: boolean }[]>([]);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
   const [sectionExpanded, setSectionExpanded] = useState(false);
   // Estimate depth gates which views are available here. Quick Bid shows
@@ -899,8 +1017,6 @@ export default function SetScaffoldV2Inner() {
   const [viewerZoom,     setViewerZoom]     = useState(1);
   const [viewerPan,      setViewerPan]      = useState({ dx: 0, dy: 0 });
   const [isPanning,      setIsPanning]      = useState(false);
-  const [debugSvgClicks, setDebugSvgClicks] = useState(0);
-  const [debugTickClicks, setDebugTickClicks] = useState(0);
   const [elevation,      setElevation]      = useState<ProjectElevation | null>(null);
   const [projectName,    setProjectName]    = useState(projectInfo.projectName);
   const [mounted,        setMounted]        = useState(false);
@@ -1183,8 +1299,84 @@ export default function SetScaffoldV2Inner() {
     panning: boolean;
     lastPos: { x: number; y: number } | null;
   }>({ draggingKey: null, panning: false, lastPos: null });
-  const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline });
-  liveRef.current = { editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline };
+  /**
+   * Pulls a drawn endpoint onto the existing layout.
+   *
+   * A run drawn to roughly the end of a wall should meet it exactly, because
+   * that junction is where the corner rules apply. Snapping to legs and to
+   * other drawn ends is what lets two drawn runs turn a corner properly
+   * instead of nearly touching.
+   */
+  function snapToLayout(pt: PlanPoint): PlanPoint {
+    const radius = Math.max(effPuf * 3, 6);
+    let best: { pt: PlanPoint; dist: number } | null = null;
+    const consider = (c: PlanPoint) => {
+      const dist = Math.hypot(c.x - pt.x, c.y - pt.y);
+      if (dist <= radius && (!best || dist < best.dist)) best = { pt: c, dist };
+    };
+    allSegmentLegs.forEach(seg => seg.legs.forEach(l => consider(l.wallPoint)));
+    drawnRuns.forEach(r => { consider(r.a); consider(r.b); });
+    outline.forEach(consider);
+    return best ? best.pt : pt;
+  }
+
+  /**
+   * Legs along a drawn run.
+   *
+   * Same rules as a wall - first leg on the invisible stop, march at bay
+   * length, rail across anything eight feet or under. The difference is that
+   * a drawn run has no building to take its side from, so the side comes from
+   * the direction it was drawn and can be flipped.
+   */
+  const drawnRunLegs = useMemo(() => {
+    if (!scaleOk || effPuf <= 0 || bayLengthFt <= 0) return [];
+    const wallGap = 1 * effPuf;
+    const tickLen = scaffoldWidthFt * effPuf;
+    const stopPx = (scaffoldWidthFt + 1) * effPuf;
+    const bayPx = bayLengthFt * effPuf;
+
+    return drawnRuns.map(run => {
+      const dx = run.b.x - run.a.x, dy = run.b.y - run.a.y;
+      const len = Math.hypot(dx, dy);
+      if (len <= 0) return { id: run.id, legs: [] as LegResult[], lengthFt: 0 };
+      const along = { x: dx / len, y: dy / len };
+      // Right of travel, unless flipped. No building to ask, so the draw
+      // direction decides and the estimator corrects it if it is wrong.
+      const side = run.flipped ? -1 : 1;
+      const normal = { x: -along.y * side, y: along.x * side };
+
+      const positions: number[] = [];
+      let cursor = stopPx;
+      const last = len - stopPx;
+      let guard = 0;
+      while (cursor <= last + 0.01 && guard++ < 400) {
+        positions.push(cursor);
+        const remainingFt = (last - cursor) / effPuf;
+        if (remainingFt <= 8 + 0.05) break;
+        const bay = largestBayWithin(Math.min(remainingFt, bayLengthFt));
+        cursor += (bay ?? bayLengthFt) * effPuf;
+      }
+      if (positions.length === 0) positions.push(len / 2);
+
+      const legs: LegResult[] = positions.map((d, idx) => {
+        const base = { x: run.a.x + along.x * d, y: run.a.y + along.y * d };
+        return {
+          wallPoint: { x: base.x + normal.x * wallGap, y: base.y + normal.y * wallGap },
+          tickTip: { x: base.x + normal.x * (wallGap + tickLen), y: base.y + normal.y * (wallGap + tickLen) },
+          labelPoint: { x: base.x + normal.x * (wallGap + tickLen + effPuf), y: base.y + normal.y * (wallGap + tickLen + effPuf) },
+          isTurnaroundMirror: false,
+          isStartLeg: idx === 0,
+          isEndLeg: idx === positions.length - 1,
+        };
+      });
+      return { id: run.id, legs, lengthFt: len / effPuf };
+    });
+  }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt]);
+
+  const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
+                           measureMode, measureFrom, addRunMode, runStart });
+  liveRef.current = { editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
+                      measureMode, measureFrom, addRunMode, runStart };
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -1223,13 +1415,33 @@ export default function SetScaffoldV2Inner() {
     }
 
     function onPointerDown(e: PointerEvent) {
-      setDebugSvgClicks(n => n + 1);
       const pt = toViewBox(e);
       dragStateRef.current.lastPos = { x: pt.x, y: pt.y };
+
+      // Measuring and drawing take the click before anything that pans or
+      // moves a leg, so neither can be triggered by accident mid-task.
+      if (liveRef.current.measureMode) {
+        const from = liveRef.current.measureFrom;
+        if (!from) { setMeasureFrom({ x: pt.x, y: pt.y }); setMeasureTo(null); return; }
+        const puf = liveRef.current.effPuf;
+        const ft = puf > 0 ? Math.hypot(pt.x - from.x, pt.y - from.y) / puf : 0;
+        setMeasurements(prev => [...prev, { a: from, b: { x: pt.x, y: pt.y }, ft: parseFloat(ft.toFixed(2)) }]);
+        setMeasureFrom(null); setMeasureTo(null);
+        return;
+      }
+
+      if (liveRef.current.addRunMode) {
+        const snapped = snapToLayout({ x: pt.x, y: pt.y });
+        const start = liveRef.current.runStart;
+        if (!start) { setRunStart(snapped); setRunEnd(null); return; }
+        setPendingRun({ a: start, b: snapped });
+        setRunStart(null); setRunEnd(null);
+        return;
+      }
+
       if (liveRef.current.editMode) {
         const hit = findNearestLeg(pt);
         if (hit) {
-          setDebugTickClicks(n => n + 1);
           setSelectedLegKey(hit);
           dragStateRef.current.draggingKey = hit;
           setDraggedLegKey(hit);
@@ -1388,11 +1600,58 @@ export default function SetScaffoldV2Inner() {
     }
 
     entries.push({ partNo: parts.plank, qty: qe.plankCount });
-    entries.push({ partNo: parts.brace, qty: qe.crossBraceCount });
+
+    /*
+     * Braces, jump by jump. A brace part carries both the bay length and the
+     * frame it braces - B104 is a ten-foot bay on a 6'-4" frame, B102 the same
+     * bay on a 3'. A leg of one tall frame and one short one needs both, so
+     * counting one part times the total put the wrong brace on every job with
+     * a mixed makeup.
+     */
+    const bracesPerBayPerJump =
+      (getBackendSettings()?.scaffold as Record<string, number | undefined> | undefined)
+        ?.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
+    const bayCount = qe.bayCount ?? 0;
+    if (makeup.length > 0 && bayCount > 0) {
+      makeup.forEach((piece) => {
+        const heightFt = piece.label.startsWith("6") ? 6.333 : piece.label.startsWith("5") ? 5 : 3;
+        entries.push({
+          partNo: braceForBay(si.standardBayLength, heightFt),
+          qty: bayCount * piece.qty * bracesPerBayPerJump,
+          note: `${piece.label} jumps`,
+        });
+      });
+    } else {
+      entries.push({ partNo: parts.brace, qty: qe.crossBraceCount });
+    }
     entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount });
     entries.push({ partNo: "BP1", qty: qe.basePlateCount });
     entries.push({ partNo: "AL1S", qty: qe.screwJackCount });
     entries.push({ partNo: "CPS", qty: qe.couplingPinCount ?? 0 });
+
+    /*
+     * Drawn runs are runs. Their legs, frames and decks count exactly as a
+     * traced wall's do - they are written under their own source so they can
+     * be recomputed without disturbing anything else, but they land in the
+     * same totals and on the same load list.
+     */
+    const drawnLegs = drawnRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
+    if (drawnLegs > 0) {
+      const drawnJumps = drawnRuns.reduce((sum, run) => {
+        const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
+        const mk = computeFrameMakeup(Math.max(0, run.heightFt - reach), si.screwJackMaxExtension ?? 18);
+        return sum + Math.max(1, mk.frameTall);
+      }, 0) / Math.max(1, drawnRuns.length);
+      const jumps = Math.max(1, Math.round(drawnJumps));
+      const drawnBays = Math.max(0, drawnLegs - drawnRuns.length);
+      entries.push({ partNo: parts.frame, qty: drawnLegs * jumps, note: "drawn runs" });
+      entries.push({ partNo: "BP1", qty: drawnLegs, note: "drawn runs" });
+      entries.push({ partNo: "AL1S", qty: drawnLegs, note: "drawn runs" });
+      if (drawnBays > 0) {
+        entries.push({ partNo: parts.plank, qty: drawnBays * planksPerBayForWidth(si.scaffoldWidth) * jumps, note: "drawn runs" });
+        entries.push({ partNo: braceForBay(si.standardBayLength, 6.333), qty: drawnBays * jumps * bracesPerBayPerJump, note: "drawn runs" });
+      }
+    }
 
     // Anything dropped onto the section drawing is real material too.
     const drafted = el.sectionView?.draftingAdditions ?? [];
@@ -1497,6 +1756,16 @@ export default function SetScaffoldV2Inner() {
             }
             if (outline.length < 3) {
               flags.push({ tone: "warn", text: "No traced plan on this elevation. I am working from a fallback shape, which is fine for looking at and wrong for pricing." });
+            }
+            // Two runs turning into the same notch need room for both.
+            const minNotch = (scaffoldWidthFt + 1) * 2;
+            const tightNotch = outline.length >= 4 && outline.some((v, idx) => {
+              const next = outline[(idx + 1) % outline.length];
+              const len = Math.hypot(next.x - v.x, next.y - v.y) / Math.max(effPuf, 0.0001);
+              return len > 0 && len < minNotch;
+            });
+            if (tightNotch) {
+              flags.push({ tone: "warn", text: `There is a wall shorter than ${minNotch}' on this outline. Two runs turning into it would need ${minNotch}' between them, so check that corner before it goes out - it may want a tube-and-clamp return instead of frames.` });
             }
             if (placement === "interior") {
               flags.push({ tone: "note", text: "Interior placement puts the legs inside the traced line. Check the corners - an inside corner needs different clearance than an outside one." });
@@ -1642,7 +1911,23 @@ export default function SetScaffoldV2Inner() {
               <div className="flex items-center gap-1.5">
                 <button onClick={() => setShowOverlay(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay ? "border-blue-500/40 bg-blue-500/10 text-blue-300" : "border-zinc-800 text-zinc-600"}`}>Overlay</button>
                 <button onClick={() => setShowScaffold(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600"}`}>Scaffold</button>
-                <button onClick={() => setEditMode(m => !m)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "✓ Editing" : "Edit Bay"}</button>
+                <button onClick={() => { setEditMode(m => !m); setMeasureMode(false); setAddRunMode(false); }} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "\u2713 Editing" : "Edit Bay"}</button>
+                <button onClick={() => { setAddRunMode(m => !m); setEditMode(false); setMeasureMode(false); setRunStart(null); setRunEnd(null); }}
+                  title="Draw a run anywhere on the plan"
+                  className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${addRunMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
+                  {addRunMode ? "Drawing..." : "+ Add Run"}
+                </button>
+                <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureFrom(null); setMeasureTo(null); }}
+                  disabled={!scaleOk}
+                  title={scaleOk ? "Measure between two points" : "No scale on this elevation"}
+                  className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${measureMode ? "border-cyan-400/60 bg-cyan-400/15 text-cyan-300" : "border-zinc-700 text-zinc-400 hover:border-cyan-400/40"}`}>
+                  Measure
+                </button>
+                {measurements.length > 0 && (
+                  <button onClick={() => setMeasurements([])} className="rounded-lg border border-zinc-800 px-2 py-1 text-[9px] text-zinc-500 hover:text-white">
+                    Clear {measurements.length}
+                  </button>
+                )}
                 <div className="flex items-center gap-1">
                   <button onClick={() => setViewerZoom(z => Math.max(0.2, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">−</button>
                   <span className="text-[9px] font-mono text-zinc-600 w-9 text-center">{Math.round(viewerZoom * 100)}%</span>
@@ -1663,12 +1948,81 @@ export default function SetScaffoldV2Inner() {
                 </div>
               </div>
             )}
-            {/* TEMPORARY DEBUG BADGE — shows click counts directly on screen, no console needed. Safe to remove once the click bug is resolved. */}
-            <div className="absolute top-2 right-2 z-40 rounded-lg border border-yellow-500/50 bg-black/90 px-3 py-2 text-[10px] font-mono pointer-events-none">
-              <p className="text-yellow-300 font-bold">DEBUG</p>
-              <p className="text-zinc-300">SVG background clicks: <span className="text-white font-bold">{debugSvgClicks}</span></p>
-              <p className="text-zinc-300">Tick clicks: <span className="text-white font-bold">{debugTickClicks}</span></p>
-            </div>
+            {/* A drawn run is not a run until it has a height - that is what
+                decides how many frames go in each leg. */}
+            {pendingRun && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70">
+                <div className="w-72 rounded-xl border border-orange-500/40 bg-korban-raised p-4">
+                  <p className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-orange-300">
+                    New run
+                  </p>
+                  <p className="mt-1 text-[11px] leading-[1.5] text-zinc-500">
+                    {Math.round(Math.hypot(pendingRun.b.x - pendingRun.a.x, pendingRun.b.y - pendingRun.a.y) / Math.max(effPuf, 0.0001))}
+                    &apos; long. How tall does it stand?
+                  </p>
+                  <input
+                    autoFocus
+                    value={pendingHeight}
+                    onChange={e => setPendingHeight(e.target.value.replace(/[^0-9.]/g, ""))}
+                    onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                    placeholder="Height in feet"
+                    className="mt-2 w-full rounded-lg border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-[13px] font-bold text-orange-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/50"
+                  />
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={() => { setPendingRun(null); setPendingHeight(""); }}
+                      className="flex-1 rounded-lg border border-zinc-800 py-1.5 font-mono text-[10px] text-zinc-500 hover:text-zinc-300"
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={() => {
+                        const h = parseFloat(pendingHeight) || 0;
+                        if (h <= 0) return;
+                        setDrawnRuns(prev => [...prev, {
+                          id: `run-${Date.now().toString(36)}`,
+                          a: pendingRun.a, b: pendingRun.b, heightFt: h, flipped: false,
+                        }]);
+                        setPendingRun(null); setPendingHeight("");
+                      }}
+                      className="flex-1 rounded-lg bg-orange-500 py-1.5 font-mono text-[10px] font-bold text-black hover:bg-orange-400"
+                    >
+                      Add run
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Drawn runs, listed so they can be flipped or removed. */}
+            {drawnRuns.length > 0 && (
+              <div className="absolute bottom-2 left-2 z-40 max-w-[220px] rounded-lg border border-zinc-800 bg-black/90 p-2">
+                <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-zinc-600">
+                  Drawn runs
+                </p>
+                {drawnRuns.map(run => (
+                  <div key={run.id} className="flex items-center gap-2 border-t border-zinc-900 py-1 first:border-0">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-zinc-400">
+                      {Math.round(drawnRunLegs.find(r => r.id === run.id)?.lengthFt ?? 0)}&apos; x {run.heightFt}&apos;
+                    </span>
+                    <button
+                      onClick={() => setDrawnRuns(prev => prev.map(r => r.id === run.id ? { ...r, flipped: !r.flipped } : r))}
+                      title="Put the legs on the other side"
+                      className="font-mono text-[9px] text-zinc-600 hover:text-orange-300"
+                    >
+                      flip
+                    </button>
+                    <button
+                      onClick={() => setDrawnRuns(prev => prev.filter(r => r.id !== run.id))}
+                      className="font-mono text-[10px] text-zinc-700 hover:text-red-400"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Decorative grid — MUST be pointer-events-none: it's absolutely
                 positioned, which paints it ABOVE the static-flow svg per CSS
                 stacking rules. Without this, it invisibly covers the whole
@@ -1706,6 +2060,47 @@ export default function SetScaffoldV2Inner() {
               ))}
 
               {/* Scaffold ticks */}
+              {/* Drawn runs, their legs, and the two tools. */}
+              {drawnRuns.map(run => {
+                const computed = drawnRunLegs.find(r => r.id === run.id);
+                return (
+                  <g key={run.id}>
+                    <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
+                      stroke="#f97316" strokeWidth={1.2} strokeDasharray="4,3" opacity="0.55" />
+                    {computed?.legs.map((leg, i) => (
+                      <line key={i} x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
+                        stroke="#f97316" strokeWidth={2} strokeLinecap="round" />
+                    ))}
+                    <text x={(run.a.x+run.b.x)/2} y={(run.a.y+run.b.y)/2-4} textAnchor="middle"
+                      fontSize="4.5" fill="#f97316" fontFamily="monospace"
+                      stroke="#000" strokeWidth="1.4" paintOrder="stroke">
+                      {Math.round(computed?.lengthFt ?? 0)}&apos; x {run.heightFt}&apos;
+                    </text>
+                  </g>
+                );
+              })}
+
+              {runStart && runEnd && (
+                <line x1={runStart.x} y1={runStart.y} x2={runEnd.x} y2={runEnd.y}
+                  stroke="#f97316" strokeWidth={1.4} strokeDasharray="3,2" />
+              )}
+
+              {measurements.map((m, i) => (
+                <g key={`meas${i}`}>
+                  <line x1={m.a.x} y1={m.a.y} x2={m.b.x} y2={m.b.y} stroke="#22d3ee" strokeWidth={1.2} />
+                  <circle cx={m.a.x} cy={m.a.y} r={1.6} fill="#22d3ee" />
+                  <circle cx={m.b.x} cy={m.b.y} r={1.6} fill="#22d3ee" />
+                  <text x={(m.a.x+m.b.x)/2} y={(m.a.y+m.b.y)/2-3} textAnchor="middle"
+                    fontSize="4.5" fill="#22d3ee" fontFamily="monospace" fontWeight="bold"
+                    stroke="#000" strokeWidth="1.4" paintOrder="stroke">{m.ft}&apos;</text>
+                </g>
+              ))}
+
+              {measureFrom && measureTo && (
+                <line x1={measureFrom.x} y1={measureFrom.y} x2={measureTo.x} y2={measureTo.y}
+                  stroke="#22d3ee" strokeWidth={1.2} strokeDasharray="3,2" />
+              )}
+
               {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs }) => {
                 const segStart = outline[segIndex], segEnd = outline[(segIndex + 1) % outline.length];
                 if (!segStart || !segEnd) return null;
@@ -1789,7 +2184,7 @@ export default function SetScaffoldV2Inner() {
             {/* Edit popup — HTML overlay with real HTML buttons. The old
                 version drew this inside the SVG with SVG onClick handlers,
                 which provably never fire in this environment (HTML buttons
-                do — verified with the debug counters). Positioned by
+                do). Positioned by
                 converting the selected tick's viewBox coords to container
                 pixels with the same letterbox-aware transform the native
                 hit-testing uses. */}

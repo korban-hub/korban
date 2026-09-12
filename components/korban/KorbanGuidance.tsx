@@ -39,17 +39,61 @@ export type KorbanGuidanceStep = {
   done: boolean;
 };
 
+/**
+ * Two voices, two colours.
+ *
+ * Orange is Korban telling you what to do next. Amber is Korban telling you
+ * what it has noticed. Side by side they need to be distinguishable at a
+ * glance, or an estimator reads an observation as an instruction.
+ */
+const ACCENTS = {
+  orange: {
+    border: "border-orange-500/35",
+    bg: "bg-orange-500/[0.05]",
+    floatBg: "rgba(20,14,8,0.92)",
+    glow: "bg-orange-500/20",
+    dot: "bg-orange-500",
+    title: "text-orange-300",
+    rule: "border-orange-500/15",
+    stepTitle: "text-orange-200",
+    barDone: "bg-orange-500",
+    barCurrent: "bg-orange-500/40",
+    whyRule: "border-orange-500/40",
+  },
+  amber: {
+    border: "border-amber-400/40",
+    bg: "bg-amber-400/[0.06]",
+    floatBg: "rgba(22,18,6,0.92)",
+    glow: "bg-amber-400/20",
+    dot: "bg-amber-400",
+    title: "text-amber-200",
+    rule: "border-amber-400/15",
+    stepTitle: "text-amber-100",
+    barDone: "bg-amber-400",
+    barCurrent: "bg-amber-400/40",
+    whyRule: "border-amber-400/40",
+  },
+} as const;
+
+export type KorbanGuidanceAccent = keyof typeof ACCENTS;
+
 export function KorbanGuidance({
   flags = [],
   steps = [],
   title = "Be advised",
+  accent = "orange",
   className = "",
+  onDismiss,
 }: {
   flags?: KorbanGuidanceFlag[];
   steps?: KorbanGuidanceStep[];
   title?: string;
+  accent?: KorbanGuidanceAccent;
   className?: string;
+  /** Shown as a close control when supplied. Advice you cannot dismiss is nagging. */
+  onDismiss?: () => void;
 }) {
+  const tone = ACCENTS[accent];
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
@@ -133,7 +177,7 @@ export function KorbanGuidance({
   return (
     <div
       ref={panel}
-      className={`overflow-hidden rounded-xl border border-orange-500/35 bg-orange-500/[0.05] p-3.5 backdrop-blur-sm ${
+      className={`overflow-hidden rounded-xl border ${tone.border} ${tone.bg} p-3.5 backdrop-blur-sm ${
         floating ? "shadow-2xl" : ""
       } ${className}`}
       style={
@@ -144,14 +188,14 @@ export function KorbanGuidance({
               top: position.y,
               width: 320,
               zIndex: 60,
-              background: "rgba(20,14,8,0.92)",
+              background: tone.floatBg,
             }
           : { position: "relative" }
       }
     >
       <span
         aria-hidden
-        className="korban-guidance-glow pointer-events-none absolute -left-8 top-1/2 h-24 w-24 -translate-y-1/2 rounded-full bg-orange-500/20 blur-2xl"
+        className={`korban-guidance-glow pointer-events-none absolute -left-8 top-1/2 h-24 w-24 -translate-y-1/2 rounded-full ${tone.glow} blur-2xl`}
       />
 
       <div
@@ -162,22 +206,32 @@ export function KorbanGuidance({
         }`}
       >
         <span className="relative flex h-1.5 w-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-500 opacity-70" />
-          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-orange-500" />
+          <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${tone.dot} opacity-70`} />
+          <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${tone.dot}`} />
         </span>
-        <p className="flex-1 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-orange-300">
+        <p className={`flex-1 font-mono text-[10px] font-bold uppercase tracking-[0.16em] ${tone.title}`}>
           {title}
         </p>
         {floating ? (
           <button
             onPointerDown={(event) => event.stopPropagation()}
             onClick={() => setPosition(null)}
-            className="font-mono text-[9px] text-zinc-500 transition hover:text-orange-300"
+            className="font-mono text-[9px] text-zinc-500 transition hover:text-zinc-300"
           >
             dock
           </button>
         ) : (
           <span className="font-mono text-[9px] text-zinc-700">drag</span>
+        )}
+        {onDismiss && (
+          <button
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={onDismiss}
+            aria-label={`Dismiss ${title}`}
+            className="ml-1 font-mono text-[12px] leading-none text-zinc-600 transition hover:text-zinc-200"
+          >
+            &times;
+          </button>
         )}
       </div>
 
@@ -189,7 +243,7 @@ export function KorbanGuidance({
                 key={step.id}
                 title={step.title}
                 className={`h-1 flex-1 rounded-full transition ${
-                  step.done ? "bg-orange-500" : step.id === current?.id ? "bg-orange-500/40" : "bg-zinc-800"
+                  step.done ? tone.barDone : step.id === current?.id ? tone.barCurrent : "bg-zinc-800"
                 }`}
               />
             ))}
@@ -200,10 +254,10 @@ export function KorbanGuidance({
 
           {current ? (
             <>
-              <p className="text-[12px] font-semibold text-orange-200">{current.title}</p>
+              <p className={`text-[12px] font-semibold ${tone.stepTitle}`}>{current.title}</p>
               <p className="mt-1 text-[12px] leading-relaxed text-zinc-300">{current.body}</p>
               {current.why && (
-                <p className="mt-1.5 border-l-2 border-orange-500/40 pl-2 text-[11px] leading-relaxed text-zinc-500">
+                <p className={`mt-1.5 border-l-2 ${tone.whyRule} pl-2 text-[11px] leading-relaxed text-zinc-500`}>
                   {current.why}
                 </p>
               )}
@@ -217,7 +271,7 @@ export function KorbanGuidance({
       )}
 
       {flags.length > 0 && (
-        <div className={`relative space-y-2 ${steps.length > 0 ? "mt-3 border-t border-orange-500/15 pt-2.5" : "mt-2.5"}`}>
+        <div className={`relative space-y-2 ${steps.length > 0 ? `mt-3 border-t ${tone.rule} pt-2.5` : "mt-2.5"}`}>
           {flags.map((flag, index) => (
             <p
               key={`${flag.text.slice(0, 24)}-${index}`}

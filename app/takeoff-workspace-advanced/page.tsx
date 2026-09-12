@@ -81,7 +81,20 @@ const SECTION_LABELS = ["A-A","B-B","C-C","D-D"];
 // Clockwise order
 const ELEVATION_DIRS = ["North","East","South","West"];
 
-const LEVEL_COLORS   = ["#f97316","#22c55e","#f59e0b","#a855f7"];
+/**
+ * Level colours.
+ *
+ * The old set put orange next to amber, which on a dark plan at low zoom is
+ * the same colour twice. These are spaced around the wheel so two traces are
+ * never mistaken for each other, and any of them can be changed per level.
+ */
+const LEVEL_COLORS = ["#f97316","#22d3ee","#a855f7","#84cc16","#fb7185","#fbbf24"];
+
+/** What a level can be changed to. Fixed, so the drawing stays coherent. */
+const LEVEL_PALETTE = [
+  "#f97316","#fb923c","#fbbf24","#84cc16","#22c55e","#14b8a6",
+  "#22d3ee","#60a5fa","#a855f7","#e879f9","#fb7185","#f4f4f5",
+];
 
 function getFrameParts(width: ScaffoldWidth): FrameItem[] {
   const framePartNo = width==="5'"?"FO6L":width==="3'-6\""?"FO6L42":"FO6L3";
@@ -183,6 +196,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [guideHidden,    setGuideHidden]    = useState(false);
   const [pdfDoc,         setPdfDoc]         = useState<any>(null);
   const [pdfLib,         setPdfLib]         = useState<any>(null);
+  /** The original upload, kept so an image can be re-rotated from source. */
+  const [imageSource,    setImageSource]    = useState<string>("");
   const [pdfLoading,     setPdfLoading]     = useState(false);
   const [currentPageNo,  setCurrentPageNo]  = useState(1);
   const [pageNoInput,    setPageNoInput]    = useState("1");
@@ -190,6 +205,26 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [viewerUrl,      setViewerUrl]      = useState("");
   const [renderingPage,  setRenderingPage]  = useState(false);
   const [viewerZoom,     setViewerZoom]     = useState(0.65);
+  /**
+   * Sheet rotation, in degrees. Applied when the page is rendered rather than
+   * by spinning the image in CSS - a CSS rotation would leave every traced
+   * point and scale line pointing at the old orientation.
+   */
+  const [rotation,       setRotation]       = useState(0);
+  /** The sheet's own pixel size. Everything on the page is measured in these. */
+  const [naturalSize,    setNaturalSize]    = useState({ w: 0, h: 0 });
+  /** What the cursor would snap to right now, so the user sees it before clicking. */
+  const [snapPreview,    setSnapPreview]    = useState<{ pt: Pt; kind: "ref" | "corner" } | null>(null);
+  /** Which level's colour swatch is open. */
+  const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
+  /** Point-to-point measuring. Independent of everything else on the sheet. */
+  const [measureMode,    setMeasureMode]    = useState(false);
+  const [measureFrom,    setMeasureFrom]    = useState<Pt|null>(null);
+  const [measureTo,      setMeasureTo]      = useState<Pt|null>(null);
+  const [measurements,   setMeasurements]   = useState<{ a: Pt; b: Pt; ft: number }[]>([]);
+  /** Advice you cannot close is nagging. Both panels dismiss independently. */
+  const [walkthroughHidden, setWalkthroughHidden] = useState(false);
+  const [readsItHidden,     setReadsItHidden]     = useState(false);
   const [extractedPages, setExtractedPages] = useState<ExtractedPage[]>([]);
   const [activeExtracted,setActiveExtracted]= useState<ExtractedPage|null>(null);
 
@@ -266,9 +301,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setPdfLib(lib); return lib;
   }
 
-  async function renderPage(pdf:any, n:number, sc:number): Promise<string> {
+  async function renderPage(pdf:any, n:number, sc:number, rot:number = rotation): Promise<string> {
     const page=await pdf.getPage(n);
-    const vp=page.getViewport({ scale:sc });
+    const vp=page.getViewport({ scale:sc, rotation:rot });
     const canvas=document.createElement("canvas");
     canvas.width=vp.width; canvas.height=vp.height;
     const ctx=canvas.getContext("2d")!;
@@ -284,12 +319,42 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const vw = containerRect.width - 64, vh = containerRect.height - 64;
     const iw = imgRef.current.naturalWidth, ih = imgRef.current.naturalHeight;
     if (!iw || !ih || vw <= 0 || vh <= 0) { setViewerZoom(0.65); return; }
-    const fit = Math.min(vw / iw, vh / ih);
+    // A hair under a true fit so the sheet does not touch the panel edges.
+    const fit = Math.min(vw / iw, vh / ih) * 0.98;
     setViewerZoom(fit > 0 && isFinite(fit) ? fit : 0.65);
   }
 
-  // Pages open at the 65% default; use the "Fit" button to fit manually.
-  function handleImgLoad() {}
+  /**
+   * Records the sheet's own pixel size, which everything else is measured in.
+   *
+   * onLoad alone is not enough: a cached image is already decoded by the time
+   * React attaches the handler, so the event never fires and the size stays at
+   * zero - which made the zoom silently do nothing on any page viewed twice.
+   * The effect below covers that case.
+   */
+  function handleImgLoad() {
+    const img = imgRef.current;
+    if (!img || !img.naturalWidth) return;
+    setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
+  }
+
+  useEffect(() => {
+    if (!viewerUrl) { setNaturalSize({ w: 0, h: 0 }); return; }
+    let cancelled = false;
+    // Decoded already? Take it now. Otherwise measure it off-document, which
+    // works whether the browser serves it from cache or the network.
+    const current = imgRef.current;
+    if (current?.complete && current.naturalWidth) {
+      setNaturalSize({ w: current.naturalWidth, h: current.naturalHeight });
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      if (!cancelled) setNaturalSize({ w: probe.naturalWidth, h: probe.naturalHeight });
+    };
+    probe.src = viewerUrl;
+    return () => { cancelled = true; };
+  }, [viewerUrl]);
 
   const handleFile = useCallback(async (file:File) => {
     if (!file) return;
@@ -300,6 +365,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     try {
       if (isImg) {
         const url=URL.createObjectURL(file);
+        setImageSource(url);
         setViewerUrl(url); setTotalPages(1);
       } else {
         const lib=await getPdfLib();
@@ -310,6 +376,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
       }
     } catch(e) { console.error(e); } finally { setPdfLoading(false); }
   },[pdfLib]);
+
+  /** Turns the sheet a quarter at a time and re-renders at the new angle. */
+  async function rotateSheet() {
+    const next = (rotation + 90) % 360;
+    setRotation(next);
+    if (pdfDoc) {
+      setRenderingPage(true);
+      try { setViewerUrl(await renderPage(pdfDoc, currentPageNo, 1.2, next)); }
+      catch {} finally { setRenderingPage(false); }
+      return;
+    }
+    if (!imageSource) return;
+    // An uploaded image has no viewport of its own, so it goes through a
+    // canvas - the pixels themselves turn, and the coordinates follow.
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const swap = next === 90 || next === 270;
+      canvas.width  = swap ? img.height : img.width;
+      canvas.height = swap ? img.width  : img.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((next * Math.PI) / 180);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      setViewerUrl(canvas.toDataURL("image/jpeg", 0.9));
+    };
+    img.src = imageSource;
+  }
 
   async function goToPage(n:number) {
     if (!pdfDoc||renderingPage) return;
@@ -370,10 +464,54 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const scale=tabScales[activeTab];
   function setScale(u:Partial<ScaleState>) { setTabScales(p=>({...p,[activeTab]:{...p[activeTab],...u}})); }
 
+  /**
+   * Screen position to page position.
+   *
+   * Measured against the sheet's actual rendered size rather than against a
+   * zoom number, so it stays correct however the panel is sized and whatever
+   * else changes on screen. A scale locked at one zoom holds at every other.
+   */
+  /**
+   * Pulls a picked point onto something already on the drawing.
+   *
+   * Hitting the exact centre of a reference point set two levels ago is
+   * neither pleasant nor necessary - a column is a column. Two kinds of
+   * target, drawn differently so it is always clear which one caught:
+   * a reference point on another level, or a corner of a trace.
+   */
+  function snapPoint(pt: Pt, excludeLevelId?: string): { pt: Pt; kind: "ref" | "corner" | null } {
+    const radius = 12 / Math.max(viewerZoom, 0.05); // constant on screen
+    let best: { pt: Pt; kind: "ref" | "corner"; dist: number } | null = null;
+
+    const consider = (candidate: Pt, kind: "ref" | "corner") => {
+      const dist = Math.hypot(candidate.x - pt.x, candidate.y - pt.y);
+      if (dist > radius) return;
+      // A reference point wins a tie - it is the thing being lined up.
+      if (!best || dist < best.dist || (dist === best.dist && kind === "ref")) {
+        best = { pt: candidate, kind, dist };
+      }
+    };
+
+    floorLevels.forEach((lvl) => {
+      if (lvl.id === excludeLevelId) return;
+      if (lvl.refPoint) consider(lvl.refPoint, "ref");
+    });
+    floorLevels.forEach((lvl) => lvl.tracePoints.forEach((p) => consider(p, "corner")));
+
+    return best ? { pt: best.pt, kind: best.kind } : { pt, kind: null };
+  }
+
   function getImgPt(e:React.MouseEvent): Pt|null {
-    if (!imgRef.current) return null;
-    const r=imgRef.current.getBoundingClientRect();
-    return { x:(e.clientX-r.left)/viewerZoom, y:(e.clientY-r.top)/viewerZoom };
+    const img = imgRef.current;
+    if (!img) return null;
+    const r = img.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const natW = img.naturalWidth || r.width;
+    const natH = img.naturalHeight || r.height;
+    return {
+      x: (e.clientX - r.left) * (natW / r.width),
+      y: (e.clientY - r.top) * (natH / r.height),
+    };
   }
 
   function lockScale() {
@@ -439,10 +577,35 @@ export default function TakeoffWorkspaceAdvancedPage() {
     return { lf, heightFt, frameTall, legs, bayCount };
   }
 
+  /**
+   * Copies a traced outline onto another level.
+   *
+   * Floors repeat far more often than they differ, and re-tracing a shape you
+   * have already drawn is both slow and a chance to draw it slightly wrong.
+   * The copy is taken once and is editable afterwards - a live link would mean
+   * changing one floor silently changed another.
+   */
+  function duplicateOutline(fromId: string, toId: string) {
+    const src = floorLevels.find(l => l.id === fromId);
+    if (!src || src.tracePoints.length < 3) return;
+    setFloorLevels(prev => prev.map(l => l.id === toId ? {
+      ...l,
+      tracePoints: src.tracePoints.map(p => ({ ...p })),
+      traceClosed: src.traceClosed,
+      traceMode: false,
+      refPoint: src.refPoint ? { ...src.refPoint } : l.refPoint,
+      linealFeet: src.linealFeet,
+      stored: false,
+    } : l));
+  }
+
   function duplicateElevation(from:string, to:string) {
     const src=elevData.find(e=>e.direction===from);
     if (!src) return;
-    const next=elevData.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:false})) }:ed);
+    // A duplicate is a copy of something already gripped, so it arrives
+    // stored. Making the estimator click Store on work they did not redo was
+    // busywork.
+    const next=elevData.map(ed=>ed.direction===to?{ ...ed, areas:src.areas.map(a=>({...a,id:`${to}-${a.areaIndex}-${Date.now()}`,stored:true})) }:ed);
     setElevData(next);
     // Persist immediately with the fresh array - duplicating and then
     // needing a separate Store click afterward (which could read stale
@@ -519,10 +682,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
   // -- Viewer mouse handlers --------------------------------------------------
   function handleViewerMouseDown(e:React.MouseEvent<HTMLDivElement>) {
     const pt=getImgPt(e); if(!pt) return;
+
+    // Measuring is a read, not an edit, so it takes the click before any
+    // mode that would change the drawing.
+    if (measureMode) {
+      const snapped = snapPoint(pt).pt;
+      if (!measureFrom) { setMeasureFrom(snapped); setMeasureTo(null); return; }
+      const puf = scale.pageUnitsPerFoot;
+      const ft = puf > 0 ? Math.hypot(snapped.x-measureFrom.x, snapped.y-measureFrom.y)/puf : 0;
+      setMeasurements(prev => [...prev, { a: measureFrom, b: snapped, ft: parseFloat(ft.toFixed(2)) }]);
+      setMeasureFrom(null); setMeasureTo(null);
+      return;
+    }
+
     // Reference-point pick takes priority over every other mode - one
     // click sets the anchor for that level and exits pick mode.
     if (refPickLevelId) {
-      setFloorLevels(prev=>prev.map(l=>l.id===refPickLevelId?{...l,refPoint:pt,stored:false}:l));
+      const snapped = snapPoint(pt, refPickLevelId ?? undefined);
+      setFloorLevels(prev=>prev.map(l=>l.id===refPickLevelId?{...l,refPoint:snapped.pt,stored:false}:l));
       setRefPickLevelId(null);
       return;
     }
@@ -544,6 +721,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   function handleViewerMouseMove(e:React.MouseEvent<HTMLDivElement>) {
+    if (refPickLevelId || measureMode) {
+      const raw = getImgPt(e);
+      if (raw) {
+        const snapped = snapPoint(raw, refPickLevelId ?? undefined);
+        setSnapPreview(snapped.kind ? { pt: snapped.pt, kind: snapped.kind } : null);
+        if (measureMode && measureFrom) setMeasureTo(snapped.pt);
+      }
+    } else if (snapPreview) {
+      setSnapPreview(null);
+    }
     if (!gripMode||!gripStart) return;
     const pt=getImgPt(e); if(pt) setGripCurrent(pt);
   }
@@ -737,6 +924,76 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setActiveSection(id);
   }
 
+  /**
+   * Which control the walkthrough is currently talking about. The step text
+   * says what to do; this makes the thing itself glow, so an estimator does
+   * not have to hunt the screen for the button being described.
+   */
+  const currentGuide = (() => {
+    if (depthTab === "quick-bid" || guideHidden || walkthroughHidden) return null;
+    if (!viewerUrl) return "upload";
+    if (!scale.locked) return "scale";
+    if (!floorLevels.some(l=>l.tracePoints.length>=3)) return "trace";
+    if (!floorLevels.every(l=>l.refPoint)) return "reference-point";
+    if (!elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0))) return "grip";
+    if (!overlayStored && !elevStored) return "store";
+    if (depthTab === "korban-bid" && !sections.some(sec => sec.wallComplete)) return "section";
+    return null;
+  })();
+
+  /**
+   * What Korban has noticed, as opposed to what it is telling you to do next.
+   * Built here rather than inline so the walkthrough row can sit it alongside
+   * - two voices, side by side, in different colours so an observation never
+   * reads as an instruction.
+   */
+  const korbanReadsIt = (() => {
+    if (depthTab !== "korban-bid" || readsItHidden) return null;
+    const flags: KorbanGuidanceFlag[] = [];
+        const traced = floorLevels.filter(l=>l.tracePoints.length>=3);
+        const grippedFaces = elevData.filter(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
+        const sectioned = sections.filter(s=>s.wallComplete);
+
+        if (!scale.locked && viewerUrl) {
+          flags.push({ tone:"warn", text:"Scale is not locked on this sheet. Nothing measured here means anything until it is." });
+        }
+        if (traced.length>0 && traced.some(l=>!l.refPoint)) {
+          const missing = traced.filter(l=>!l.refPoint).length;
+          flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
+        }
+        if (grippedFaces.length>0 && sectioned.length===0) {
+          flags.push({ tone:"note", text:"Elevations are gripped but no section is drawn. A section is what lets me check the frame configuration against the actual wall rather than assuming it." });
+        }
+        if (traced.length>1 && grippedFaces.length===0) {
+          flags.push({ tone:"note", text:"Floors are traced but nothing is gripped yet. Plan geometry gives me the shape; grips give me the height." });
+        }
+        if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
+          flags.push({ tone:"warn", text:"A section has no wall height, so its frame count falls back to one per leg. Set Top of Wall on that section." });
+        }
+        if (courtyards.length>0 && !includeCourtyards) {
+          flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
+        }
+        if (flags.length===0 && grippedFaces.length>0) {
+          flags.push({ tone:"note", text:"Nothing disagrees. Scale, geometry and sections all line up - this is as tight as a bid gets before the crew arrives." });
+        }
+        // An empty job still deserves an answer. Silence reads as broken.
+        if (flags.length===0) {
+          flags.push({ tone:"note", text: viewerUrl
+            ? "Plans are open and nothing is measured yet. Set the scale, trace the floor, grip the faces that need coverage - I'll tell you when something stops adding up."
+            : "Nothing loaded yet. Upload the plan set and I'll follow along from there, flagging anything that doesn't agree with itself." });
+        }
+
+    return (
+      <KorbanGuidance
+        flags={flags}
+        title="Korban reads it"
+        accent="amber"
+        className="w-full sm:w-[300px]"
+        onDismiss={() => setReadsItHidden(true)}
+      />
+    );
+  })();
+
   const tabPages=extractedPages.filter(p=>p.tag===TAB_TAGS[activeTab]);
   const activeSec=sections.find(s=>s.id===activeSection)??sections[0];
   // Zone-aware face list: either the building's elevations or the active
@@ -764,6 +1021,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-[#080604] text-white">
+      <style>{`
+        /* A slow breath on whatever the guide is pointing at. Fast enough to
+           find, slow enough not to nag. */
+        @keyframes korbanGuideGlow {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(249,115,22,0); border-color: rgba(249,115,22,0.45); }
+          50% { box-shadow: 0 0 0 4px rgba(249,115,22,0.18); border-color: rgba(249,115,22,0.95); }
+        }
+        .korban-guide-glow {
+          animation: korbanGuideGlow 2.6s ease-in-out infinite;
+          position: relative;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .korban-guide-glow { animation: none; border-color: rgba(249,115,22,0.8); }
+        }
+      `}</style>
       <KorbanHeader
         title="Takeoff Workspace"
         subtitle={projectName||"Advanced Takeoff"}
@@ -841,7 +1113,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
       </div>
       )}
 
-      {depthTab==="full-bid" && (() => {
+      {depthTab!=="quick-bid" && (() => {
         const anyTraced = floorLevels.some(l=>l.tracePoints.length>=3);
         const allRefs   = floorLevels.length>0 && floorLevels.every(l=>l.refPoint);
         const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
@@ -865,13 +1137,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
             why:"The grip measures height. Height is what decides how many frames go in each leg.",
             done: anyGrip },
           { id:"store", title:"Store the work",
-            body:"Store Overlay on the floor plan, Store Elevations on the elevations. Then Scaffold Layout.",
+            body:"Store Overlay on the floor plan, Store Elevations on the elevations.",
             done: overlayStored || elevStored },
         ];
-        if (guideHidden) return null;
+
+        /*
+         * Korban Bid does everything Full Bid does and then draws sections
+         * against the wall. Same walkthrough, one step longer - withholding
+         * the pointer from someone who chose the deeper tier made no sense.
+         */
+        if (depthTab === "korban-bid") {
+          steps.push({
+            id: "section",
+            title: "Draw the sections",
+            body: "Start Section View and trace the wall profile on each face that needs one.",
+            why: "A section is what lets me check the frame configuration against the real wall rather than assuming it. It is the difference between eight percent and three.",
+            done: sections.some(sec => sec.wallComplete),
+          });
+        }
+        if (guideHidden || walkthroughHidden) return null;
         return (
-          <div className="px-6 pt-3">
-            <KorbanGuidance steps={steps} title="Full Bid walkthrough" className="max-w-xl" />
+          <div className="flex flex-wrap items-start gap-3 px-6 pt-3">
+            <KorbanGuidance
+              steps={steps}
+              title={depthTab === "korban-bid" ? "Korban Bid walkthrough" : "Full Bid walkthrough"}
+              className="w-full sm:w-[340px]"
+              onDismiss={() => setWalkthroughHidden(true)}
+            />
+            {korbanReadsIt}
           </div>
         );
       })()}
@@ -881,46 +1174,6 @@ export default function TakeoffWorkspaceAdvancedPage() {
         * different from Full Bid's checklist: not "do this next" but "what you
         * have does not agree with itself yet".
         */}
-      {depthTab==="korban-bid" && (() => {
-        const flags: KorbanGuidanceFlag[] = [];
-        const traced = floorLevels.filter(l=>l.tracePoints.length>=3);
-        const grippedFaces = elevData.filter(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
-        const sectioned = sections.filter(s=>s.wallComplete);
-
-        if (!scale.locked && viewerUrl) {
-          flags.push({ tone:"warn", text:"Scale is not locked on this sheet. Nothing measured here means anything until it is." });
-        }
-        if (traced.length>0 && traced.some(l=>!l.refPoint)) {
-          const missing = traced.filter(l=>!l.refPoint).length;
-          flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
-        }
-        if (grippedFaces.length>0 && sectioned.length===0) {
-          flags.push({ tone:"note", text:"Elevations are gripped but no section is drawn. A section is what lets me check the frame configuration against the actual wall rather than assuming it." });
-        }
-        if (traced.length>1 && grippedFaces.length===0) {
-          flags.push({ tone:"note", text:"Floors are traced but nothing is gripped yet. Plan geometry gives me the shape; grips give me the height." });
-        }
-        if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
-          flags.push({ tone:"warn", text:"A section has no wall height, so its frame count falls back to one per leg. Set Top of Wall on that section." });
-        }
-        if (courtyards.length>0 && !includeCourtyards) {
-          flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
-        }
-        if (flags.length===0 && grippedFaces.length>0) {
-          flags.push({ tone:"note", text:"Nothing disagrees. Scale, geometry and sections all line up - this is as tight as a bid gets before the crew arrives." });
-        }
-        // An empty job still deserves an answer. Silence reads as broken.
-        if (flags.length===0) {
-          flags.push({ tone:"note", text: viewerUrl
-            ? "Plans are open and nothing is measured yet. Set the scale, trace the floor, grip the faces that need coverage - I'll tell you when something stops adding up."
-            : "Nothing loaded yet. Upload the plan set and I'll follow along from there, flagging anything that doesn't agree with itself." });
-        }
-        return (
-          <div className="px-6 pt-3">
-            <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-2xl" />
-          </div>
-        );
-      })()}
 
       {depthTab==="quick-bid" ? <QuickBidForm /> : (
       <div className="flex flex-1 overflow-hidden">
@@ -958,7 +1211,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         <section className="flex flex-1 flex-col overflow-hidden">
           {/* Toolbar */}
           <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-wrap">
-            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white">{pdfLoading?"Loading...":"Upload Plans"}</button>
+            <button data-guide="upload" onClick={()=>fileRef.current?.click()} className={`rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white ${currentGuide==="upload"?"korban-guide-glow":""}`}>{pdfLoading?"Loading...":"Upload Plans"}</button>
             <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
 
             {totalPages>1&&(
@@ -986,6 +1239,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
               <span className="text-[9px] font-mono text-zinc-600 w-8 text-center">{Math.round(viewerZoom*100)}%</span>
               <button onClick={()=>setViewerZoom(z=>Math.min(4,z+0.1))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
               <button onClick={fitToViewer} className="rounded border border-zinc-800 px-1.5 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+              {viewerUrl && (
+                <button
+                  onClick={rotateSheet}
+                  title="Rotate the page a quarter turn. Clears any points already picked on it."
+                  className="flex h-6 items-center gap-1 rounded border border-zinc-800 px-1.5 text-[9px] text-zinc-500 hover:border-zinc-600 hover:text-white"
+                >
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" aria-hidden>
+                    <path d="M9.5 4.5A4 4 0 1 0 10 7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                    <path d="M9.8 1.6v3h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  {rotation ? `${rotation}\u00b0` : "Rotate"}
+                </button>
+              )}
             </div>
 
             {viewerUrl&&<div className="h-4 w-px bg-zinc-800"/>}
@@ -1000,8 +1266,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
             {/* Scale */}
             {!scale.locked?(
               <>
+                <button
+                  onClick={()=>{ setMeasureMode(m=>!m); setMeasureFrom(null); setMeasureTo(null); }}
+                  disabled={!scale.locked}
+                  title={scale.locked?"Measure between two points":"Set a scale first"}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition disabled:opacity-30 ${measureMode?"border-cyan-400/60 bg-cyan-400/15 text-cyan-300":"border-zinc-700 text-zinc-400 hover:border-cyan-400/40"}`}
+                >
+                  Measure
+                </button>
+                {measurements.length>0&&(
+                  <button onClick={()=>setMeasurements([])}
+                    className="rounded-lg border border-zinc-800 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">
+                    Clear {measurements.length}
+                  </button>
+                )}
                 <button data-guide="scale" onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
-                  className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
+                  className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"} ${currentGuide==="scale"&&!scale.pickingPoint?"korban-guide-glow":""}`}>
                   &#10231; Scale {scale.pickingPoint?`- pt ${scale.pickingPoint}`:""}
                 </button>
                 {scale.point1&&scale.point2&&(
@@ -1027,7 +1307,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
               <>
                 <div className="h-4 w-px bg-zinc-800"/>
                 <button onClick={()=>setGripMode(m=>!m)}
-                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"} ${currentGuide==="grip"&&!gripMode?"korban-guide-glow":""}`}>
                   {gripMode?`Drag Area ${selectedArea} on ${selectedElev}`:"Add Grip"}
                 </button>
               </>
@@ -1054,33 +1334,42 @@ export default function TakeoffWorkspaceAdvancedPage() {
             )}
           </div>
 
+          {/*
+            * Scale warning. It used to float over the drawing, bright enough
+            * to compete with the thing it was warning about. It sits in the
+            * dark above the sheet now - still first thing you see, no longer
+            * covering the plan.
+            */}
+          {viewerUrl && !scale.locked && (
+            <div className="flex items-center gap-3 border-b border-yellow-500/20 bg-yellow-500/[0.06] px-3 py-2">
+              <span className="text-[13px] leading-none text-yellow-500/80">&#9888;</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-semibold text-yellow-300/90">
+                  Set scale before measuring
+                </p>
+                <p className="text-[10px] text-yellow-600/80">
+                  Click Scale, pick two points a known distance apart, then enter that distance.
+                </p>
+              </div>
+              <button
+                onClick={()=>setScale({pickingPoint:1,point1:null,point2:null})}
+                className={`shrink-0 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-1.5 text-[10px] font-bold text-yellow-300 transition hover:bg-yellow-500/20 ${
+                  currentGuide === "scale" ? "korban-guide-glow" : ""
+                }`}
+              >
+                Set Scale
+              </button>
+            </div>
+          )}
+
           {/* PDF Canvas */}
           <div ref={viewerRef}
-            className="relative flex-1 overflow-auto bg-zinc-950 flex items-start justify-center p-6"
+            className="relative flex-1 overflow-auto bg-zinc-950 p-6"
             onMouseDown={handleViewerMouseDown}
             onMouseMove={handleViewerMouseMove}
             onMouseUp={handleViewerMouseUp}
             onDoubleClick={handleViewerDblClick}
             style={{cursor:isCapturing?"crosshair":"default"}}>
-
-            {/* Scale required - pinned, unmissable. Nothing measured on this
-                tab means anything until scale is locked, so this stays until
-                it is. */}
-            {viewerUrl&&!scale.locked&&(
-              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center px-6 pt-3">
-                <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-yellow-500/50 bg-yellow-500/10 px-4 py-2.5 shadow-lg backdrop-blur-sm">
-                  <span className="text-base leading-none">&#9888;</span>
-                  <div>
-                    <p className="text-[11px] font-bold text-yellow-300">Set scale before measuring</p>
-                    <p className="text-[10px] text-yellow-500/80">Click <span className="font-bold">Scale</span>, pick two points a known distance apart, then enter that distance.</p>
-                  </div>
-                  <button onClick={()=>setScale({pickingPoint:1,point1:null,point2:null})}
-                    className="ml-1 rounded-lg bg-yellow-400 px-3 py-1.5 text-[10px] font-bold text-black transition hover:bg-yellow-300">
-                    Set Scale
-                  </button>
-                </div>
-              </div>
-            )}
 
             {!viewerUrl&&!pdfLoading&&(
               <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)handleFile(f);}}
@@ -1093,19 +1382,45 @@ export default function TakeoffWorkspaceAdvancedPage() {
             {pdfLoading&&<div className="flex h-full items-center justify-center"><p className="text-xs text-zinc-600">Opening...</p></div>}
 
             {viewerUrl&&(
-              <div className="relative" style={{transform:`scale(${viewerZoom})`,transformOrigin:"top center",userSelect:"none"}}>
+              /*
+               * One number drives the whole sheet.
+               *
+               * The wrapper is given a width; the image fills it and the
+               * overlay matches it. Nothing here waits on the image reporting
+               * its own size, because a cached image never fires onLoad and
+               * the zoom then had nothing to act on - which is exactly how it
+               * came to do nothing at all.
+               *
+               * The fallback width keeps zoom working from the first frame,
+               * before any measurement has arrived.
+               */
+              <div
+                className="relative mx-auto"
+                style={{
+                  userSelect: "none",
+                  width: (naturalSize.w || 1700) * viewerZoom,
+                }}
+              >
                 <img ref={imgRef} src={viewerUrl} alt="" draggable={false} onLoad={handleImgLoad}
-                  className="block rounded-lg shadow-2xl border border-zinc-800 select-none"
-                  style={{maxWidth:"100%",opacity:renderingPage?0.5:1,transition:"opacity 0.15s"}}/>
+                  className="block w-full rounded-lg shadow-2xl border border-zinc-800 select-none"
+                  style={{ height: "auto", opacity: renderingPage ? 0.5 : 1, transition: "opacity 0.15s" }}/>
 
-                <svg className="absolute inset-0 pointer-events-none overflow-visible"
-                  style={{width:imgRef.current?.clientWidth||"100%",height:imgRef.current?.clientHeight||"100%"}}>
+                {/*
+                  * Overlay draws in page units; the viewBox does the scaling.
+                  *
+                  * Pinned top-left rather than inset-0. Pinning all four edges
+                  * and then giving it a width makes the browser stretch it to
+                  * the parent instead, which skews the viewBox and puts every
+                  * click a long way from where it was made.
+                  */}
+                <svg className="pointer-events-none absolute left-0 top-0 h-full w-full overflow-visible"
+                  viewBox={naturalSize.w ? `0 0 ${naturalSize.w} ${naturalSize.h}` : undefined}>
 
                   {/* Floor traces */}
                   {activeTab==="floor"&&floorLevels.map(lvl=>{
                     if(lvl.tracePoints.length<1) return null;
                     const pts=[...lvl.tracePoints,...(lvl.traceClosed?[lvl.tracePoints[0]]:[])];
-                    const mk=1/viewerZoom; // counter-scale so markers stay a constant on-screen size at any zoom
+                    const mk=1/viewerZoom; // markers are in page units, so counter-scale to stay a constant on-screen size
                     return (
                       <g key={lvl.id}>
                         {lvl.tracePoints.length>=2&&(
@@ -1188,6 +1503,45 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </g>
                     );
                   })()}
+                  {/* Snap target. A reference point reads as a ring, a trace
+                      corner as a square, so it is never ambiguous which one
+                      caught the cursor. */}
+                  {snapPreview&&(refPickLevelId||measureMode)&&(()=>{ const mk=1/viewerZoom; const {x,y}=snapPreview.pt; return snapPreview.kind==="ref"?(
+                    <g key="snap">
+                      <circle cx={x} cy={y} r={7*mk} fill="none" stroke="#fbbf24" strokeWidth={1.6*mk}/>
+                      <circle cx={x} cy={y} r={2*mk} fill="#fbbf24"/>
+                    </g>
+                  ):(
+                    <g key="snap">
+                      <rect x={x-5*mk} y={y-5*mk} width={10*mk} height={10*mk} fill="none" stroke="#22d3ee" strokeWidth={1.6*mk}/>
+                      <rect x={x-1.2*mk} y={y-1.2*mk} width={2.4*mk} height={2.4*mk} fill="#22d3ee"/>
+                    </g>
+                  );})()}
+
+                  {/* Measurements. Read-only, and they stay put while you work. */}
+                  {measurements.map((m,i)=>{ const mk=1/viewerZoom; return (
+                    <g key={`m${i}`}>
+                      <line x1={m.a.x} y1={m.a.y} x2={m.b.x} y2={m.b.y} stroke="#22d3ee" strokeWidth={1.4*mk}/>
+                      <circle cx={m.a.x} cy={m.a.y} r={2.5*mk} fill="#22d3ee"/>
+                      <circle cx={m.b.x} cy={m.b.y} r={2.5*mk} fill="#22d3ee"/>
+                      <text x={(m.a.x+m.b.x)/2} y={(m.a.y+m.b.y)/2-6*mk} textAnchor="middle"
+                        fontSize={11*mk} fill="#22d3ee" fontFamily="monospace" fontWeight="bold"
+                        stroke="#000" strokeWidth={3*mk} paintOrder="stroke">{m.ft}&apos;</text>
+                    </g>
+                  );})}
+
+                  {measureMode&&measureFrom&&measureTo&&(()=>{ const mk=1/viewerZoom;
+                    const ft=scale.pageUnitsPerFoot>0?Math.hypot(measureTo.x-measureFrom.x,measureTo.y-measureFrom.y)/scale.pageUnitsPerFoot:0;
+                    return (
+                      <g key="mlive">
+                        <line x1={measureFrom.x} y1={measureFrom.y} x2={measureTo.x} y2={measureTo.y}
+                          stroke="#22d3ee" strokeWidth={1.4*mk} strokeDasharray={`${4*mk},${3*mk}`}/>
+                        <text x={(measureFrom.x+measureTo.x)/2} y={(measureFrom.y+measureTo.y)/2-6*mk} textAnchor="middle"
+                          fontSize={11*mk} fill="#22d3ee" fontFamily="monospace" fontWeight="bold"
+                          stroke="#000" strokeWidth={3*mk} paintOrder="stroke">{ft.toFixed(2)}&apos;</text>
+                      </g>
+                    );})()}
+
                   {scale.point1&&scale.point2&&<line x1={scale.point1.x} y1={scale.point1.y} x2={scale.point2.x} y2={scale.point2.y} stroke="#f97316" strokeWidth={1/viewerZoom} strokeDasharray={`${4/viewerZoom},${3/viewerZoom}`} opacity="0.5"/>}
 
                   {/* Elevation grips */}
@@ -1230,7 +1584,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 {/* Reference point - its own step. It's an anchor shared
                     across levels, not a property of any one outline, so it
                     sits above the level list rather than inside a tile. */}
-                <div data-guide="reference-point" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <div data-guide="reference-point" className={`rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 ${currentGuide==="reference-point"?"korban-guide-glow":""}`}>
                   <div className="mb-2 flex items-center justify-between">
                     <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Reference Point</p>
                     <span className="text-[9px] text-zinc-600">
@@ -1269,13 +1623,60 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   return (
                     <div key={level.id} onClick={()=>setActiveLevel(level.id)}
                       className={`rounded-xl border p-3 space-y-2.5 cursor-pointer transition ${level.stored?"border-emerald-500/30 bg-emerald-500/5":isWorking?"border-orange-500/60 bg-orange-500/5 shadow-[0_0_14px_rgba(249,115,22,0.18)]":isActive?"border-orange-500/40 bg-orange-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
-                      <div className="flex items-center gap-2">
-                        <div className="h-2.5 w-2.5 rounded-full flex-shrink-0" style={{background:level.color}}/>
+                      <div className="relative flex items-center gap-2">
+                        {/* The dot is the control. Click it to recolour this level. */}
+                        <button
+                          onClick={e=>{e.stopPropagation();setColorPickerFor(c=>c===level.id?null:level.id);}}
+                          title="Change this level's colour"
+                          className="h-3 w-3 flex-shrink-0 rounded-full ring-1 ring-white/20 transition hover:ring-white/60"
+                          style={{background:level.color}}
+                        />
+                        {colorPickerFor===level.id&&(
+                          <div onClick={e=>e.stopPropagation()}
+                            className="absolute left-0 top-5 z-50 grid grid-cols-6 gap-1 rounded-lg border border-zinc-700 bg-zinc-950 p-2 shadow-2xl">
+                            {LEVEL_PALETTE.map(c=>(
+                              <button key={c}
+                                onClick={()=>{setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,color:c}:l));setColorPickerFor(null);}}
+                                className={`h-4 w-4 rounded-full transition hover:scale-110 ${level.color===c?"ring-2 ring-white":"ring-1 ring-white/20"}`}
+                                style={{background:c}}
+                              />
+                            ))}
+                          </div>
+                        )}
                         <input value={level.levelName} onClick={e=>e.stopPropagation()}
                           onChange={e=>setFloorLevels(prev=>prev.map((l,j)=>j===i?{...l,levelName:e.target.value}:l))}
                           className="flex-1 min-w-0 bg-transparent text-[10px] font-bold text-zinc-200 outline-none border-b border-zinc-700 pb-0.5"/>
                         {!level.isKeyFloor&&<button onClick={e=>{e.stopPropagation();setFloorLevels(prev=>prev.filter((_,j)=>j!==i));}} className="text-[9px] text-zinc-700 hover:text-red-400">&times;</button>}
                       </div>
+
+                      {/* Floors repeat far more often than they differ. */}
+                      {(() => {
+                        const sources = floorLevels.filter(l => l.id !== level.id && l.tracePoints.length >= 3);
+                        if (sources.length === 0) return null;
+                        const hasOwn = level.tracePoints.length >= 3;
+                        return (
+                          <div onClick={e=>e.stopPropagation()} className="flex items-center gap-2">
+                            <label className="flex-shrink-0 text-[9px] text-zinc-600">
+                              {hasOwn ? "Replace with" : "Same as"}
+                            </label>
+                            <select
+                              defaultValue=""
+                              onChange={e=>{
+                                if (!e.target.value) return;
+                                if (hasOwn && !window.confirm(`Replace ${level.levelName}'s outline with ${floorLevels.find(l=>l.id===e.target.value)?.levelName}'s?`)) { e.target.value=""; return; }
+                                duplicateOutline(e.target.value, level.id);
+                                e.target.value="";
+                              }}
+                              className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-orange-500/50"
+                            >
+                              <option value="">Copy an outline...</option>
+                              {sources.map(src => (
+                                <option key={src.id} value={src.id}>{src.levelName}</option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      })()}
 
                       {/* LF - auto-calculated, condensed to one inline row */}
                       <div onClick={e=>e.stopPropagation()} className="flex items-center gap-2">
@@ -1388,7 +1789,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 })()}
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{overlayStored?"Overlay Stored":"Store Overlay"}</button>
+                <button data-guide="store" onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"} ${currentGuide==="store"&&!overlayStored?"korban-guide-glow":""}`}>{overlayStored?"Overlay Stored":"Store Overlay"}</button>
+
+                {/* The plan is done; the heights are not. Say where to go. */}
+                <button
+                  onClick={()=>{ if(!overlayStored) storeOverlay(); setActiveTab("elevation"); }}
+                  className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-[11px] font-bold text-zinc-300 transition hover:border-orange-500/50 hover:text-orange-300"
+                >
+                  Complete Overlay &rarr; Elevations
+                </button>
               </div>
             </div>
           )}
@@ -1605,7 +2014,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 </div>
               </div>
               <div className="p-4 border-t border-zinc-900">
-                <button onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"}`}>{elevStored?"Stored":"Store Elevations"}</button>
+                <button data-guide="store" onClick={()=>storeElevations()} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${elevStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"} ${currentGuide==="store"&&!elevStored?"korban-guide-glow":""}`}>{elevStored?"Stored":"Store Elevations"}</button>
+
+                {/*
+                  * Where the takeoff ends depends on the tier. Korban Bid can
+                  * draw a section against the wall, which is what buys its
+                  * accuracy - offered, not required, and said plainly either
+                  * way so nobody wonders whether they skipped something.
+                  */}
+                {depthTab === "korban-bid" && (
+                  <div className="mt-2">
+                    <button
+                      onClick={()=>{ if(!elevStored) storeElevations(); window.location.href="/set-scaffold-v2#section"; }}
+                      className={`w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-[11px] font-semibold text-zinc-500 transition hover:border-zinc-600 hover:text-zinc-300 ${currentGuide==="section"?"korban-guide-glow":""}`}
+                    >
+                      Start Section View
+                    </button>
+                    <p className="mt-1 text-center text-[9.5px] uppercase tracking-[0.14em] text-zinc-700">
+                      optional
+                    </p>
+                  </div>
+                )}
+
+                <button
+                  onClick={()=>{ if(!elevStored) storeElevations(); window.location.href="/set-scaffold-v2"; }}
+                  className="mt-2 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black transition hover:bg-orange-400"
+                >
+                  Complete Takeoff &rarr;
+                </button>
               </div>
             </div>
           )}
