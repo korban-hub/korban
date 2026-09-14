@@ -514,11 +514,55 @@ export default function TakeoffWorkspaceAdvancedPage() {
     };
   }
 
+  /**
+   * Reads a dimension the way an estimator writes one.
+   *
+   * This used to strip every character that was not a digit or a dot, which
+   * turned 21'-2" into the string "212" and locked the scale at two hundred
+   * and twelve feet. Everything measured afterwards came out ten times too
+   * large, and nothing about the error was visible until the numbers reached
+   * a bid.
+   *
+   * Accepts: 21'-2"  ·  21' 2"  ·  21'2  ·  21-2  ·  21.5'  ·  21.5  ·  254"
+   */
+  function parseFeetInches(raw: string): number {
+    const text = raw.trim();
+    if (!text) return 0;
+
+    // Inches only, if that is all that was written.
+    const inchesOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:"|in|inches)$/i);
+    if (inchesOnly) return parseFloat(inchesOnly[1]) / 12;
+
+    /*
+     * Feet and inches. The foot mark or the dash has to be there - without
+     * requiring one, a plain decimal like 21.5 backtracks into "2 feet 1.5
+     * inches", which is a worse bug than the one this replaced.
+     */
+    const withFootMark = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)\s*-?\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
+    if (withFootMark) {
+      const inches = parseFloat(withFootMark[2]);
+      if (inches < 12) return parseFloat(withFootMark[1]) + inches / 12;
+    }
+
+    // Whole feet and inches separated by a dash, as on a dimension string.
+    const dashed = text.match(/^(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
+    if (dashed) {
+      const inches = parseFloat(dashed[2]);
+      if (inches < 12) return parseFloat(dashed[1]) + inches / 12;
+    }
+
+    // Plain feet, decimal or whole.
+    const feetOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)?$/i);
+    if (feetOnly) return parseFloat(feetOnly[1]);
+
+    return 0;
+  }
+
   function lockScale() {
     if (!scale.point1||!scale.point2||!scale.measurementInput) return;
     const dx=scale.point2.x-scale.point1.x, dy=scale.point2.y-scale.point1.y;
     const px=Math.sqrt(dx*dx+dy*dy);
-    const ft=parseFloat(scale.measurementInput.replace(/[^0-9.]/g,""));
+    const ft=parseFeetInches(scale.measurementInput);
     if (!ft||ft<=0) return;
     setScale({ locked:true, pageUnitsPerFoot:px/ft, label:scale.measurementInput, pickingPoint:null, point1:null, point2:null });
   }
@@ -1079,7 +1123,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
           );
         })}
         <div className="ml-auto flex items-center gap-3 text-[10px]">
-          {scale.locked&&<span className="font-mono text-orange-400 opacity-70">[lock] {scale.label}</span>}
+          {/*
+            * What the scale resolved to, not just what was typed. A storey is
+            * a few hundred page units on a normal sheet - if this reads a
+            * couple of units per foot, the two points picked were nowhere near
+            * the distance entered, and everything measured after will be wrong
+            * by exactly that ratio.
+            */}
+          {scale.locked&&(
+            <span className="font-mono text-orange-400 opacity-70">
+              [lock] {scale.label}
+              <span className="ml-1.5 opacity-60">
+                {(scale.pageUnitsPerFoot??0).toFixed(1)} px/ft
+              </span>
+            </span>
+          )}
         </div>
       </div>
 
