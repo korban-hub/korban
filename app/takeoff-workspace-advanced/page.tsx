@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanGuidance, KorbanHeader, type KorbanGuidanceFlag, type KorbanGuidanceStep, type KorbanMenuLink } from "@/components/korban";
-import { alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
+import {
+  parseFeetInches, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
 
@@ -512,50 +513,6 @@ export default function TakeoffWorkspaceAdvancedPage() {
       x: (e.clientX - r.left) * (natW / r.width),
       y: (e.clientY - r.top) * (natH / r.height),
     };
-  }
-
-  /**
-   * Reads a dimension the way an estimator writes one.
-   *
-   * This used to strip every character that was not a digit or a dot, which
-   * turned 21'-2" into the string "212" and locked the scale at two hundred
-   * and twelve feet. Everything measured afterwards came out ten times too
-   * large, and nothing about the error was visible until the numbers reached
-   * a bid.
-   *
-   * Accepts: 21'-2"  ·  21' 2"  ·  21'2  ·  21-2  ·  21.5'  ·  21.5  ·  254"
-   */
-  function parseFeetInches(raw: string): number {
-    const text = raw.trim();
-    if (!text) return 0;
-
-    // Inches only, if that is all that was written.
-    const inchesOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:"|in|inches)$/i);
-    if (inchesOnly) return parseFloat(inchesOnly[1]) / 12;
-
-    /*
-     * Feet and inches. The foot mark or the dash has to be there - without
-     * requiring one, a plain decimal like 21.5 backtracks into "2 feet 1.5
-     * inches", which is a worse bug than the one this replaced.
-     */
-    const withFootMark = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)\s*-?\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
-    if (withFootMark) {
-      const inches = parseFloat(withFootMark[2]);
-      if (inches < 12) return parseFloat(withFootMark[1]) + inches / 12;
-    }
-
-    // Whole feet and inches separated by a dash, as on a dimension string.
-    const dashed = text.match(/^(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
-    if (dashed) {
-      const inches = parseFloat(dashed[2]);
-      if (inches < 12) return parseFloat(dashed[1]) + inches / 12;
-    }
-
-    // Plain feet, decimal or whole.
-    const feetOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)?$/i);
-    if (feetOnly) return parseFloat(feetOnly[1]);
-
-    return 0;
   }
 
   function lockScale() {

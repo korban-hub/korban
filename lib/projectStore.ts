@@ -1244,6 +1244,44 @@ export function ledgerCount(elevation: ProjectElevation | null, partNo: string):
     .reduce((sum, row) => sum + row.qty, 0);
 }
 
+/**
+ * Reads a dimension the way an estimator writes one.
+ *
+ * Lives here so every input that takes a length reads it identically. The scale
+ * input once stripped every character that was not a digit or a dot, which
+ * turned 21'-2" into "212" and locked the scale at two hundred and twelve feet -
+ * everything measured afterwards came out ten times too large, and nothing about
+ * it was visible until the numbers reached a bid.
+ *
+ * Accepts: 21'-2"  ·  21' 2"  ·  21'2  ·  21-2  ·  21.5'  ·  21.5  ·  254"  ·  40 ft
+ */
+export function parseFeetInches(raw: string): number {
+  const text = (raw ?? "").trim();
+  if (!text) return 0;
+
+  const inchesOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:"|in|inches)$/i);
+  if (inchesOnly) return parseFloat(inchesOnly[1]) / 12;
+
+  // The foot mark or the dash has to be there. Without requiring one, a plain
+  // decimal like 21.5 backtracks into "2 feet 1.5 inches".
+  const withFootMark = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)\s*-?\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
+  if (withFootMark) {
+    const inches = parseFloat(withFootMark[2]);
+    if (inches < 12) return parseFloat(withFootMark[1]) + inches / 12;
+  }
+
+  const dashed = text.match(/^(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*(?:"|in|inches)?$/i);
+  if (dashed) {
+    const inches = parseFloat(dashed[2]);
+    if (inches < 12) return parseFloat(dashed[1]) + inches / 12;
+  }
+
+  const feetOnly = text.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft\.?|feet)?$/i);
+  if (feetOnly) return parseFloat(feetOnly[1]);
+
+  return 0;
+}
+
 /** Bay lengths a fixed cross brace is made in. Anything else is a bastard bay. */
 export const STANDARD_BAY_LENGTHS = [4, 5, 6, 7, 8, 10];
 

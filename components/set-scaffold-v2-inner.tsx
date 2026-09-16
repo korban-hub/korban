@@ -6,8 +6,8 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, depthAtLeast, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
-import { getBackendSettings } from "@/lib/backendStore";
+import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { getBackendSettings, getStockItem } from "@/lib/backendStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PlanPoint = { x: number; y: number };
@@ -154,6 +154,27 @@ export type BayKind = "braced" | "bastard" | "rail";
 export type BaySpan = { segIndex: number; lengthFt: number; kind: BayKind };
 
 /**
+ * Legs for one wall, and the wall itself.
+ *
+ * The endpoints travel with the result on purpose. The renderer used to look
+ * the wall back up by index against the raw outline, but the legs are computed
+ * against the simplified one - so the moment a jog was absorbed the indices
+ * stopped lining up and legs were drawn against the wrong wall, with that
+ * wall's normal. That is what put ticks at odd angles and legs inside the
+ * building. Carrying the geometry removes the possibility.
+ */
+export type SegmentLegs = {
+  segIndex: number;
+  legs: LegResult[];
+  bays: BaySpan[];
+  /** The wall these legs belong to, as used. */
+  a: PlanPoint;
+  b: PlanPoint;
+  /** Square to that wall. The renderer must not recompute it. */
+  normal: PlanPoint;
+};
+
+/**
  * Collapses jogs the scaffold would not follow.
  *
  * A traced perimeter carries every bump in the building. Real scaffold runs
@@ -186,33 +207,40 @@ function simplifyOutline(outline: PlanPoint[], puf: number): PlanPoint[] {
 function computeLegs(
   outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
   placement: "exterior" | "interior" = "exterior",
-): { segIndex: number; legs: LegResult[]; bays: BaySpan[] }[] {
+): SegmentLegs[] {
   const raw = outline;
   const shape = simplifyOutline(outline, puf);
   const n = shape.length;
   if (n < 2 || puf <= 0 || bayFt <= 0) {
-    return raw.map((_, i) => ({ segIndex: i, legs: [], bays: [] }));
+    return raw.map((_, i) => ({
+      segIndex: i, legs: [], bays: [],
+      a: raw[i], b: raw[(i + 1) % raw.length],
+      normal: { x: 0, y: -1 },
+    }));
   }
 
   const wallGap = 1 * puf;
   const tickLen = widthFt * puf;
   const labelOff = wallGap + tickLen + puf * 1.4;
   const bayPx = bayFt * puf;
-  // The invisible stop. A leg may sit on it, never past it.
-  const stopPx = (widthFt + 1) * puf;
+  // How far past its starting corner a wall puts its first leg.
+  const floatPx = (widthFt + 1) * puf;
 
-  const results: { segIndex: number; legs: LegResult[]; bays: BaySpan[] }[] = [];
+  const results: SegmentLegs[] = [];
 
   for (let i = 0; i < n; i++) {
     const start = shape[i];
     const end = shape[(i + 1) % n];
     const dx = end.x - start.x, dy = end.y - start.y;
     const segLen = Math.hypot(dx, dy);
-    if (segLen <= 0) { results.push({ segIndex: i, legs: [], bays: [] }); continue; }
+    if (segLen <= 0) {
+      results.push({ segIndex: i, legs: [], bays: [], a: start, b: end, normal: { x: 0, y: -1 } });
+      continue;
+    }
 
     const along = { x: dx / segLen, y: dy / segLen };
-    // Square at the wall in front of it. Every leg on this wall, including the
-    // ones at either end - which is what makes a corner read as an L.
+    // Square at the wall in front of it - every leg on this wall, including
+    // the float, which keeps the direction of the wall it belongs to.
     const normal = computeOutwardNormal(start, end, shape, placement);
 
     function legAt(dist: number, isStart = false, isEnd = false): LegResult {
@@ -227,79 +255,74 @@ function computeLegs(
       };
     }
 
-    const legs: LegResult[] = [];
-    const bays: BaySpan[] = [];
-
-    // Runs resolve alternately from each end so a remainder lands at a
-    // junction rather than mid-wall. Even walls start at the head, odd walls
-    // are measured from the tail - the practical form of "never start a run
-    // next to a final leg".
-    const fromHead = i % 2 === 0;
-    const runStart = stopPx;
-    const runEnd = segLen - stopPx;
-    const runLen = runEnd - runStart;
-
-    if (runLen < 0) {
-      // Wall shorter than two stops. One leg, centred, and planked both ways.
-      legs.push(legAt(segLen / 2, true, true));
-      bays.push({ segIndex: i, lengthFt: segLen / puf, kind: "rail" });
-      results.push({ segIndex: i, legs, bays });
-      continue;
-    }
-
-    const positions: number[] = [];
-    let cursor = fromHead ? runStart : runEnd;
-    positions.push(cursor);
+    /*
+     * Four steps, and every wall follows them without needing to know what any
+     * other wall did - which is what makes the corners resolve.
+     *
+     *   1. A leg frameWidth + 1' PAST the corner this wall starts from. It
+     *      floats, with no wall in front of it.
+     *   2. March at bay length along the wall.
+     *   3. Stop when the next bay would run off the end.
+     *   4. Leave whatever is left. It rails across to the next wall's float.
+     *
+     * The float belongs to the wall that is starting, not to the one that is
+     * ending. The earlier version had this inverted - it began each run four
+     * feet INSIDE its corner, which left every corner of the building bare.
+     */
+    const positions: number[] = [-floatPx];
+    let cursor = -floatPx;
     let guard = 0;
-
-    while (guard++ < 500) {
-      const remaining = fromHead ? runEnd - cursor : cursor - runStart;
-      const remainingFt = remaining / puf;
-
-      // Still a full bay's worth of wall and more. March on.
-      if (remainingFt > 10 + 0.1) {
-        cursor += fromHead ? bayPx : -bayPx;
-        positions.push(cursor);
-        bays.push({ segIndex: i, lengthFt: bayFt, kind: isStandardBay(bayFt) ? "braced" : "bastard" });
-        continue;
-      }
-
-      // Terminating. Eight feet or less rails across - no leg, which is the
-      // whole saving. Anything more takes the largest brace that fits and
-      // whatever is left after that rails across instead.
-      if (remainingFt <= 8 + 0.05) {
-        if (remainingFt > 0.05) bays.push({ segIndex: i, lengthFt: remainingFt, kind: "rail" });
-        break;
-      }
-
-      const bay = largestBayWithin(remainingFt);
-      if (bay === null) {
-        bays.push({ segIndex: i, lengthFt: remainingFt, kind: "rail" });
-        break;
-      }
-      cursor += fromHead ? bay * puf : -bay * puf;
+    while (cursor + bayPx <= segLen + 0.01 && guard++ < 500) {
+      cursor += bayPx;
       positions.push(cursor);
-      bays.push({ segIndex: i, lengthFt: bay, kind: "braced" });
-
-      const left = (fromHead ? runEnd - cursor : cursor - runStart) / puf;
-      if (left > 0.05) bays.push({ segIndex: i, lengthFt: left, kind: "rail" });
-      break;
     }
 
-    positions.sort((a, b) => a - b);
-    positions.forEach((d, index) => {
-      legs.push(legAt(d, index === 0, index === positions.length - 1));
+    /*
+     * The span to the next wall's float is what is left of this wall plus the
+     * one foot of standoff in front of that leg. Cal-OSHA allows eight, so
+     * seven feet of wall is the most that can be left unbraced. More than that
+     * earns one more leg, at the largest brace length that fits.
+     */
+    const leftoverFt = (segLen - cursor) / puf;
+    if (leftoverFt > 7 + 0.05) {
+      const closing = largestBayWithin(leftoverFt);
+      if (closing !== null) {
+        cursor += closing * puf;
+        positions.push(cursor);
+      }
+    }
+
+    const legs: LegResult[] = positions.map((d, index) =>
+      legAt(d, index === 0, index === positions.length - 1)
+    );
+
+    /*
+     * Bays. The first spans from the float to the first leg on the wall, so it
+     * hangs past the corner. The last is what is left over - a rail bay, which
+     * buys no leg at all.
+     */
+    const bays: BaySpan[] = [];
+    for (let b = 1; b < positions.length; b++) {
+      const lengthFt = (positions[b] - positions[b - 1]) / puf;
+      bays.push({ segIndex: i, lengthFt, kind: isStandardBay(lengthFt) ? "braced" : "bastard" });
+    }
+    const remainderFt = (segLen - positions[positions.length - 1]) / puf;
+    if (remainderFt > 0.05) {
+      bays.push({ segIndex: i, lengthFt: remainderFt, kind: "rail" });
+    }
+
+    results.push({
+      segIndex: i,
+      legs: legs.filter(l => isFinitePoint(l.tickTip)),
+      bays, a: start, b: end, normal,
     });
-
-    results.push({ segIndex: i, legs: legs.filter(l => isFinitePoint(l.tickTip)), bays });
   }
 
-  // Callers index by the original outline. Anything the simplifier absorbed
-  // reports empty rather than disappearing out from under them.
-  if (shape.length !== raw.length) {
-    const padded = raw.map((_, i) => results[i] ?? { segIndex: i, legs: [], bays: [] });
-    return padded;
-  }
+  /*
+   * Returned against the simplified shape, not padded back onto the raw one.
+   * Every caller reads the wall off the result rather than looking it up by
+   * index, so there is nothing for the two to disagree about.
+   */
   return results;
 }
 
@@ -363,8 +386,31 @@ function ScaffoldModel3D({
     renderer.setSize(initialW, initialH);
     renderer.setPixelRatio(1);
     renderer.shadowMap.enabled = false;
+    /*
+     * Fill the mount, whatever size it turns out to be.
+     *
+     * Three.js sizes the canvas in attributes, which is the size it renders at
+     * - not the size it occupies. Mounted before layout settles, those numbers
+     * are the 400x300 fallback and the canvas sits at that size in a corner of
+     * a panel several times larger, which reads as nothing being there at all.
+     */
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+
+    // And keep it right as the panel changes size.
+    const mountEl = mountRef.current;
+    const observer = new ResizeObserver(() => {
+      const w = mountEl.clientWidth, h = mountEl.clientHeight;
+      if (w > 0 && h > 0) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+    });
+    observer.observe(mountEl);
 
     // TEMPORARY DIAGNOSTIC — the render loop was proven to be running
     // correctly (angle/frame count incrementing on schedule) while the
@@ -603,6 +649,7 @@ function ScaffoldModel3D({
       // the important cleanup; this is a best-effort extra that must
       // never be allowed to crash anything.
       try { renderer.forceContextLoss(); } catch { /* not supported here — safe to ignore */ }
+      try { observer.disconnect(); } catch { /* already gone */ }
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
@@ -650,6 +697,11 @@ function ScaffoldModel3D({
           * compositing bug is worth paying that.
           */}
         <div ref={mountRef} className="absolute inset-0" />
+        {renderError && (
+          <div className="absolute inset-0 flex items-center justify-center p-4 text-center">
+            <p className="max-w-xs text-[11px] leading-[1.6] text-zinc-500">{renderError}</p>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
         <button onClick={() => setZoom(z => Math.max(0.3, z - 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold flex-shrink-0">−</button>
@@ -1004,6 +1056,8 @@ export default function SetScaffoldV2Inner() {
   const [pendingRun,     setPendingRun]     = useState<{ a: PlanPoint; b: PlanPoint }|null>(null);
   const [pendingHeight,  setPendingHeight]  = useState("");
   const [drawnRuns,      setDrawnRuns]      = useState<{ id: string; a: PlanPoint; b: PlanPoint; heightFt: number; flipped: boolean }[]>([]);
+  /** Off, a run goes exactly where it is drawn. On, it lines up. */
+  const [snapAngle,      setSnapAngle]      = useState(true);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
   const [sectionExpanded, setSectionExpanded] = useState(false);
   // Estimate depth gates which views are available here. Quick Bid shows
@@ -1048,6 +1102,92 @@ export default function SetScaffoldV2Inner() {
 
   const rawPoints = useMemo(() => getPrimaryGeometryPoints(elevation), [elevation]);
   const outline   = rawPoints.length >= 3 ? rawPoints : FALLBACK;
+
+  /**
+   * Every level that was traced, with the key one first.
+   *
+   * A building is not one outline. The key level sets the line most of the
+   * scaffold follows, and any level whose wall moves away from it needs its
+   * own run - which is the thing that previously had to be drawn by hand.
+   */
+  const levelOutlines = useMemo(() => {
+    const rows = elevation?.overlayGeometry?.fullOverlayRows ?? [];
+    return rows
+      .filter(r => (r.points?.length ?? 0) >= 3)
+      .map(r => ({
+        id: String(r.id),
+        name: r.level || "Level",
+        isKey: Boolean(r.isKeyFloor),
+        color: r.color || "#f97316",
+        points: r.points as PlanPoint[],
+      }))
+      .sort((a, b) => Number(b.isKey) - Number(a.isKey));
+  }, [elevation]);
+
+  /**
+   * Walls that only exist on a level other than the key one.
+   *
+   * Each non-key level is measured against the key outline. A wall that sits
+   * within three feet of the key line is already covered - the same run carries
+   * up past it, and anything it needs is reached with a bracket. A wall further
+   * out than that, or turned away from it, is on its own line and gets its own
+   * run.
+   *
+   * Specification section 3b.
+   */
+  const deviatingWalls = useMemo(() => {
+    if (levelOutlines.length < 2 || effPuf <= 0) return [];
+    const key = levelOutlines.find(l => l.isKey) ?? levelOutlines[0];
+    const DEVIATION_FT = 3;
+    const threshold = DEVIATION_FT * effPuf;
+
+    /** How far a point sits from the nearest wall of the key outline, and how square to it. */
+    function measureAgainstKey(a: PlanPoint, b: PlanPoint) {
+      let nearest = Infinity;
+      let parallel = false;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const dir = { x: dx / len, y: dy / len };
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+
+      for (let i = 0; i < key.points.length; i++) {
+        const p = key.points[i], q = key.points[(i + 1) % key.points.length];
+        const kdx = q.x - p.x, kdy = q.y - p.y;
+        const klen = Math.hypot(kdx, kdy);
+        if (klen < 1e-6) continue;
+        const kdir = { x: kdx / klen, y: kdy / klen };
+
+        // Distance from this wall's midpoint to that key wall.
+        const t = Math.max(0, Math.min(1, ((mid.x - p.x) * kdx + (mid.y - p.y) * kdy) / (klen * klen)));
+        const foot = { x: p.x + kdx * t, y: p.y + kdy * t };
+        const dist = Math.hypot(mid.x - foot.x, mid.y - foot.y);
+
+        if (dist < nearest) {
+          nearest = dist;
+          // Square within about ten degrees counts as running the same way.
+          parallel = Math.abs(dir.x * kdir.x + dir.y * kdir.y) > 0.985;
+        }
+      }
+      return { nearest, parallel };
+    }
+
+    const out: { levelId: string; levelName: string; color: string; a: PlanPoint; b: PlanPoint; reason: string }[] = [];
+    levelOutlines.filter(l => !l.isKey).forEach(level => {
+      for (let i = 0; i < level.points.length; i++) {
+        const a = level.points[i], b = level.points[(i + 1) % level.points.length];
+        if (Math.hypot(b.x - a.x, b.y - a.y) < effPuf) continue;
+        const { nearest, parallel } = measureAgainstKey(a, b);
+        // A wall that turns away from the key line is always its own run,
+        // however close it sits. A parallel one has to move three feet.
+        if (!parallel) {
+          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, reason: "turns away from the key line" });
+        } else if (nearest >= threshold) {
+          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, reason: `${(nearest / effPuf).toFixed(1)}' off the key line` });
+        }
+      }
+    });
+    return out;
+  }, [levelOutlines, effPuf]);
 
   // SVG viewbox
   const svgViewBox = useMemo(() => {
@@ -1099,7 +1239,9 @@ export default function SetScaffoldV2Inner() {
   function isLegBrokenFree(segIndex: number, legIndex: number): boolean {
     const off = legOffsets[`${segIndex}-${legIndex}`];
     if (!off) return false;
-    const a = outline[segIndex], b = outline[(segIndex + 1) % outline.length];
+    // From the engine's own geometry, for the same reason the renderer does.
+    const seg = allSegmentLegs.find(s => s.segIndex === segIndex);
+    const a = seg?.a, b = seg?.b;
     if (!a || !b) return false;
     const sdx = b.x - a.x, sdy = b.y - a.y;
     const len = Math.sqrt(sdx * sdx + sdy * sdy);
@@ -1228,10 +1370,28 @@ export default function SetScaffoldV2Inner() {
   // Live frame height for the 3D model — average frames-per-leg from the
   // current totals (which include per-tick overrides and deletions), so
   // edit-mode changes visibly change the 3D model, not just the numbers.
+  /**
+   * Frames in one leg, from the wall height.
+   *
+   * This used to divide total frames by total legs, which sounds reasonable and
+   * is not: the frames come from the quantity engine and the legs are drawn by
+   * computeLegs, so the two counts describe different layouts. On a 21' wall it
+   * reported two frames per leg - the answer you get when the division lands on
+   * the minimum rather than when anything is actually two frames tall.
+   *
+   * Wall height is the only thing that decides how many frames stack in a leg,
+   * so it is what this reads.
+   */
   const liveFrameTall = useMemo(() => {
-    if (totals.buildingLegs <= 0) return frameTall;
-    return Math.max(1, Math.round((totals.buildingFrames - manualFrameCount) / totals.buildingLegs));
-  }, [totals, frameTall, manualFrameCount]);
+    const wall = elevation?.wallHeight ?? 0;
+    if (wall > 0) {
+      const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
+      const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+      const makeup = computeFrameMakeup(Math.max(0, wall - reach), jack);
+      if (makeup.frameTall > 0) return makeup.frameTall;
+    }
+    return frameTall;
+  }, [elevation, frameTall]);
 
   // Overlay rows
   const rawOverlayRows = useMemo(() => {
@@ -1250,8 +1410,27 @@ export default function SetScaffoldV2Inner() {
         // Arriving from Takeoff, quantities exist but no part numbers do.
         // Writing the ledger on load means the yard sees real parts without
         // anyone having to touch a control first.
-        const e = writeScaffoldLedger(raw);
-        if ((e.partLedger ?? []).length !== (raw.partLedger ?? []).length) saveActiveElevation(e);
+        /*
+         * Recompute before anything reads it.
+         *
+         * The engine only ran when a control changed, so a project opened after
+         * a settings change - or after the engine itself was corrected - showed
+         * whatever was stored last time. That is how frames per leg stayed at
+         * two on a two-storey building: the number was right for a setting
+         * nobody had used in days.
+         */
+        const freshEngine = calculateQuantityEngine({
+          linearFeet: raw.linearFeet,
+          wallHeight: raw.wallHeight,
+          ...raw.scaffoldInput,
+          workerReachHeight,
+        });
+        const e = writeScaffoldLedger({ ...raw, quantityEngine: freshEngine });
+        // Store it if anything moved, so the next page to open reads the same
+        // numbers this one is showing.
+        const engineChanged = JSON.stringify(freshEngine) !== JSON.stringify(raw.quantityEngine);
+        const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
+        if (engineChanged || ledgerChanged) saveActiveElevation(e);
         setElevation(e); setProjectName(p.projectName || projectInfo.projectName);
         const depth = getEstimateDepth();
         setEstimateDepthState(depth);
@@ -1307,6 +1486,43 @@ export default function SetScaffoldV2Inner() {
    * other drawn ends is what lets two drawn runs turn a corner properly
    * instead of nearly touching.
    */
+  /**
+   * Straightens a drawn run.
+   *
+   * A run drawn by hand lands a few pixels off square and reads as a mistake.
+   * This lines it up with the nearest wall if there is one close by, and with
+   * horizontal or vertical otherwise - whichever the drawn direction is nearer
+   * to. Turned off, the run goes exactly where it was drawn, which is what an
+   * angled return needs.
+   */
+  function snapAngleTo(from: PlanPoint, to: PlanPoint): PlanPoint {
+    if (!snapAngle) return to;
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return to;
+
+    const candidates: PlanPoint[] = [
+      { x: 1, y: 0 }, { x: 0, y: 1 },
+    ];
+    // Walls the building already has, so a run beside one lines up with it
+    // rather than with the page.
+    allSegmentLegs.forEach(seg => {
+      const wdx = seg.b.x - seg.a.x, wdy = seg.b.y - seg.a.y;
+      const wlen = Math.hypot(wdx, wdy);
+      if (wlen > 1e-6) candidates.push({ x: wdx / wlen, y: wdy / wlen });
+    });
+
+    let best = { x: dx / len, y: dy / len };
+    let bestDot = 0;
+    candidates.forEach(c => {
+      const dot = Math.abs((dx / len) * c.x + (dy / len) * c.y);
+      if (dot > bestDot) { bestDot = dot; best = c; }
+    });
+    // Keep the direction the run was drawn in, not the candidate's.
+    const sign = (dx / len) * best.x + (dy / len) * best.y < 0 ? -1 : 1;
+    return { x: from.x + best.x * len * sign, y: from.y + best.y * len * sign };
+  }
+
   function snapToLayout(pt: PlanPoint): PlanPoint {
     const radius = Math.max(effPuf * 3, 6);
     let best: { pt: PlanPoint; dist: number } | null = null;
@@ -1373,6 +1589,84 @@ export default function SetScaffoldV2Inner() {
     });
   }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt]);
 
+  /**
+   * Legs on the walls that only exist above or below the key level.
+   *
+   * Laid out by exactly the rules a key-level wall gets - a leg past the corner
+   * it starts from, marching at bay length, railing across whatever is left.
+   * The only difference is which line they sit on.
+   */
+  const levelRunLegs = useMemo(() => {
+    if (!scaleOk || effPuf <= 0 || deviatingWalls.length === 0) return [];
+    const wallGap = 1 * effPuf;
+    const tickLen = scaffoldWidthFt * effPuf;
+    const floatPx = (scaffoldWidthFt + 1) * effPuf;
+    const bayPx = bayLengthFt * effPuf;
+
+    return deviatingWalls.map((wall, index) => {
+      const dx = wall.b.x - wall.a.x, dy = wall.b.y - wall.a.y;
+      const len = Math.hypot(dx, dy);
+      const along = { x: dx / len, y: dy / len };
+      const normal = computeOutwardNormal(wall.a, wall.b, outline, placement);
+
+      const positions: number[] = [-floatPx];
+      let cursor = -floatPx;
+      let guard = 0;
+      while (cursor + bayPx <= len + 0.01 && guard++ < 400) {
+        cursor += bayPx;
+        positions.push(cursor);
+      }
+      const leftoverFt = (len - cursor) / effPuf;
+      if (leftoverFt > 7 + 0.05) {
+        const closing = largestBayWithin(leftoverFt);
+        if (closing !== null) { cursor += closing * effPuf; positions.push(cursor); }
+      }
+
+      const legs: LegResult[] = positions.map((d, i) => {
+        const base = { x: wall.a.x + along.x * d, y: wall.a.y + along.y * d };
+        return {
+          wallPoint: { x: base.x + normal.x * wallGap, y: base.y + normal.y * wallGap },
+          tickTip: { x: base.x + normal.x * (wallGap + tickLen), y: base.y + normal.y * (wallGap + tickLen) },
+          labelPoint: { x: base.x + normal.x * (wallGap + tickLen + effPuf), y: base.y + normal.y * (wallGap + tickLen + effPuf) },
+          isTurnaroundMirror: false,
+          isStartLeg: i === 0,
+          isEndLeg: i === positions.length - 1,
+        };
+      });
+
+      return { key: `lvl-${wall.levelId}-${index}`, wall, legs, lengthFt: len / effPuf };
+    });
+  }, [deviatingWalls, scaleOk, effPuf, scaffoldWidthFt, bayLengthFt, outline, placement]);
+
+  /*
+   * The ledger has to follow the level runs, not just the configuration.
+   * Changing a width rewrites it already; tracing another floor has to as well,
+   * or the load list quietly describes a building with one fewer run on it.
+   */
+  const ledgerSignature = [
+    levelRunLegs.map(r => `${r.key}:${r.legs.length}`).join("|"),
+    allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0),
+    scaffoldWidthFt, bayLengthFt, elevation?.wallHeight ?? 0, placement,
+  ].join("~");
+
+  useEffect(() => {
+    if (!mounted || !elevation) return;
+    const next = writeScaffoldLedger(elevation);
+    /*
+     * Compared by content, not by how many lines came out.
+     *
+     * The earlier version only rewrote when the number of lines changed, which
+     * is almost never - a stale ledger has the same shape as a fresh one, just
+     * with the wrong parts in it. That is how a load list came to show FO6L and
+     * WP8 while the configuration read a three-foot frame on ten-foot bays: the
+     * parts were correct for a setting nobody had used in days.
+     */
+    const before = JSON.stringify((elevation.partLedger ?? []).map(r => [r.partNo, r.qty, r.source]).sort());
+    const after = JSON.stringify((next.partLedger ?? []).map(r => [r.partNo, r.qty, r.source]).sort());
+    if (before !== after) { setElevation(next); saveActiveElevation(next); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgerSignature, mounted]);
+
   const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
                            measureMode, measureFrom, addRunMode, runStart });
   liveRef.current = { editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
@@ -1431,9 +1725,14 @@ export default function SetScaffoldV2Inner() {
       }
 
       if (liveRef.current.addRunMode) {
-        const snapped = snapToLayout({ x: pt.x, y: pt.y });
         const start = liveRef.current.runStart;
-        if (!start) { setRunStart(snapped); setRunEnd(null); return; }
+        if (!start) { setRunStart(snapToLayout({ x: pt.x, y: pt.y })); setRunEnd(null); return; }
+        // Line it up first, then let it grab anything it lands near.
+        const snapped = snapToLayout(snapAngleTo(start, { x: pt.x, y: pt.y }));
+        // Two clicks in the same place is a misclick, not a run. Anything
+        // under a bay cannot carry a leg either, so it is not one.
+        const lengthFt = Math.hypot(snapped.x - start.x, snapped.y - start.y) / Math.max(liveRef.current.effPuf, 0.0001);
+        if (lengthFt < 4) { setRunStart(null); setRunEnd(null); return; }
         setPendingRun({ a: start, b: snapped });
         setRunStart(null); setRunEnd(null);
         return;
@@ -1460,6 +1759,24 @@ export default function SetScaffoldV2Inner() {
 
     function onPointerMove(e: PointerEvent) {
       const st = dragStateRef.current;
+
+      /*
+       * A line you cannot see while you draw it is a line you draw twice.
+       * This handler used to return here unless a leg was being dragged or the
+       * plan was being panned, so a half-drawn run and a half-made measurement
+       * both stayed invisible until the second click landed.
+       */
+      if (liveRef.current.addRunMode && liveRef.current.runStart) {
+        const pt = toViewBox(e);
+        setRunEnd(snapAngleTo(liveRef.current.runStart, { x: pt.x, y: pt.y }));
+        return;
+      }
+      if (liveRef.current.measureMode && liveRef.current.measureFrom) {
+        const pt = toViewBox(e);
+        setMeasureTo({ x: pt.x, y: pt.y });
+        return;
+      }
+
       if (!st.draggingKey && !st.panning) return;
       // Track absolute position in viewBox space (continuous, full
       // precision) rather than the browser's movementX/movementY, which
@@ -1576,8 +1893,29 @@ export default function SetScaffoldV2Inner() {
     const qe = el.quantityEngine;
     if (!qe || qe.legCount <= 0) return writeLedgerEntries(el, "scaffold", []);
 
-    const parts = partsForConfiguration(si.scaffoldWidth, si.standardBayLength);
-    const legs = qe.legCount;
+    /*
+     * One bay length, read once, used everywhere below.
+     *
+     * A load list came back with B82 - an eight-foot bay on a three-foot frame -
+     * while the panel read ten-foot bays and 3'-6" frames. Both numbers wrong at
+     * once, which a single stale value cannot explain. Reading it once here, and
+     * recording what was used on every line, means the next load list says which
+     * number it was built from rather than leaving it to be guessed at.
+     */
+    const bayLengthUsed = si.standardBayLength > 0 ? si.standardBayLength : 10;
+    const widthUsed = si.scaffoldWidth > 0 ? si.scaffoldWidth : 3;
+    const configNote = `${bayLengthUsed}' bay, ${widthUsed}' wide`;
+    const parts = partsForConfiguration(widthUsed, bayLengthUsed);
+    /*
+     * Legs as drawn, not as the quantity engine estimated them.
+     *
+     * The engine works from linear feet and a bay length; the plan works from
+     * the actual walls, corners and levels. They do not agree, and the plan is
+     * the one that is right - which is why the panel read 46 legs while the
+     * load list read 34, missing every leg on the deviating level.
+     */
+    const drawnLegCount = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0);
+    const legs = drawnLegCount > 0 ? drawnLegCount : qe.legCount;
     const entries: { partNo: string; qty: number; note?: string }[] = [];
 
     // Frames, by the actual makeup of a leg rather than one tall stack.
@@ -1599,7 +1937,11 @@ export default function SetScaffoldV2Inner() {
       entries.push({ partNo: parts.frame, qty: qe.frameCount });
     }
 
-    entries.push({ partNo: parts.plank, qty: qe.plankCount });
+    entries.push({
+      partNo: parts.plank,
+      qty: bayCount > 0 ? bayCount * planksPerBayForWidth(widthUsed) * Math.max(1, qe.frameTall ?? 1) : qe.plankCount,
+      note: configNote,
+    });
 
     /*
      * Braces, jump by jump. A brace part carries both the bay length and the
@@ -1611,20 +1953,22 @@ export default function SetScaffoldV2Inner() {
     const bracesPerBayPerJump =
       (getBackendSettings()?.scaffold as Record<string, number | undefined> | undefined)
         ?.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
-    const bayCount = qe.bayCount ?? 0;
+    const bayCount = drawnLegCount > 0
+      ? allSegmentLegs.reduce((sum, seg) => sum + Math.max(0, seg.legs.length - 1), 0)
+      : (qe.bayCount ?? 0);
     if (makeup.length > 0 && bayCount > 0) {
       makeup.forEach((piece) => {
         const heightFt = piece.label.startsWith("6") ? 6.333 : piece.label.startsWith("5") ? 5 : 3;
         entries.push({
-          partNo: braceForBay(si.standardBayLength, heightFt),
+          partNo: braceForBay(bayLengthUsed, heightFt),
           qty: bayCount * piece.qty * bracesPerBayPerJump,
-          note: `${piece.label} jumps`,
+          note: `${piece.label} jumps - ${configNote}`,
         });
       });
     } else {
-      entries.push({ partNo: parts.brace, qty: qe.crossBraceCount });
+      entries.push({ partNo: parts.brace, qty: qe.crossBraceCount, note: configNote });
     }
-    entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount });
+    entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount, note: configNote });
     entries.push({ partNo: "BP1", qty: qe.basePlateCount });
     entries.push({ partNo: "AL1S", qty: qe.screwJackCount });
     entries.push({ partNo: "CPS", qty: qe.couplingPinCount ?? 0 });
@@ -1649,7 +1993,26 @@ export default function SetScaffoldV2Inner() {
       entries.push({ partNo: "AL1S", qty: drawnLegs, note: "drawn runs" });
       if (drawnBays > 0) {
         entries.push({ partNo: parts.plank, qty: drawnBays * planksPerBayForWidth(si.scaffoldWidth) * jumps, note: "drawn runs" });
-        entries.push({ partNo: braceForBay(si.standardBayLength, 6.333), qty: drawnBays * jumps * bracesPerBayPerJump, note: "drawn runs" });
+        entries.push({ partNo: braceForBay(bayLengthUsed, 6.333), qty: drawnBays * jumps * bracesPerBayPerJump, note: `drawn runs - ${configNote}` });
+      }
+    }
+
+    /*
+     * Runs on levels that leave the key line. Their legs are legs, their frames
+     * are frames - the only thing that makes them different is which line they
+     * stand on, and the material does not care about that.
+     */
+    const levelLegs = levelRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
+    if (levelLegs > 0) {
+      const jumps = Math.max(1, makeup.reduce((sum, piece) => sum + piece.qty, 0));
+      const levelBays = Math.max(0, levelLegs - levelRunLegs.length);
+      entries.push({ partNo: parts.frame, qty: levelLegs * jumps, note: "level runs" });
+      entries.push({ partNo: "BP1", qty: levelLegs, note: "level runs" });
+      entries.push({ partNo: "AL1S", qty: levelLegs, note: "level runs" });
+      if (levelBays > 0) {
+        entries.push({ partNo: parts.plank, qty: levelBays * planksPerBayForWidth(widthUsed) * jumps, note: "level runs" });
+        entries.push({ partNo: braceForBay(bayLengthUsed, 6.333), qty: levelBays * jumps * bracesPerBayPerJump, note: `level runs - ${configNote}` });
+        entries.push({ partNo: parts.guardrail, qty: levelBays * 4, note: "level runs" });
       }
     }
 
@@ -1759,13 +2122,29 @@ export default function SetScaffoldV2Inner() {
             }
             // Two runs turning into the same notch need room for both.
             const minNotch = (scaffoldWidthFt + 1) * 2;
-            const tightNotch = outline.length >= 4 && outline.some((v, idx) => {
-              const next = outline[(idx + 1) % outline.length];
-              const len = Math.hypot(next.x - v.x, next.y - v.y) / Math.max(effPuf, 0.0001);
+            /*
+             * Measured on the walls the scaffold actually sees, not on the raw
+             * trace. Testing the trace counted every small jog as a short wall
+             * and warned on buildings whose walls are all long - the jogs are
+             * absorbed before a leg is ever placed.
+             */
+            const shortWalls = allSegmentLegs.filter(seg => {
+              const len = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) / Math.max(effPuf, 0.0001);
               return len > 0 && len < minNotch;
             });
+            const tightNotch = shortWalls.length > 0;
             if (tightNotch) {
-              flags.push({ tone: "warn", text: `There is a wall shorter than ${minNotch}' on this outline. Two runs turning into it would need ${minNotch}' between them, so check that corner before it goes out - it may want a tube-and-clamp return instead of frames.` });
+              flags.push({ tone: "warn", text: `${shortWalls.length} wall${shortWalls.length === 1 ? " is" : "s are"} shorter than ${minNotch}' here. Two runs turning into that needs ${minNotch}' between them, so check those corners before this goes out - they may want a tube-and-clamp return rather than frames.` });
+            }
+            if ((elevation?.wallHeight ?? 0) <= 0) {
+              flags.push({ tone: "warn", text: "No wall height on this elevation, so every leg falls back to the minimum - that is why frames per leg reads two. The height comes from gripping an elevation in Takeoff; without it I can lay the scaffold out but I cannot say how tall it stands." });
+            }
+            if (levelRunLegs.length > 0) {
+              const legs = levelRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
+              const names = [...new Set(levelRunLegs.map(r => r.wall.levelName))].join(", ");
+              flags.push({ tone: "note", text: `${levelRunLegs.length} wall${levelRunLegs.length === 1 ? "" : "s"} on ${names} sit${levelRunLegs.length === 1 ? "s" : ""} off the key line, so they carry their own runs - ${legs} legs in their level's colour. Anything within 3' of the key line is covered by the main run and reached with a bracket instead.` });
+            } else if (levelOutlines.length > 1) {
+              flags.push({ tone: "note", text: `${levelOutlines.length} levels traced and every wall sits within 3' of the key line, so one run covers all of them. Brackets pick up the small offsets.` });
             }
             if (placement === "interior") {
               flags.push({ tone: "note", text: "Interior placement puts the legs inside the traced line. Check the corners - an inside corner needs different clearance than an outside one." });
@@ -1827,13 +2206,19 @@ export default function SetScaffoldV2Inner() {
                 </div>
                 <div className="p-3 space-y-1">
                   {[
-                    { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
-                    { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
-                    { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.braces },
-                    { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.guardrails },
-                    { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
-                    { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
-                    { partNo: "CPS",    description: "Coupling Pin",      qty: totals.couplingPins },
+                    /*
+                     * Read from the ledger, which is where the part numbers
+                     * actually live. These used to be typed in here - FO6L3,
+                     * WP10, B82, GR8 - so the panel showed an eight-foot brace
+                     * on a ten-foot bay and a three-foot frame whatever the
+                     * width was set to. It happened to look right on a three
+                     * foot job at ten foot bays, and was wrong on every other.
+                     */
+                    ...readLedger(elevation).map(row => ({
+                      partNo: row.partNo,
+                      description: getStockItem(row.partNo)?.description ?? row.partNo,
+                      qty: row.qty,
+                    })),
                   ].map(item => (
                     <div key={item.partNo} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
                       <span className="w-12 flex-shrink-0 font-mono text-[9px] text-orange-400">{item.partNo}</span>
@@ -1917,6 +2302,13 @@ export default function SetScaffoldV2Inner() {
                   className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${addRunMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
                   {addRunMode ? "Drawing..." : "+ Add Run"}
                 </button>
+                {addRunMode && (
+                  <button onClick={() => setSnapAngle(v => !v)}
+                    title="Line runs up with the nearest wall, or with horizontal and vertical. Off for an angled run."
+                    className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${snapAngle ? "border-orange-500/50 bg-orange-500/15 text-orange-300" : "border-zinc-700 text-zinc-500 hover:border-zinc-500"}`}>
+                    {snapAngle ? "Snap on" : "Snap off"}
+                  </button>
+                )}
                 <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureFrom(null); setMeasureTo(null); }}
                   disabled={!scaleOk}
                   title={scaleOk ? "Measure between two points" : "No scale on this elevation"}
@@ -1963,9 +2355,9 @@ export default function SetScaffoldV2Inner() {
                   <input
                     autoFocus
                     value={pendingHeight}
-                    onChange={e => setPendingHeight(e.target.value.replace(/[^0-9.]/g, ""))}
+                    onChange={e => setPendingHeight(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                    placeholder="Height in feet"
+                    placeholder={`Height, e.g. 21'-2"`}
                     className="mt-2 w-full rounded-lg border border-zinc-800 bg-black px-3 py-2 text-right font-mono text-[13px] font-bold text-orange-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/50"
                   />
                   <div className="mt-3 flex gap-2">
@@ -1977,7 +2369,7 @@ export default function SetScaffoldV2Inner() {
                     </button>
                     <button
                       onClick={() => {
-                        const h = parseFloat(pendingHeight) || 0;
+                        const h = parseFeetInches(pendingHeight);
                         if (h <= 0) return;
                         setDrawnRuns(prev => [...prev, {
                           id: `run-${Date.now().toString(36)}`,
@@ -2060,6 +2452,20 @@ export default function SetScaffoldV2Inner() {
               ))}
 
               {/* Scaffold ticks */}
+              {/* Runs on levels that deviate from the key line. Drawn in the
+                  level's own colour so it is clear at a glance that they are a
+                  second run and not part of the main one. */}
+              {levelRunLegs.map(run => (
+                <g key={run.key}>
+                  <line x1={run.wall.a.x} y1={run.wall.a.y} x2={run.wall.b.x} y2={run.wall.b.y}
+                    stroke={run.wall.color} strokeWidth={0.8} opacity="0.45" strokeDasharray="5,3" />
+                  {run.legs.map((leg, i) => (
+                    <line key={i} x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
+                      stroke={run.wall.color} strokeWidth={1.8} strokeLinecap="square" />
+                  ))}
+                </g>
+              ))}
+
               {/* Drawn runs, their legs, and the two tools. */}
               {drawnRuns.map(run => {
                 const computed = drawnRunLegs.find(r => r.id === run.id);
@@ -2081,8 +2487,24 @@ export default function SetScaffoldV2Inner() {
               })}
 
               {runStart && runEnd && (
-                <line x1={runStart.x} y1={runStart.y} x2={runEnd.x} y2={runEnd.y}
-                  stroke="#f97316" strokeWidth={1.4} strokeDasharray="3,2" />
+                <g>
+                  <line x1={runStart.x} y1={runStart.y} x2={runEnd.x} y2={runEnd.y}
+                    stroke="#f97316" strokeWidth={1.4} strokeDasharray="3,2" />
+                  {/* Crosshair on both ends. A line you are drawing should say
+                      exactly where it will land, not roughly. */}
+                  {[runStart, runEnd].map((p, i) => (
+                    <g key={i}>
+                      <line x1={p.x - 4} y1={p.y} x2={p.x + 4} y2={p.y} stroke="#f97316" strokeWidth={0.8} />
+                      <line x1={p.x} y1={p.y - 4} x2={p.x} y2={p.y + 4} stroke="#f97316" strokeWidth={0.8} />
+                      <circle cx={p.x} cy={p.y} r={1.6} fill="none" stroke="#f97316" strokeWidth={0.6} />
+                    </g>
+                  ))}
+                  <text x={(runStart.x + runEnd.x) / 2} y={(runStart.y + runEnd.y) / 2 - 4}
+                    textAnchor="middle" fontSize="4.5" fill="#f97316" fontFamily="monospace"
+                    stroke="#000" strokeWidth="1.4" paintOrder="stroke">
+                    {(Math.hypot(runEnd.x - runStart.x, runEnd.y - runStart.y) / Math.max(effPuf, 0.0001)).toFixed(1)}&apos;
+                  </text>
+                </g>
               )}
 
               {measurements.map((m, i) => (
@@ -2101,10 +2523,13 @@ export default function SetScaffoldV2Inner() {
                   stroke="#22d3ee" strokeWidth={1.2} strokeDasharray="3,2" />
               )}
 
-              {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs }) => {
-                const segStart = outline[segIndex], segEnd = outline[(segIndex + 1) % outline.length];
+              {/*
+                * The wall comes from the engine, not from a second lookup.
+                * Re-deriving it here by index was how legs ended up drawn
+                * against the wrong wall whenever a jog had been absorbed.
+                */}
+              {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs, a: segStart, b: segEnd, normal }) => {
                 if (!segStart || !segEnd) return null;
-                const normal = computeOutwardNormal(segStart, segEnd, outline, placement);
                 const dx = segEnd.x - segStart.x, dy = segEnd.y - segStart.y, len = Math.sqrt(dx * dx + dy * dy);
                 const wg = 1 * effPuf, tl = scaffoldWidthFt * effPuf;
                 const sl = legs.filter(l => !l.isTurnaroundMirror);
@@ -2258,6 +2683,34 @@ export default function SetScaffoldV2Inner() {
                 </select>
               </div>
               <div>
+                {/*
+                  * What the layout is built from.
+                  *
+                  * Everything below depends on these numbers and none of them
+                  * were visible - so a wall height of zero looked exactly like
+                  * a wall height of twenty-one, and the only symptom was frames
+                  * per leg quietly reading two.
+                  */}
+                <div className="mb-3 rounded-lg border border-zinc-800 bg-black p-2">
+                  <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.16em] text-zinc-600">
+                    Built from
+                  </p>
+                  {([
+                    ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
+                    ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
+                    ["Levels traced", String(levelOutlines.length || 0)],
+                    ["Scale", scaleOk ? `${effPuf.toFixed(1)} px/ft` : "not set"],
+                    ["Frames per leg", liveFrameTall > 0 ? String(liveFrameTall) : "-"],
+                  ] as [string, string][]).map(([label, value]) => (
+                    <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
+                      <span className="text-[9.5px] text-zinc-500">{label}</span>
+                      <span className={`font-mono text-[10px] font-bold ${value === "not set" ? "text-red-400" : "text-zinc-300"}`}>
+                        {value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
                 <label className="text-[9px] text-zinc-600 block mb-1">Bay Length</label>
                 <input value={bayLength} onChange={e => { setBayLength(e.target.value); saveConfig({ standardBayLength: parseFt(e.target.value) || 10 }); }}
                   className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none" />
@@ -2347,7 +2800,7 @@ export default function SetScaffoldV2Inner() {
                 return (
                   <div key={p.label} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
                     <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{partNo}</span>
-                    <span className="text-[9px] text-zinc-500 flex-1 truncate">{p.label} H Frame</span>
+                    <span className="text-[9px] text-zinc-500 flex-1 truncate">{p.label} Scaffold Frame</span>
                     <span className="font-mono text-[10px] font-bold text-orange-300">× {p.qty}</span>
                   </div>
                 );
@@ -2410,15 +2863,17 @@ export default function SetScaffoldV2Inner() {
             </div>
             <div className="px-4 pb-4 space-y-1">
               {[
-                { partNo: "FO6L3",  description: "6'-4\" H Frame",    qty: totals.frames },
-                { partNo: "WP10",   description: "10' Wood Plank",    qty: totals.planks },
-                { partNo: "B82",    description: "8×2 Cross Brace",   qty: totals.braces },
-                { partNo: "GR8",    description: "8' Guard Rail",     qty: totals.guardrails },
-                { partNo: "BP1",    description: "Fixed Base Plate",  qty: totals.legs   },
-                { partNo: "AL1S",   description: "Screw Jack w/Base", qty: totals.legs   },
-                { partNo: "CPS",    description: "Coupling Pin",      qty: totals.couplingPins },
-                { partNo: "BRKT",   description: "Wall Bracket (Added)", qty: totals.brackets },
-              ].map(item => (
+                // Same source as everywhere else. See the note on the other
+                // material panel for why these were not typed in here.
+                ...readLedger(elevation).map(row => ({
+                  partNo: row.partNo,
+                  description: getStockItem(row.partNo)?.description ?? row.partNo,
+                  qty: row.qty,
+                })),
+              // A part nobody is buying does not belong on a material list.
+              // The bracket line printed on every job, blank, whether or not
+              // a single bracket had been placed.
+              ].filter(item => (item.qty ?? 0) > 0).map(item => (
                 <div key={item.partNo} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 transition ${item.qty > 0 ? "border-orange-500/25 bg-orange-500/5" : "border-zinc-900 bg-black"}`}>
                   <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{item.partNo}</span>
                   <span className="text-[9px] text-zinc-500 flex-1 truncate">{item.description}</span>
