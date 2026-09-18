@@ -173,12 +173,38 @@ export type StoredElevationBreakdownRow = {
  * assess/apply scaffold against the traced wall outline. Adding one of
  * these updates the live material counts automatically.
  */
+/**
+ * One thing on a section drawing.
+ *
+ * Korban lays a section out from the traced wall and the material the plan
+ * already established, then every piece becomes an object in its own right -
+ * grabbable, movable, deletable. A project manager looking at a section will
+ * always want to nudge something, and a drawing you cannot correct is a
+ * drawing nobody trusts.
+ *
+ * Positions are in section-view units, the same space the traced profile is
+ * in, so a piece stays where it was put at any zoom.
+ */
 export type SectionDraftingItem = {
   id: string;
-  kind: "frame" | "bracket";
+  kind: "frame" | "bracket" | "plank" | "guardrail" | "tube" | "jack" | "dimension" | "note";
+  /** Part number for material. For a dimension, how it was drawn. */
   variant: string;
   /** 0-indexed level this piece sits at (0 = ground level). */
   level: number;
+  /** Where it sits. Absent on older records, which were level-indexed only. */
+  x?: number;
+  y?: number;
+  /** Dimensions and notes carry a second point. */
+  x2?: number;
+  y2?: number;
+  /** What a dimension reads, or what a note says. */
+  label?: string;
+  /**
+   * Who put it there. Korban's own pieces are replaced when the section is
+   * laid out again; anything the estimator added survives that.
+   */
+  source?: "korban" | "user";
 };
 
 export type TakeoffOverlayGeometry = {
@@ -224,6 +250,17 @@ export type ProjectElevation = {
      * Chosen via the toggle that appears once a wall outline exists.
      */
     scaffoldSide: "left" | "right";
+    /**
+     * Page units per foot on the section sheet.
+     *
+     * Its own, not the floor plan's. An architect cuts a section at whatever
+     * scale suits it, usually larger than the plan it was cut from, so a
+     * profile traced against the plan's scale measures a building several
+     * times the size of the real one.
+     */
+    pageUnitsPerFoot: number | null;
+    /** What was typed when the scale was set, for the drawing to print. */
+    scaleLabel: string;
     /**
      * Hand-placed frames/brackets added on top of the auto-drawn
      * section (see SectionDraftingItem). Feeds material counts.
@@ -571,14 +608,29 @@ function normalizeElevationBreakdown(value: unknown): StoredElevationBreakdownRo
     .filter((row): row is StoredElevationBreakdownRow => Boolean(row));
 }
 
+const DRAFTING_KINDS = [
+  "frame", "bracket", "plank", "guardrail", "tube", "jack", "dimension", "note",
+] as const;
+
 function normalizeSectionDraftingItem(value: unknown): SectionDraftingItem | null {
   if (!isRecord(value)) return null;
-  const kind: "frame" | "bracket" = value.kind === "bracket" ? "bracket" : "frame";
+  const kind = (DRAFTING_KINDS as readonly string[]).includes(value.kind as string)
+    ? (value.kind as SectionDraftingItem["kind"])
+    : "frame";
+  const point = (key: string) => {
+    const n = asNumber(value[key], NaN);
+    return Number.isFinite(n) ? n : undefined;
+  };
   return {
     id: asString(value.id, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
     kind,
     variant: asString(value.variant, kind === "frame" ? "Standard" : "24\""),
     level: Math.max(0, Math.round(asNumber(value.level, 0))),
+    x: point("x"), y: point("y"), x2: point("x2"), y2: point("y2"),
+    label: typeof value.label === "string" ? value.label : undefined,
+    // Older records predate the distinction; treat them as the estimator's,
+    // so a re-layout never quietly deletes work somebody did by hand.
+    source: value.source === "korban" ? "korban" : "user",
   };
 }
 
@@ -847,6 +899,8 @@ function createEmptyElevation(): ProjectElevation {
       sectionType: "A-A",
       wallOutline: [],
       scaffoldSide: "left",
+      pageUnitsPerFoot: null,
+      scaleLabel: "",
       draftingAdditions: [],
     },
     elevationBreakdown: [],
@@ -884,6 +938,8 @@ function createDemoElevation(): ProjectElevation {
       sectionType: "A-A",
       wallOutline: [],
       scaffoldSide: "left",
+      pageUnitsPerFoot: null,
+      scaleLabel: "",
       draftingAdditions: [],
     },
     elevationBreakdown: [],
@@ -1020,6 +1076,11 @@ function normalizeElevation(value: unknown): ProjectElevation {
       sectionType: asString(sectionRecord.sectionType, fallback.sectionView.sectionType),
       wallOutline: normalizePoints(sectionRecord.wallOutline),
       scaffoldSide: sectionRecord.scaffoldSide === "right" ? "right" : "left",
+      pageUnitsPerFoot: (() => {
+        const n = asNumber(sectionRecord.pageUnitsPerFoot, NaN);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      })(),
+      scaleLabel: asString(sectionRecord.scaleLabel, ""),
       draftingAdditions: normalizeSectionDraftingItems(sectionRecord.draftingAdditions),
     },
     elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
@@ -1317,6 +1378,128 @@ export function isStandardBay(bayLengthFt: number, tolerance = 0.1): boolean {
 export function largestBayWithin(distanceFt: number): number | null {
   const fits = STANDARD_BAY_LENGTHS.filter((len) => len <= distanceFt + 0.1);
   return fits.length ? Math.max(...fits) : null;
+}
+
+/**
+ * Lays a section out against a traced wall.
+ *
+ * The scaffold runs plumb. The wall does not - it steps in and out, and every
+ * time it steps back further than a worker can reach, something has to carry
+ * the deck in to it. That is the whole of this function: put the leg one foot
+ * off the outermost face of the finished wall, stack the frames the plan
+ * already decided on, and bracket whatever the wall leaves behind.
+ *
+ * It reads material rather than deciding it. The brackets here are the ones
+ * the floor plan already established; if the profile implies one the plan did
+ * not produce, that is worth an estimator's eye, not a silent addition.
+ *
+ * Returns pieces in section-view units - the same space the profile was
+ * traced in - so nothing has to know what the zoom is.
+ */
+export function layoutSection(options: {
+  /** The traced outer profile, bottom to top, in page units. */
+  profile: { x: number; y: number }[];
+  pageUnitsPerFoot: number;
+  /** Frames per leg, from the plan. */
+  frameTall: number;
+  frameHeightFt?: number;
+  scaffoldWidthFt: number;
+  planksPerDeck: number;
+  /** Which side of the profile the scaffold stands on. */
+  side?: "left" | "right";
+}): SectionDraftingItem[] {
+  const {
+    profile, pageUnitsPerFoot: puf, frameTall,
+    frameHeightFt = 6.333, scaffoldWidthFt, planksPerDeck, side = "left",
+  } = options;
+
+  if (profile.length < 2 || puf <= 0 || frameTall <= 0) return [];
+
+  const dir = side === "left" ? -1 : 1;
+  const standoff = 1 * puf;
+  const maxReach = (20 / 12) * puf;
+  const frameH = frameHeightFt * puf;
+  const frameW = scaffoldWidthFt * puf;
+
+  // The outermost face is what the leg is set off. Everything behind it is
+  // something a bracket has to reach.
+  const faces = profile.map((p) => p.x);
+  const outerFace = dir === -1 ? Math.max(...faces) : Math.min(...faces);
+  const legFace = outerFace + dir * standoff;
+
+  const grade = Math.max(...profile.map((p) => p.y));
+  const items: SectionDraftingItem[] = [];
+  const add = (item: Omit<SectionDraftingItem, "id" | "source">) =>
+    items.push({
+      ...item,
+      id: `k-${item.kind}-${item.level}-${items.length}`,
+      source: "korban",
+    });
+
+  /**
+   * Where the wall face sits at a given height up the section.
+   *
+   * Above or below the traced profile it holds the nearest traced point
+   * rather than snapping back to the outermost face - a parapet above the
+   * last point traced is still the wall the scaffold is standing against, and
+   * pretending otherwise made brackets disappear at the top of a run.
+   */
+  function faceAt(y: number): number {
+    let best: number | null = null;
+    let bestGap = Infinity;
+    for (let i = 0; i < profile.length - 1; i++) {
+      const a = profile[i], b = profile[i + 1];
+      const lo = Math.min(a.y, b.y), hi = Math.max(a.y, b.y);
+      if (y < lo - 1 || y > hi + 1) continue;
+      const t = Math.abs(b.y - a.y) < 1e-6 ? 0 : (y - a.y) / (b.y - a.y);
+      const x = a.x + (b.x - a.x) * t;
+      const gap = Math.abs(x - legFace);
+      if (gap < bestGap) { bestGap = gap; best = x; }
+    }
+    if (best !== null) return best;
+
+    let nearest = profile[0];
+    let nearestDy = Math.abs(profile[0].y - y);
+    profile.forEach((p) => {
+      const dy = Math.abs(p.y - y);
+      if (dy < nearestDy) { nearestDy = dy; nearest = p; }
+    });
+    return nearest.x;
+  }
+
+  for (let jump = 0; jump < frameTall; jump++) {
+    const bottom = grade - jump * frameH;
+    const top = bottom - frameH;
+
+    add({ kind: "frame", variant: "FO6L3", level: jump, x: legFace, y: top });
+
+    // Deck at the head of every jump.
+    for (let plank = 0; plank < planksPerDeck; plank++) {
+      add({
+        kind: "plank", variant: "WP10", level: jump,
+        x: legFace + dir * (plank * (frameW / planksPerDeck)), y: top,
+      });
+    }
+
+    /*
+     * A bracket where the wall has fallen back out of reach. Sized so the
+     * deck it carries still holds its foot of clearance off that face, which
+     * is what makes the wall workable rather than merely visible.
+     */
+    const wallX = faceAt(top);
+    const gap = Math.abs(wallX - legFace);
+    if (gap > maxReach) {
+      const reachFt = (gap - standoff) / puf;
+      const variant = reachFt <= 1.05 ? "BR12S" : reachFt <= 1.7 ? "BR20S" : "BR30S";
+      add({ kind: "bracket", variant, level: jump, x: legFace, y: top });
+    }
+  }
+
+  // Guardrail on the working deck, jack and plate at grade.
+  add({ kind: "guardrail", variant: "GR10", level: frameTall - 1, x: legFace, y: grade - frameTall * frameH });
+  add({ kind: "jack", variant: "AL1S", level: 0, x: legFace, y: grade });
+
+  return items;
 }
 
 /** Which frame, plank, brace and rail a given configuration calls for. */
