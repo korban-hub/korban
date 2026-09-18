@@ -17,7 +17,6 @@ type LegResult = {
   isTurnaroundMirror: boolean; isStartLeg: boolean; isEndLeg: boolean;
 };
 
-const projectInfo = { projectName: "Mare Island Apartments", jobNumber: "KRB-260614-001" };
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/project-plan-desk", label: "Project Plan Desk" },
@@ -204,12 +203,153 @@ function simplifyOutline(outline: PlanPoint[], puf: number): PlanPoint[] {
   return kept.length >= 3 ? kept : outline;
 }
 
+/**
+ * A stretch of wall that steps in and comes back out.
+ *
+ * Buildings are full of these - a doorway set back, a light well, a row of
+ * bays between piers. Scaffold does not follow every one of them, and which
+ * ones it does follow is a judgement an estimator makes in a second and a
+ * machine has to be told.
+ */
+export type Recess = {
+  /** Index of the vertex the recess leaves the main line at. */
+  from: number;
+  /** Index it rejoins at. */
+  to: number;
+  depthFt: number;
+  /** Distance across the opening. */
+  mouthFt: number;
+  strategy: "bracket" | "straddle" | "double";
+  /** The wall inside the recess, for a double run to stand against. */
+  innerPoints: PlanPoint[];
+};
+
+/**
+ * Finds recesses and decides what to do with each.
+ *
+ * Specification section 9. Depth decides:
+ *
+ *   under 8"          absorbed already, before this runs
+ *   8" to 3'          brackets reach in from a run on the main line
+ *   3' or more, and the mouth can be spanned      straddle it
+ *   3' or more, too wide to span                  a second run inside
+ *
+ * Bracket against straddle is a question of span, not depth: if the piers
+ * either side are close enough to bridge under normal bay rules, the deck
+ * carries across and nothing reaches in.
+ */
+function findRecesses(outline: PlanPoint[], puf: number, bayFt: number): Recess[] {
+  const n = outline.length;
+  if (n < 5 || puf <= 0) return [];
+
+  const DEEP_FT = 3;
+  const found: Recess[] = [];
+  let i = 0;
+
+  while (i < n) {
+    const a = outline[i];
+    // The line this stretch of wall is running along.
+    const prev = outline[(i - 1 + n) % n];
+    const dir = { x: a.x - prev.x, y: a.y - prev.y };
+    const dirLen = Math.hypot(dir.x, dir.y);
+    if (dirLen < 1e-6) { i++; continue; }
+    const u = { x: dir.x / dirLen, y: dir.y / dirLen };
+
+    // Look ahead for the vertex that picks the same line back up.
+    let matched = -1;
+    for (let span = 2; span <= 8 && i + span < n + 1; span++) {
+      const b = outline[(i + span) % n];
+      const back = { x: b.x - a.x, y: b.y - a.y };
+      const backLen = Math.hypot(back.x, back.y);
+      if (backLen < puf) continue;
+      const along = (back.x * u.x + back.y * u.y) / backLen;
+      // Within a few degrees of the original line, and moving forward along it.
+      if (along <= 0.985) continue;
+      /*
+       * And the wall has to carry on along that line afterwards. Without this
+       * the search matches across a corner and calls the building's own shape
+       * a recess - a step-back is not a recess, because the wall never comes
+       * back to where it was.
+       */
+      const after = outline[(i + span + 1) % n];
+      const nx = after.x - b.x, ny = after.y - b.y;
+      const nl = Math.hypot(nx, ny);
+      if (nl < 1e-6) continue;
+      if ((nx * u.x + ny * u.y) / nl <= 0.985) continue;
+      matched = i + span;
+      break;
+    }
+    if (matched < 0) { i++; continue; }
+
+    // How far the wall steps away from the chord between the two.
+    const b = outline[matched % n];
+    const chord = { x: b.x - a.x, y: b.y - a.y };
+    const chordLen = Math.hypot(chord.x, chord.y);
+    let depth = 0;
+    const innerPoints: PlanPoint[] = [];
+    const sides = new Set<boolean>();
+    for (let k = i + 1; k < matched; k++) {
+      const v = outline[k % n];
+      innerPoints.push(v);
+      const cross = (v.x - a.x) * chord.y - (v.y - a.y) * chord.x;
+      sides.add(cross > 0);
+      depth = Math.max(depth, Math.abs(cross) / chordLen);
+    }
+    // A genuine recess stays on one side of its own opening. Anything that
+    // crosses back and forth is the building, not a pocket in it.
+    if (sides.size > 1) { i++; continue; }
+
+    const depthFt = depth / puf;
+    const mouthFt = chordLen / puf;
+    if (depthFt >= JOG_TOLERANCE_FT) {
+      const spannable = mouthFt <= bayFt + 0.1;
+      const strategy: Recess["strategy"] =
+        depthFt < DEEP_FT ? "bracket" : spannable ? "straddle" : "double";
+      found.push({ from: i, to: matched % n, depthFt, mouthFt, strategy, innerPoints });
+      i = matched;
+      continue;
+    }
+    i++;
+  }
+
+  return found;
+}
+
+/**
+ * The line the main run actually follows.
+ *
+ * Bracketed and straddled recesses are stepped over - the scaffold runs
+ * straight past and reaches in, or decks across. A recess deep enough for its
+ * own run is left in the outline, because the run goes in there.
+ */
+function runLineFor(outline: PlanPoint[], recesses: Recess[]): PlanPoint[] {
+  const skip = new Set<number>();
+  recesses.forEach(r => {
+    if (r.strategy === "double") return;
+    for (let k = r.from + 1; k < r.to; k++) skip.add(k % outline.length);
+  });
+  if (skip.size === 0) return outline;
+  const kept = outline.filter((_, i) => !skip.has(i));
+  return kept.length >= 3 ? kept : outline;
+}
+
 function computeLegs(
   outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
   placement: "exterior" | "interior" = "exterior",
 ): SegmentLegs[] {
   const raw = outline;
-  const shape = simplifyOutline(outline, puf);
+  /*
+   * Two passes before a leg is placed.
+   *
+   * First the jogs the scaffold would not follow are absorbed. Then the
+   * recesses are found and each one decided: stepped over and bracketed,
+   * stepped over and decked across, or left in for a run of its own. What
+   * comes out is the line the scaffold actually stands on, which is rarely
+   * the line the building was traced along.
+   */
+  const simplified = simplifyOutline(outline, puf);
+  const recesses = findRecesses(simplified, puf, bayFt);
+  const shape = runLineFor(simplified, recesses);
   const n = shape.length;
   if (n < 2 || puf <= 0 || bayFt <= 0) {
     return raw.map((_, i) => ({
@@ -1072,7 +1212,11 @@ export default function SetScaffoldV2Inner() {
   const [viewerPan,      setViewerPan]      = useState({ dx: 0, dy: 0 });
   const [isPanning,      setIsPanning]      = useState(false);
   const [elevation,      setElevation]      = useState<ProjectElevation | null>(null);
-  const [projectName,    setProjectName]    = useState(projectInfo.projectName);
+  const [projectName,    setProjectName]    = useState("");
+  /** Everything the title block prints. Read from the project, not typed in. */
+  const [sheetInfo,      setSheetInfo]      = useState({
+    jobNumber: "", address: "", customer: "", estimator: "", company: "",
+  });
   const [mounted,        setMounted]        = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -1135,6 +1279,17 @@ export default function SetScaffoldV2Inner() {
    *
    * Specification section 3b.
    */
+  /**
+   * Recesses in the traced plan, and what Korban decided to do with each.
+   *
+   * Computed here as well as inside the leg engine so the material and the
+   * guidance can talk about them. Cheap - it is a walk of the outline.
+   */
+  const recesses = useMemo(() => {
+    if (!scaleOk || effPuf <= 0 || outline.length < 5) return [];
+    return findRecesses(simplifyOutline(outline, effPuf), effPuf, bayLengthFt);
+  }, [outline, scaleOk, effPuf, bayLengthFt]);
+
   const deviatingWalls = useMemo(() => {
     if (levelOutlines.length < 2 || effPuf <= 0) return [];
     const key = levelOutlines.find(l => l.isKey) ?? levelOutlines[0];
@@ -1171,7 +1326,7 @@ export default function SetScaffoldV2Inner() {
       return { nearest, parallel };
     }
 
-    const out: { levelId: string; levelName: string; color: string; a: PlanPoint; b: PlanPoint; reason: string }[] = [];
+    const out: { levelId: string; levelName: string; color: string; a: PlanPoint; b: PlanPoint; reason: string; levelPoints: PlanPoint[] }[] = [];
     levelOutlines.filter(l => !l.isKey).forEach(level => {
       for (let i = 0; i < level.points.length; i++) {
         const a = level.points[i], b = level.points[(i + 1) % level.points.length];
@@ -1180,9 +1335,9 @@ export default function SetScaffoldV2Inner() {
         // A wall that turns away from the key line is always its own run,
         // however close it sits. A parallel one has to move three feet.
         if (!parallel) {
-          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, reason: "turns away from the key line" });
+          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, levelPoints: level.points, reason: "turns off the key line" });
         } else if (nearest >= threshold) {
-          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, reason: `${(nearest / effPuf).toFixed(1)}' off the key line` });
+          out.push({ levelId: level.id, levelName: level.name, color: level.color, a, b, levelPoints: level.points, reason: `${(nearest / effPuf).toFixed(1)}' off key line` });
         }
       }
     });
@@ -1431,7 +1586,15 @@ export default function SetScaffoldV2Inner() {
         const engineChanged = JSON.stringify(freshEngine) !== JSON.stringify(raw.quantityEngine);
         const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
         if (engineChanged || ledgerChanged) saveActiveElevation(e);
-        setElevation(e); setProjectName(p.projectName || projectInfo.projectName);
+        setElevation(e); setProjectName(p.projectName || "");
+        const bs = getBackendSettings();
+        setSheetInfo({
+          jobNumber: p.proposalNumber || p.projectId || "",
+          address: p.projectAddress || "",
+          customer: p.customer || "",
+          estimator: bs.estimator?.estimatorName || p.estimator || "",
+          company: bs.company?.companyName || "",
+        });
         const depth = getEstimateDepth();
         setEstimateDepthState(depth);
         setScaffoldWidth(e.scaffoldInput.scaffoldWidth >= 5 ? "5'" : e.scaffoldInput.scaffoldWidth >= 3.5 ? "3'-6\"" : "3'");
@@ -1607,7 +1770,15 @@ export default function SetScaffoldV2Inner() {
       const dx = wall.b.x - wall.a.x, dy = wall.b.y - wall.a.y;
       const len = Math.hypot(dx, dy);
       const along = { x: dx / len, y: dy / len };
-      const normal = computeOutwardNormal(wall.a, wall.b, outline, placement);
+      /*
+       * Outward from this level's own shape, not the key one.
+       *
+       * An upper floor that overhangs sits outside the key line; a lower one
+       * sits inside it. Asking the key outline which way is out therefore gets
+       * the answer backwards on one of them, and the ticks point into the
+       * building instead of away from the wall they serve.
+       */
+      const normal = computeOutwardNormal(wall.a, wall.b, wall.levelPoints, placement);
 
       const positions: number[] = [-floatPx];
       let cursor = -floatPx;
@@ -2016,6 +2187,28 @@ export default function SetScaffoldV2Inner() {
       }
     }
 
+    /*
+     * Brackets for recesses the run steps past.
+     *
+     * One per leg along the opening, sized to reach the recessed wall while
+     * keeping the standoff off its face. A pocket two feet deep needs a deck
+     * two feet wider, and that deck has to be carried by something.
+     */
+    const bracketed = recesses.filter(r => r.strategy === "bracket");
+    if (bracketed.length > 0 && drawnLegCount > 0) {
+      const perBracketLegs = Math.max(1, Math.round(legs / Math.max(1, allSegmentLegs.length)));
+      bracketed.forEach(r => {
+        const partNo = r.depthFt <= 1.05 ? "BR12S" : r.depthFt <= 1.7 ? "BR20S" : "BR30S";
+        const spanLegs = Math.max(2, Math.ceil(r.mouthFt / bayLengthUsed) + 1);
+        entries.push({
+          partNo,
+          qty: spanLegs * Math.max(1, qe.frameTall ?? 1),
+          note: `${r.depthFt.toFixed(1)}' recess, ${r.mouthFt.toFixed(0)}' wide`,
+        });
+        void perBracketLegs;
+      });
+    }
+
     // Anything dropped onto the section drawing is real material too.
     const drafted = el.sectionView?.draftingAdditions ?? [];
     const bracketCounts = new Map<string, number>();
@@ -2077,13 +2270,114 @@ export default function SetScaffoldV2Inner() {
         actions={
           <>
             <KorbanHeaderMeta label="Project" value={projectName} />
-            <KorbanHeaderMeta label="Job No." value={projectInfo.jobNumber} />
+            <KorbanHeaderMeta label="Job No." value={sheetInfo.jobNumber || "-"} />
             <KorbanButton as="a" href="/takeoff-workspace-advanced" variant="ghost">← Takeoff</KorbanButton>
             <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
             <KorbanButton as="a" href="/korban-review" variant="primary">Korban Review →</KorbanButton>
           </>
         }
       />
+
+      <style>{`
+        /*
+         * Printing a takeoff.
+         *
+         * Everything that is for working - panels, buttons, guidance - comes
+         * off, and what is left is the drawing on white with a title block in
+         * the corner. The plan is already vector, so it prints at the printer's
+         * resolution rather than as a screenshot of a screen.
+         *
+         * A takeoff that leaves the office is a drawing. A screenshot looks like
+         * a guess; the same layout in a title block looks like a set of plans.
+         */
+        @media print {
+          @page { size: letter landscape; margin: 0.35in; }
+          body { background: #fff !important; }
+          body * { visibility: hidden !important; }
+
+          .korban-sheet, .korban-sheet * { visibility: visible !important; }
+          .korban-sheet {
+            display: block !important;
+            position: absolute; left: 0; top: 0;
+            width: 100%; height: 100%;
+            background: #fff; color: #111;
+          }
+
+          .korban-plan-print, .korban-plan-print * { visibility: visible !important; }
+          .korban-plan-print {
+            position: absolute !important;
+            left: 0.2in; top: 0.2in;
+            width: calc(100% - 0.4in); height: calc(100% - 2.1in);
+            background: #fff !important;
+            overflow: visible !important;
+          }
+          .korban-plan-print svg { width: 100% !important; height: 100% !important; }
+          /* Ink on paper, not glow on black. */
+          .korban-plan-print line[stroke="#f8fafc"] { stroke: #111 !important; }
+          .korban-plan-print text { fill: #111 !important; }
+          .korban-no-print { display: none !important; }
+
+          .korban-titleblock {
+            position: absolute; right: 0.2in; bottom: 0.2in;
+            width: 4.4in; border: 1.5px solid #111;
+            font-family: ui-monospace, monospace; font-size: 7.5pt; line-height: 1.35;
+          }
+          .korban-tb-mark {
+            display: flex; align-items: center; gap: 6px;
+            border-bottom: 1px solid #111; padding: 4px 6px;
+            font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+          }
+          .korban-titleblock dl {
+            display: grid; grid-template-columns: 4.4em 1fr;
+            margin: 0; padding: 5px 6px; gap: 1px 8px;
+          }
+          .korban-titleblock dt { color: #555; text-transform: uppercase; font-size: 6.5pt; }
+          .korban-titleblock dd { margin: 0; font-weight: 600; }
+          .korban-tb-sheet {
+            display: flex; align-items: center; justify-content: space-between;
+            border-top: 1px solid #111; padding: 4px 6px;
+            text-transform: uppercase; letter-spacing: 0.1em;
+          }
+          .korban-tb-sheet strong { font-size: 13pt; }
+        }
+      `}</style>
+
+      {/*
+        * The printed sheet.
+        *
+        * A takeoff that leaves the office is a drawing, and a drawing carries a
+        * title block - who drew it, for whom, at what scale, on what date. An
+        * estimator handing a GC a screenshot looks like an estimator guessing;
+        * the same layout in a title block looks like a set of plans.
+        *
+        * Hidden on screen, laid out on paper by the print rules below.
+        */}
+      <div className="korban-sheet hidden">
+        <div className="korban-sheet-body" />
+        <div className="korban-titleblock">
+          <div className="korban-tb-mark">
+            <svg width="22" height="22" viewBox="0 0 44 44" aria-hidden>
+              <path d="M22 4 L40 38 L4 38 Z" fill="#111" />
+              <path d="M22 4 L40 38 L22 38 Z" fill="#555" />
+            </svg>
+            <span>{sheetInfo.company || "KORBAN"}</span>
+          </div>
+          <dl>
+            <dt>Project</dt><dd>{projectName || "-"}</dd>
+            <dt>Address</dt><dd>{sheetInfo.address || "-"}</dd>
+            <dt>Customer</dt><dd>{sheetInfo.customer || "-"}</dd>
+            <dt>Job no.</dt><dd>{sheetInfo.jobNumber || "-"}</dd>
+            <dt>Drawn by</dt><dd>{sheetInfo.estimator || "-"}</dd>
+            <dt>Date</dt><dd>{new Date().toLocaleDateString()}</dd>
+            <dt>Scale</dt><dd>{scaleOk ? "As noted" : "Not to scale"}</dd>
+            <dt>Frame</dt><dd>{scaffoldWidthFt === 3.5 ? `3'-6"` : `${scaffoldWidthFt}'`} wide, {bayLengthFt}&apos; bays</dd>
+          </dl>
+          <div className="korban-tb-sheet">
+            <span>Scaffold Layout</span>
+            <strong>S-1</strong>
+          </div>
+        </div>
+      </div>
 
       {/* Where the scaffold stands relative to the trace, and what Korban
           makes of the job as it is. Both sit above the workspace because both
@@ -2115,10 +2409,10 @@ export default function SetScaffoldV2Inner() {
           {(() => {
             const flags: KorbanGuidanceFlag[] = [];
             if (!scaleOk) {
-              flags.push({ tone: "warn", text: "No scale on this elevation, so the layout is drawn but not measured. Nothing below is a real dimension until it is set." });
+              flags.push({ tone: "warn", text: "No scale set. Nothing here is a real dimension yet." });
             }
             if (outline.length < 3) {
-              flags.push({ tone: "warn", text: "No traced plan on this elevation. I am working from a fallback shape, which is fine for looking at and wrong for pricing." });
+              flags.push({ tone: "warn", text: "No traced plan. This shape is a placeholder - do not price it." });
             }
             // Two runs turning into the same notch need room for both.
             const minNotch = (scaffoldWidthFt + 1) * 2;
@@ -2134,23 +2428,31 @@ export default function SetScaffoldV2Inner() {
             });
             const tightNotch = shortWalls.length > 0;
             if (tightNotch) {
-              flags.push({ tone: "warn", text: `${shortWalls.length} wall${shortWalls.length === 1 ? " is" : "s are"} shorter than ${minNotch}' here. Two runs turning into that needs ${minNotch}' between them, so check those corners before this goes out - they may want a tube-and-clamp return rather than frames.` });
+              flags.push({ tone: "warn", text: `${shortWalls.length} wall${shortWalls.length === 1 ? "" : "s"} under ${minNotch}'. Two runs will not turn in that - may need tube and clamp.` });
             }
             if ((elevation?.wallHeight ?? 0) <= 0) {
-              flags.push({ tone: "warn", text: "No wall height on this elevation, so every leg falls back to the minimum - that is why frames per leg reads two. The height comes from gripping an elevation in Takeoff; without it I can lay the scaffold out but I cannot say how tall it stands." });
+              flags.push({ tone: "warn", text: "No wall height, so every leg is at minimum. Grip an elevation in Takeoff." });
+            }
+            if (recesses.length > 0) {
+              const by = (k: string) => recesses.filter(r => r.strategy === k).length;
+              const parts: string[] = [];
+              if (by("bracket")) parts.push(`${by("bracket")} bracketed`);
+              if (by("straddle")) parts.push(`${by("straddle")} decked across`);
+              if (by("double")) parts.push(`${by("double")} with its own run`);
+              flags.push({ tone: "note", text: `${recesses.length} recess${recesses.length === 1 ? "" : "es"} in this plan - ${parts.join(", ")}. Under 8" I run straight past.` });
             }
             if (levelRunLegs.length > 0) {
               const legs = levelRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
               const names = [...new Set(levelRunLegs.map(r => r.wall.levelName))].join(", ");
-              flags.push({ tone: "note", text: `${levelRunLegs.length} wall${levelRunLegs.length === 1 ? "" : "s"} on ${names} sit${levelRunLegs.length === 1 ? "s" : ""} off the key line, so they carry their own runs - ${legs} legs in their level's colour. Anything within 3' of the key line is covered by the main run and reached with a bracket instead.` });
+              flags.push({ tone: "note", text: `${levelRunLegs.length} wall${levelRunLegs.length === 1 ? "" : "s"} off the key line on ${names} - own run, ${legs} legs, shown in that level's colour.` });
             } else if (levelOutlines.length > 1) {
-              flags.push({ tone: "note", text: `${levelOutlines.length} levels traced and every wall sits within 3' of the key line, so one run covers all of them. Brackets pick up the small offsets.` });
+              flags.push({ tone: "note", text: `${levelOutlines.length} levels, all within 3' of the key line. One run covers it, brackets pick up the rest.` });
             }
             if (placement === "interior") {
-              flags.push({ tone: "note", text: "Interior placement puts the legs inside the traced line. Check the corners - an inside corner needs different clearance than an outside one." });
+              flags.push({ tone: "note", text: "Legs set inside the wall line. Check your inside corners for clearance." });
             }
             if (scaleOk && outline.length >= 3 && (elevation?.wallHeight ?? 0) <= 0) {
-              flags.push({ tone: "warn", text: "Wall height is zero, so frame configuration falls back to a single jump. Set it in Takeoff and the whole stack rebuilds." });
+              flags.push({ tone: "warn", text: "No wall height. Stack falls back to one jump - grip an elevation in Takeoff." });
             }
             if (flags.length === 0) return null;
             return <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-xl" />;
@@ -2309,6 +2611,11 @@ export default function SetScaffoldV2Inner() {
                     {snapAngle ? "Snap on" : "Snap off"}
                   </button>
                 )}
+                <button onClick={() => window.print()}
+                  title="Print the layout as a drawing sheet with a title block"
+                  className="rounded-lg border border-zinc-700 px-2 py-1 text-[9px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">
+                  Print
+                </button>
                 <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureFrom(null); setMeasureTo(null); }}
                   disabled={!scaleOk}
                   title={scaleOk ? "Measure between two points" : "No scale on this elevation"}
@@ -2420,8 +2727,9 @@ export default function SetScaffoldV2Inner() {
                 stacking rules. Without this, it invisibly covers the whole
                 canvas and swallows every click before the svg can see it —
                 which is exactly the "zero clicks register anywhere" bug. */}
-            <div className="pointer-events-none absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
-            <svg ref={svgRef} className="relative z-10 h-full w-full"
+            <div className="korban-no-print pointer-events-none absolute inset-0 opacity-[0.06] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:32px_32px]" />
+            {/* korban-plan-print is what the print rules lift onto the sheet. */}
+            <svg ref={svgRef} className="korban-plan-print relative z-10 h-full w-full"
               viewBox={`${svgViewBox.x + (svgViewBox.w * (1 - 1 / viewerZoom)) / 2 + viewerPan.dx} ${svgViewBox.y + (svgViewBox.h * (1 - 1 / viewerZoom)) / 2 + viewerPan.dy} ${svgViewBox.w / viewerZoom} ${svgViewBox.h / viewerZoom}`}
               style={{
                 cursor: isPanning
@@ -2460,8 +2768,19 @@ export default function SetScaffoldV2Inner() {
                   <line x1={run.wall.a.x} y1={run.wall.a.y} x2={run.wall.b.x} y2={run.wall.b.y}
                     stroke={run.wall.color} strokeWidth={0.8} opacity="0.45" strokeDasharray="5,3" />
                   {run.legs.map((leg, i) => (
-                    <line key={i} x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
-                      stroke={run.wall.color} strokeWidth={1.8} strokeLinecap="square" />
+                    <g key={i}>
+                      <line x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
+                        stroke={run.wall.color} strokeWidth={1.8} strokeLinecap="square" />
+                      {/* Frames per leg, same as any other run. A leg without a
+                          count is a leg nobody can build from. */}
+                      <text x={leg.labelPoint.x} y={leg.labelPoint.y}
+                        textAnchor="middle" dominantBaseline="middle" opacity="0.9"
+                        fill={run.wall.color}
+                        style={{
+                          fontSize: Math.max(scaffoldWidthFt * effPuf * 0.5, 6.25),
+                          fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
+                        }}>{liveFrameTall}</text>
+                    </g>
                   ))}
                 </g>
               ))}
@@ -2473,10 +2792,26 @@ export default function SetScaffoldV2Inner() {
                   <g key={run.id}>
                     <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
                       stroke="#f97316" strokeWidth={1.2} strokeDasharray="4,3" opacity="0.55" />
-                    {computed?.legs.map((leg, i) => (
-                      <line key={i} x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
-                        stroke="#f97316" strokeWidth={2} strokeLinecap="round" />
-                    ))}
+                    {computed?.legs.map((leg, i) => {
+                      // A drawn run carries its own height, so its frame count
+                      // is its own - not the elevation's.
+                      const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
+                      const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+                      const tall = Math.max(1, computeFrameMakeup(Math.max(0, run.heightFt - reach), jack).frameTall);
+                      return (
+                        <g key={i}>
+                          <line x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
+                            stroke="#f97316" strokeWidth={2} strokeLinecap="round" />
+                          <text x={leg.labelPoint.x} y={leg.labelPoint.y}
+                            textAnchor="middle" dominantBaseline="middle" opacity="0.9"
+                            fill="#f97316"
+                            style={{
+                              fontSize: Math.max(scaffoldWidthFt * effPuf * 0.5, 6.25),
+                              fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
+                            }}>{tall}</text>
+                        </g>
+                      );
+                    })}
                     <text x={(run.a.x+run.b.x)/2} y={(run.a.y+run.b.y)/2-4} textAnchor="middle"
                       fontSize="4.5" fill="#f97316" fontFamily="monospace"
                       stroke="#000" strokeWidth="1.4" paintOrder="stroke">
@@ -2696,15 +3031,16 @@ export default function SetScaffoldV2Inner() {
                     Built from
                   </p>
                   {([
+                    ["Job", projectName || "no project"],
                     ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
                     ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
                     ["Levels traced", String(levelOutlines.length || 0)],
-                    ["Scale", scaleOk ? `${effPuf.toFixed(1)} px/ft` : "not set"],
+                    ["Scale", scaleOk ? "set" : "not set"],
                     ["Frames per leg", liveFrameTall > 0 ? String(liveFrameTall) : "-"],
                   ] as [string, string][]).map(([label, value]) => (
                     <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
                       <span className="text-[9.5px] text-zinc-500">{label}</span>
-                      <span className={`font-mono text-[10px] font-bold ${value === "not set" ? "text-red-400" : "text-zinc-300"}`}>
+                      <span className={`font-mono text-[10px] font-bold ${value === "not set" || value === "no project" ? "text-red-400" : "text-zinc-300"}`}>
                         {value}
                       </span>
                     </div>

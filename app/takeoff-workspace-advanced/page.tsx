@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanGuidance, KorbanHeader, type KorbanGuidanceFlag, type KorbanGuidanceStep, type KorbanMenuLink } from "@/components/korban";
 import {
+  updateActiveProject,
   parseFeetInches, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
+import { clearPlanSheet, loadPlanSheet, savePlanPage, savePlanSheet } from "@/lib/planStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
 
@@ -214,6 +216,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [rotation,       setRotation]       = useState(0);
   /** The sheet's own pixel size. Everything on the page is measured in these. */
   const [naturalSize,    setNaturalSize]    = useState({ w: 0, h: 0 });
+  /** When this takeoff was last written down. Null means not yet, this session. */
+  const [lastSaved,      setLastSaved]      = useState<Date | null>(null);
   /** What the cursor would snap to right now, so the user sees it before clicking. */
   const [snapPreview,    setSnapPreview]    = useState<{ pt: Pt; kind: "ref" | "corner" } | null>(null);
   /** Which level's colour swatch is open. */
@@ -295,6 +299,114 @@ export default function TakeoffWorkspaceAdvancedPage() {
     }
   }, []);
 
+  /**
+   * Brings the plan set back first.
+   *
+   * The overlay only draws over a sheet - there is no such thing as a trace
+   * floating on nothing - so the sheet has to arrive before anything else is
+   * worth restoring. It comes from IndexedDB, at the page it was left on.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const projectId = getActiveProject()?.projectId;
+        if (!projectId) return;
+        const plan = await loadPlanSheet(projectId);
+        if (!plan || cancelled) return;
+        await openPlan(plan.data, plan.mimeType, plan.fileName, plan.pageNumber ?? 1, false);
+      } catch {
+        // No stored sheet is the normal case on a new bid.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Puts the takeoff back when the page reopens.
+   *
+   * Everything here was already being written to the project store - which is
+   * why Set Scaffold still showed the layout after leaving this page - but
+   * nothing ever read it back. Every trace, reference point and grip lived in
+   * React state and died the moment the component unmounted, so returning to
+   * Takeoff meant starting the whole job again.
+   *
+   * What comes back: traced outlines, their reference points, colours, level
+   * names and lineal feet; the locked scales; and the gripped figures per
+   * elevation.
+   *
+   * What cannot: the plan sheet itself, which is far too large to keep in
+   * browser storage, and the drawn grip rectangles, which are not stored -
+   * only the numbers they produced. So the sheet needs re-uploading, but
+   * nothing needs re-tracing or re-measuring.
+   */
+  useEffect(() => {
+    try {
+      const elev = getActiveElevation();
+      const geo = elev?.overlayGeometry;
+      if (!geo) return;
+
+      const rows = geo.fullOverlayRows ?? [];
+      if (rows.length > 0) {
+        setFloorLevels(rows.map((row, i) => ({
+          id: `lvl-${row.id ?? i}`,
+          levelName: row.level || `Level ${i + 1}`,
+          isKeyFloor: Boolean(row.isKeyFloor),
+          linealFeet: row.linealFeet ?? 0,
+          color: row.color || LEVEL_COLORS[i % LEVEL_COLORS.length],
+          tracePoints: (row.points ?? []) as Pt[],
+          traceClosed: Boolean(row.closed),
+          traceMode: false,
+          stored: true,
+          refPoint: ((row as unknown as { refPoint?: Pt | null }).refPoint ?? null),
+        })));
+        setOverlayStored(true);
+        setLastSaved(new Date());
+      }
+
+      // A locked scale is the thing most expensive to redo, and the easiest
+      // to get subtly wrong the second time.
+      const puf = (geo.scale as { pageUnitsPerFoot?: number } | null)?.pageUnitsPerFoot
+        ?? (elev.scale as { pageUnitsPerFoot?: number } | null)?.pageUnitsPerFoot;
+      if (puf && puf > 0) {
+        setTabScales(prev => ({
+          ...prev,
+          floor:     { ...prev.floor,     locked: true, pageUnitsPerFoot: puf, label: "" },
+          elevation: { ...prev.elevation, locked: true, pageUnitsPerFoot: puf, label: "" },
+        }));
+      }
+
+      const heights = geo.elevationHeights ?? [];
+      if (heights.length > 0) {
+        setElevData(prev => prev.map(ed => {
+          const stored = heights.find(h => h.elevation === ed.direction);
+          if (!stored?.areas?.length) return ed;
+          return {
+            ...ed,
+            areas: stored.areas.map((a, i) => ({
+              id: `${ed.direction}-restored-${i}`,
+              areaIndex: a.areaIndex ?? i + 1,
+              // The box itself was never stored, only what it measured.
+              rect: null,
+              lf: a.lf ?? 0,
+              heightFt: a.heightFt ?? 0,
+              frameTall: a.frameTall ?? 0,
+              legs: a.legs ?? 0,
+              bayCount: a.bayCount ?? 0,
+              stored: true,
+              fromLevelId: a.fromLevelId ?? null,
+              toLevelId: a.toLevelId ?? null,
+            })),
+          };
+        }));
+        setElevStored(true);
+      }
+    } catch {
+      // A project with nothing stored yet is the normal case on a new bid.
+    }
+  }, []);
+
   async function getPdfLib() {
     if (pdfLib) return pdfLib;
     const lib = await import("pdfjs-dist/legacy/build/pdf.mjs") as any;
@@ -357,26 +469,54 @@ export default function TakeoffWorkspaceAdvancedPage() {
     return () => { cancelled = true; };
   }, [viewerUrl]);
 
+  /**
+   * Opens a plan set, and keeps it.
+   *
+   * The sheet is written to IndexedDB against this project so reopening the
+   * page finds it again. Without that, an estimator came back to an empty
+   * viewer with a perfectly good takeoff sitting unreadable behind it, and the
+   * only way forward was to do the job over.
+   */
+  const openPlan = useCallback(async (
+    buf: ArrayBuffer, mimeType: string, fileName: string, page = 1, persist = true,
+  ) => {
+    const isImg = mimeType.startsWith("image/");
+    setPdfLoading(true); setViewerUrl(""); setPdfDoc(null);
+    setExtractedPages([]); setActiveExtracted(null);
+    setCurrentPageNo(page); setPageNoInput(String(page));
+    try {
+      if (isImg) {
+        const url = URL.createObjectURL(new Blob([buf], { type: mimeType }));
+        setImageSource(url);
+        setViewerUrl(url); setTotalPages(1);
+      } else {
+        const lib = await getPdfLib();
+        // pdf.js takes ownership of the buffer it is given, so it gets a copy
+        // and the original stays intact for storing.
+        const pdf = await lib.getDocument({ data: buf.slice(0) }).promise;
+        setPdfDoc(pdf); setTotalPages(pdf.numPages);
+        const wanted = Math.min(Math.max(1, page), pdf.numPages);
+        setCurrentPageNo(wanted); setPageNoInput(String(wanted));
+        setViewerUrl(await renderPage(pdf, wanted, 1.2));
+      }
+      if (persist) {
+        const projectId = getActiveProject()?.projectId;
+        if (projectId) {
+          void savePlanSheet(projectId, {
+            data: buf, fileName, mimeType, pageNumber: page, savedAt: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (e) { console.error(e); } finally { setPdfLoading(false); }
+  }, [pdfLib]);
+
   const handleFile = useCallback(async (file:File) => {
     if (!file) return;
     const isImg=file.type.startsWith("image/"), isPdf=file.type==="application/pdf";
     if (!isImg&&!isPdf) return;
-    setPdfLoading(true); setViewerUrl(""); setPdfDoc(null);
-    setExtractedPages([]); setActiveExtracted(null); setCurrentPageNo(1); setPageNoInput("1");
-    try {
-      if (isImg) {
-        const url=URL.createObjectURL(file);
-        setImageSource(url);
-        setViewerUrl(url); setTotalPages(1);
-      } else {
-        const lib=await getPdfLib();
-        const buf=await file.arrayBuffer();
-        const pdf=await lib.getDocument({ data:buf }).promise;
-        setPdfDoc(pdf); setTotalPages(pdf.numPages);
-        setViewerUrl(await renderPage(pdf,1,1.2));
-      }
-    } catch(e) { console.error(e); } finally { setPdfLoading(false); }
-  },[pdfLib]);
+    const buf = await file.arrayBuffer();
+    await openPlan(buf, file.type, file.name, 1, true);
+  },[openPlan]);
 
   /** Turns the sheet a quarter at a time and re-renders at the new angle. */
   async function rotateSheet() {
@@ -407,6 +547,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   async function goToPage(n:number) {
+    // Cheap, and it saves hunting for the elevation sheet every time.
+    try {
+      const projectId = getActiveProject()?.projectId;
+      if (projectId) void savePlanPage(projectId, n);
+    } catch { /* the page number is not worth an error */ }
     if (!pdfDoc||renderingPage) return;
     const p=Math.max(1,Math.min(n,totalPages));
     setCurrentPageNo(p); setPageNoInput(String(p)); setRenderingPage(true);
@@ -913,6 +1058,73 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   function storeAll() { storeOverlay(); storeElevations(); storeSection(); }
 
+  /**
+   * Saves whatever has been done so far.
+   *
+   * Store All is the end of a stage; this is for the middle of one. A takeoff
+   * abandoned halfway through a phone call should still be there afterwards,
+   * and waiting until a stage is complete to write anything down is how an
+   * afternoon gets lost.
+   *
+   * Same write as Store All - there is no second kind of save, and a partial
+   * one that behaved differently would be a trap.
+   */
+  /**
+   * Throws this project's takeoff away and starts it again.
+   *
+   * A takeoff belongs to its project and is always continued - which is right,
+   * until the thing being continued is wrong. A trace taken before the scale
+   * was locked, or levels added by mistake, then follows the job forever with
+   * no way to be rid of it short of starting a new bid.
+   *
+   * Clears the geometry, the grips, the stored sheet and the part ledger.
+   * Leaves the project, its name and everything priced on it alone.
+   */
+  function clearTakeoff() {
+    const sure = window.confirm(
+      "Clear this takeoff?\n\nEvery traced level, reference point, grip and the plan sheet go with it. The project itself stays.",
+    );
+    if (!sure) return;
+    try {
+      const project = getActiveProject();
+      const elev = getActiveElevation();
+      saveActiveElevation({
+        ...elev,
+        linearFeet: 0,
+        wallHeight: 0,
+        overlayGeometry: null,
+        elevationBreakdown: [],
+        partLedger: [],
+        courtyards: [],
+      });
+      if (project?.projectId) void clearPlanSheet(project.projectId);
+    } catch { /* nothing stored to clear */ }
+
+    setFloorLevels([{
+      id: "lvl-1", levelName: "Level 1", isKeyFloor: true, linealFeet: 0,
+      color: LEVEL_COLORS[0], tracePoints: [], traceClosed: false,
+      traceMode: false, stored: false, refPoint: null,
+    }]);
+    setElevData(makeElevData(ELEVATION_DIRS));
+    setTabScales({ floor: DEFAULT_SCALE, elevation: DEFAULT_SCALE, section: DEFAULT_SCALE });
+    setViewerUrl(""); setPdfDoc(null); setImageSource(null);
+    setExtractedPages([]); setActiveExtracted(null);
+    setOverlayStored(false); setElevStored(false); setLastSaved(null);
+  }
+
+  function saveWork() {
+    storeAll();
+    setLastSaved(new Date());
+    /*
+     * Touch the project so everything downstream knows the job moved.
+     *
+     * Plan Desk, the Bid Room and the Bid/Job Log all sort and report on when
+     * a project was last worked. A takeoff that saves without updating that is
+     * a job that looks abandoned while someone is sitting in it.
+     */
+    try { updateActiveProject({}); } catch { /* nothing to touch yet */ }
+  }
+
   function addSection() {
     if(sections.length>=4) return;
     const label=SECTION_LABELS[sections.length];
@@ -956,32 +1168,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const sectioned = sections.filter(s=>s.wallComplete);
 
         if (!scale.locked && viewerUrl) {
-          flags.push({ tone:"warn", text:"Scale is not locked on this sheet. Nothing measured here means anything until it is." });
+          flags.push({ tone:"warn", text:"Scale not locked. Nothing measured counts yet." });
         }
         if (traced.length>0 && traced.some(l=>!l.refPoint)) {
           const missing = traced.filter(l=>!l.refPoint).length;
           flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
         }
         if (grippedFaces.length>0 && sectioned.length===0) {
-          flags.push({ tone:"note", text:"Elevations are gripped but no section is drawn. A section is what lets me check the frame configuration against the actual wall rather than assuming it." });
+          flags.push({ tone:"note", text:"Gripped, no section drawn. A section pins the frame to the real wall." });
         }
         if (traced.length>1 && grippedFaces.length===0) {
-          flags.push({ tone:"note", text:"Floors are traced but nothing is gripped yet. Plan geometry gives me the shape; grips give me the height." });
+          flags.push({ tone:"note", text:"Floors traced, nothing gripped. Plan gives shape, grips give height." });
         }
         if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
-          flags.push({ tone:"warn", text:"A section has no wall height, so its frame count falls back to one per leg. Set Top of Wall on that section." });
+          flags.push({ tone:"warn", text:"Section has no wall height - one frame per leg. Set Top of Wall." });
         }
         if (courtyards.length>0 && !includeCourtyards) {
           flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
         }
         if (flags.length===0 && grippedFaces.length>0) {
-          flags.push({ tone:"note", text:"Nothing disagrees. Scale, geometry and sections all line up - this is as tight as a bid gets before the crew arrives." });
+          flags.push({ tone:"note", text:"Everything lines up. Tight as it gets before the crew shows up." });
         }
         // An empty job still deserves an answer. Silence reads as broken.
         if (flags.length===0) {
           flags.push({ tone:"note", text: viewerUrl
-            ? "Plans are open and nothing is measured yet. Set the scale, trace the floor, grip the faces that need coverage - I'll tell you when something stops adding up."
-            : "Nothing loaded yet. Upload the plan set and I'll follow along from there, flagging anything that doesn't agree with itself." });
+            ? "Plans open, nothing measured. Scale, trace, grip - I'll flag anything off."
+            : "No plans yet. Upload the set and I'll follow along." });
         }
 
     return (
@@ -1044,7 +1256,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
         actionsAlwaysVisible
         actions={
           <>
-            <button onClick={storeAll} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/10">Store All</button>
+            {/* Where the takeoff stands, so restored work is not mistaken for
+                a fresh start - and unsaved work is not mistaken for saved. */}
+            <span className="hidden items-center gap-1.5 pr-1 font-mono text-[10px] text-zinc-500 sm:flex">
+              <span className={`h-1.5 w-1.5 rounded-full ${lastSaved ? "bg-emerald-400" : "bg-zinc-600"}`} />
+              {lastSaved
+                ? `Saved ${lastSaved.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                : "Not saved"}
+            </span>
+            {/*
+              * Save Work only. Store All did the same write from the same
+              * corner, which made two buttons for one action - and the stage
+              * buttons at the bottom of each panel already handle finishing.
+              * This one is for stopping mid-job.
+              */}
+            <button onClick={saveWork} className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20">+ Save Work</button>
             <a href="/set-scaffold-v2" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Scaffold Layout &rarr;</a>
           </>
         }
@@ -1089,10 +1315,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             */}
           {scale.locked&&(
             <span className="font-mono text-orange-400 opacity-70">
-              [lock] {scale.label}
-              <span className="ml-1.5 opacity-60">
-                {(scale.pageUnitsPerFoot??0).toFixed(1)} px/ft
-              </span>
+              [lock]{scale.label ? ` ${scale.label}` : ""}
             </span>
           )}
         </div>
@@ -1135,21 +1358,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const steps: KorbanGuidanceStep[] = [
           { id:"upload", title:"Load the plans",
             body:"Upload the PDF set for this job. You'll pull the floor plan and elevation sheets out of it as you go.",
-            done: Boolean(viewerUrl) },
+            // Restored work counts as done even before the sheet finishes
+            // loading, or the walkthrough tells a full takeoff to start over.
+            done: Boolean(viewerUrl) || floorLevels.some(l => l.stored && l.tracePoints.length >= 3) },
           { id:"scale", title:"Set the scale",
             body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
-            why:"Nothing measured on this sheet means anything until Korban knows how big a foot is.",
-            done: scale.locked },
+            why:"Nothing measures until Korban knows how big a foot is.",
+            done: scale.locked || (scale.pageUnitsPerFoot ?? 0) > 0 },
           { id:"trace", title:"Trace the floor outline",
             body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
             done: anyTraced },
           { id:"ref", title:"Set reference points",
             body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
-            why:"This is what stacks the floors correctly. Without it Korban can't tell a real step-back from a shaky trace.",
+            why:"This stacks the floors. Without it a real step-back looks like a shaky trace.",
             done: allRefs },
           { id:"grip", title:"Grip the elevations",
             body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
-            why:"The grip measures height. Height is what decides how many frames go in each leg.",
+            why:"The grip gives height. Height sets frames per leg.",
             done: anyGrip },
           { id:"store", title:"Store the work",
             body:"Store Overlay on the floor plan, Store Elevations on the elevations.",
@@ -1166,7 +1391,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             id: "section",
             title: "Draw the sections",
             body: "Start Section View and trace the wall profile on each face that needs one.",
-            why: "A section is what lets me check the frame configuration against the real wall rather than assuming it. It is the difference between eight percent and three.",
+            why: "Sections pin the frame to the real wall. Difference between 8% and 3%.",
             done: sections.some(sec => sec.wallComplete),
           });
         }
@@ -1757,6 +1982,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
                   + Add Level
                 </button>
+
+                {/* Destructive, so it sits away from anything routine and says
+                    plainly what goes. */}
+                {(floorLevels.some(l => l.tracePoints.length > 0) || viewerUrl) && (
+                  <button onClick={clearTakeoff}
+                    className="w-full py-1.5 text-[9.5px] text-zinc-700 transition hover:text-red-400">
+                    Clear this takeoff and start over
+                  </button>
+                )}
 
                 {/* Overlay preview */}
                 {allLevelPoints.length>0&&(() => {

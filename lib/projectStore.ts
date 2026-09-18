@@ -1364,7 +1364,6 @@ export function getActiveElevation(): ProjectElevation {
 }
 
 export function saveActiveElevation(elevation: ProjectElevation) {
-  console.log("Saved active elevation", elevation);
   const project = getActiveProject();
   const currentLevel = project.takeoff.levels[0] ?? {
     levelId: DEMO_LEVEL_ID,
