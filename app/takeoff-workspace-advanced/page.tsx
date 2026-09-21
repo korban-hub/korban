@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanGuidance, KorbanHeader, type KorbanGuidanceFlag, type KorbanGuidanceStep, type KorbanMenuLink } from "@/components/korban";
 import {
+  createProject,
   updateActiveProject,
   parseFeetInches, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { clearPlanSheet, loadPlanSheet, savePlanPage, savePlanSheet } from "@/lib/planStore";
@@ -375,6 +376,36 @@ export default function TakeoffWorkspaceAdvancedPage() {
           floor:     { ...prev.floor,     locked: true, pageUnitsPerFoot: puf, label: "" },
           elevation: { ...prev.elevation, locked: true, pageUnitsPerFoot: puf, label: "" },
         }));
+      }
+
+      // Traced sections come back the same as everything else does.
+      const storedSections = elev.sectionViews ?? [];
+      if (storedSections.length > 0) {
+        setSections(storedSections.map(row => ({
+          id: row.id,
+          label: row.label,
+          wallOffset: row.wallOffset,
+          topOfWallDistance: row.topOfWallDistance,
+          frameWidth: (row.frameWidth as ScaffoldWidth) || "3'",
+          wallOutline: row.wallOutline.map(p => ({ x: p.x, y: p.y })),
+          wallComplete: row.wallOutline.length >= 2,
+          scaffoldSide: row.scaffoldSide,
+          frameMakeup: getFrameParts((row.frameWidth as ScaffoldWidth) || "3'"),
+          totalLF: 0, totalLegs: 0, totalFrames: 0, totalPlanks: 0,
+        })));
+        setActiveSection(storedSections[0].id);
+        const withScale = storedSections.find(row => (row.pageUnitsPerFoot ?? 0) > 0);
+        if (withScale?.pageUnitsPerFoot) {
+          setTabScales(prev => ({
+            ...prev,
+            section: {
+              ...prev.section, locked: true,
+              pageUnitsPerFoot: withScale.pageUnitsPerFoot,
+              label: withScale.scaleLabel || "",
+            },
+          }));
+        }
+        setSectionStored(true);
       }
 
       const heights = geo.elevationHeights ?? [];
@@ -907,13 +938,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   // -- Store ------------------------------------------------------------------
+  /**
+   * Makes sure there is a project to store into.
+   *
+   * This used to replace the entire project store with one hardcoded record
+   * whenever the storage key was missing - destroying every other bid, and
+   * leaving the active project id pointing at something that no longer
+   * existed. A page would then show the name it had loaded earlier while the
+   * store handed everyone else a blank project.
+   *
+   * It now only creates a project when there genuinely is not one, and never
+   * touches any that already exist.
+   */
   function ensureBase() {
-    if (!localStorage.getItem("korbanProjectData_v1")) {
-      const base = { projectId:"KRB-260614-001", projectName:projectName||"New Project", projectAddress:"", customer:"", estimator:"", updatedAt:new Date().toISOString(), schemaVersion:1, takeoff:{ levels:[{ levelId:"main-level", levelName:"Main Level", elevations:[{ elevationId:"north-elevation", elevationName:"North", levelName:"Main Level", linearFeet:0, wallHeight:45, phase:"Main", mobilization:"Base Bid", overlayGeometry:null, scale:null, scaffoldInput:{ scaffoldWidth:3, standardBayLength:10, frameHeight:6.333, plankCountPerBay:0, bracePattern:"Every Bay", wallOffset:1 }, quantityEngine:{ bayCount:0,legCount:0,jumps:0,frameTall:7,frameCount:0,plankCount:0,crossBraceCount:0,guardrailCount:0,basePlateCount:0,screwJackCount:0 }, sectionView:{ frameMakeup:"",selectedRun:"",wallOffset:1,sectionType:"A-A",wallOutline:[],scaffoldSide:"left",draftingAdditions:[] }, elevationBreakdown:[] }] }] } };
-      localStorage.setItem("korbanProjectData_v1",JSON.stringify({"KRB-260614-001":base}));
-      localStorage.setItem("korbanActiveProjectId","KRB-260614-001");
-      localStorage.setItem("korbanActiveElevationId","north-elevation");
-    }
+    try {
+      const existing = getActiveProject();
+      if (existing?.projectId) return;
+    } catch { /* nothing readable yet, fall through and make one */ }
+    createProject(projectName || "New Project");
   }
 
   function storeOverlay() {
@@ -1040,8 +1082,46 @@ export default function TakeoffWorkspaceAdvancedPage() {
         ? wallOutlineToFeet(sec.wallOutline, tracePuf)
         : elev.sectionView.wallOutline;
 
+      /*
+       * Every section, each with its own everything.
+       *
+       * A job can carry several cuts and they share nothing - not the profile,
+       * not the scale, not the drawing. Saving only the active one meant
+       * switching tabs quietly discarded the others.
+       *
+       * Profiles are kept in the sheet's own page units rather than converted
+       * to feet here. Set Scaffold lays the drawing out against the section's
+       * own scale, and converting twice is how a wall ends up the wrong size.
+       */
+      const sectionPuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
+      const existing = elev.sectionViews ?? [];
+      const sectionViews = sections
+        .filter(row => row.wallOutline.length >= 2)
+        .map(row => {
+          const prior = existing.find(e => e.id === row.id);
+          return {
+            id: row.id,
+            label: row.label,
+            wallOutline: row.wallOutline.map(p => ({ x: p.x, y: p.y })),
+            // The scale that was locked when this one was traced, kept.
+            pageUnitsPerFoot: row.id === activeSection
+              ? sectionPuf
+              : prior?.pageUnitsPerFoot ?? sectionPuf,
+            scaleLabel: row.id === activeSection
+              ? tabScales.section.label
+              : prior?.scaleLabel ?? "",
+            scaffoldSide: row.scaffoldSide,
+            wallOffset: row.wallOffset,
+            topOfWallDistance: row.topOfWallDistance,
+            frameWidth: row.frameWidth,
+            // Korban redraws its own pieces; anything hand-placed survives.
+            draftingAdditions: prior?.draftingAdditions ?? [],
+          };
+        });
+
       saveActiveElevation({
         ...elev,
+        sectionViews,
         sectionView: {
           ...elev.sectionView,
           frameMakeup: makeupStr,
@@ -1050,6 +1130,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
           sectionType: sec.label,
           wallOutline: wallOutlineFt,
           scaffoldSide: sec.scaffoldSide,
+          pageUnitsPerFoot: sectionPuf,
+          scaleLabel: tabScales.section.label,
         },
       });
       setSectionStored(true); setTimeout(()=>setSectionStored(false),3000);

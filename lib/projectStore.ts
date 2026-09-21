@@ -207,6 +207,37 @@ export type SectionDraftingItem = {
   source?: "korban" | "user";
 };
 
+/**
+ * One section through the building.
+ *
+ * An architect cuts a section wherever it is worth cutting, and a job can have
+ * several - a typical bay, an awkward return, a spot where the wall does
+ * something the rest of it does not. Each carries its own traced profile, its
+ * own scale, and its own drawing, because none of those are shared.
+ */
+export type SectionViewRecord = {
+  id: string;
+  /** A-A, B-B, and so on, as the plan set labels them. */
+  label: string;
+  /** The traced outer profile, in that sheet's page units. */
+  wallOutline: StoredPoint[];
+  /**
+   * Page units per foot on this sheet. Its own, not the plan's - sections are
+   * drawn larger than the plan they were cut from, and measuring one against
+   * the other produces a building several times the real size.
+   */
+  pageUnitsPerFoot: number | null;
+  scaleLabel: string;
+  /** Which side of the profile the scaffold stands on. */
+  scaffoldSide: "left" | "right";
+  wallOffset: number;
+  /** The wall's own height. The top deck lands a worker's reach below it. */
+  topOfWallDistance: number;
+  frameWidth: string;
+  /** Everything on the drawing - Korban's pieces and the estimator's. */
+  draftingAdditions: SectionDraftingItem[];
+};
+
 export type TakeoffOverlayGeometry = {
   elevationName: string;
   levelName: string;
@@ -267,6 +298,13 @@ export type ProjectElevation = {
      */
     draftingAdditions: SectionDraftingItem[];
   };
+  /**
+   * Every section cut on this elevation.
+   *
+   * sectionView above is the one being worked on, kept as it was so nothing
+   * that reads it has to change. This is the set.
+   */
+  sectionViews: SectionViewRecord[];
   /**
    * Optional manual elevation breakdown (see StoredElevationBreakdownRow).
    * Defaults to an empty array — purely additive, never required.
@@ -634,6 +672,28 @@ function normalizeSectionDraftingItem(value: unknown): SectionDraftingItem | nul
   };
 }
 
+function normalizeSectionView(value: unknown, index: number): SectionViewRecord {
+  const v = isRecord(value) ? value : {};
+  const label = asString(v.label, ["A-A", "B-B", "C-C", "D-D"][index] ?? `Section ${index + 1}`);
+  const puf = asNumber(v.pageUnitsPerFoot, NaN);
+  return {
+    id: asString(v.id, label.replace("-", "").toLowerCase()),
+    label,
+    wallOutline: asArray<unknown>(v.wallOutline).map(normalizePoint).filter((p): p is StoredPoint => Boolean(p)),
+    pageUnitsPerFoot: Number.isFinite(puf) && puf > 0 ? puf : null,
+    scaleLabel: asString(v.scaleLabel, ""),
+    scaffoldSide: v.scaffoldSide === "right" ? "right" : "left",
+    wallOffset: asNumber(v.wallOffset, 1),
+    topOfWallDistance: asNumber(v.topOfWallDistance, 0),
+    frameWidth: asString(v.frameWidth, "3'"),
+    draftingAdditions: normalizeSectionDraftingItems(v.draftingAdditions),
+  };
+}
+
+function normalizeSectionViews(value: unknown): SectionViewRecord[] {
+  return asArray<unknown>(value).map(normalizeSectionView);
+}
+
 function normalizeSectionDraftingItems(value: unknown): SectionDraftingItem[] {
   return asArray<unknown>(value)
     .map(normalizeSectionDraftingItem)
@@ -903,6 +963,7 @@ function createEmptyElevation(): ProjectElevation {
       scaleLabel: "",
       draftingAdditions: [],
     },
+    sectionViews: [],
     elevationBreakdown: [],
     partLedger: [],
     courtyards: [],
@@ -942,6 +1003,7 @@ function createDemoElevation(): ProjectElevation {
       scaleLabel: "",
       draftingAdditions: [],
     },
+    sectionViews: [],
     elevationBreakdown: [],
     partLedger: [],
     courtyards: [],
@@ -1083,6 +1145,27 @@ function normalizeElevation(value: unknown): ProjectElevation {
       scaleLabel: asString(sectionRecord.scaleLabel, ""),
       draftingAdditions: normalizeSectionDraftingItems(sectionRecord.draftingAdditions),
     },
+    /*
+     * A job with one section predates the set, so it becomes the first entry
+     * rather than being dropped - nobody should lose a traced profile because
+     * the shape of the record changed underneath them.
+     */
+    sectionViews: (() => {
+      const stored = normalizeSectionViews(value.sectionViews);
+      if (stored.length > 0) return stored;
+      const outline = asArray<unknown>(sectionRecord.wallOutline)
+        .map(normalizePoint).filter((p): p is StoredPoint => Boolean(p));
+      if (outline.length < 2) return [];
+      return [normalizeSectionView({
+        id: "aa", label: asString(sectionRecord.sectionType, "A-A"),
+        wallOutline: outline,
+        pageUnitsPerFoot: sectionRecord.pageUnitsPerFoot,
+        scaleLabel: sectionRecord.scaleLabel,
+        scaffoldSide: sectionRecord.scaffoldSide,
+        wallOffset: sectionRecord.wallOffset,
+        draftingAdditions: sectionRecord.draftingAdditions,
+      }, 0)];
+    })(),
     elevationBreakdown: normalizeElevationBreakdown(record.elevationBreakdown),
     partLedger: normalizeLedger(record.partLedger),
     courtyards: normalizeCourtyards(record.courtyards),
@@ -1201,15 +1284,48 @@ export function saveProjectData(data: ProjectData) {
   window.localStorage.setItem(PROJECT_DATA_KEY, JSON.stringify(normalizeProjectData(data)));
 }
 
+/**
+ * Whether the active project was found, or something was substituted.
+ *
+ * The lookup falls back when the active id points at a project that is not
+ * there - which is how one page shows a named job while another shows a blank
+ * one, with nothing anywhere explaining the difference.
+ */
+export type ActiveProjectSource = "matched" | "substituted";
+
+let lastProjectSource: ActiveProjectSource = "matched";
+
+export function getActiveProjectSource(): ActiveProjectSource {
+  return lastProjectSource;
+}
+
 export function getActiveProject(): ProjectRecord {
   const projectId = getActiveProjectId();
   const data = getProjectData();
-  const project = data[projectId] ?? data[DEMO_PROJECT_ID] ?? createDemoProject();
+
+  const matched = data[projectId];
+  if (matched) {
+    lastProjectSource = "matched";
+    return matched;
+  }
+
+  /*
+   * The active id points at nothing. Rather than hand back a blank record and
+   * let every page disagree about which job is open, take the most recently
+   * worked project that actually exists and make it active - so the next read
+   * from anywhere agrees with this one.
+   */
+  lastProjectSource = "substituted";
+  const candidates = Object.values(data).sort(
+    (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+  );
+  const project = candidates[0] ?? createEmptyProject(DEMO_PROJECT_ID);
 
   if (!data[project.projectId]) {
     data[project.projectId] = project;
     saveProjectData(data);
   }
+  setActiveProjectId(project.projectId);
 
   return project;
 }
@@ -1534,16 +1650,35 @@ export function saveActiveProject(project: ProjectRecord) {
   saveProjectData(data);
 }
 
+/**
+ * Why the active elevation is what it is.
+ *
+ * The lookup used to fall through to a fresh demo elevation without saying so,
+ * which meant a page could show an empty takeoff on a job that had one and
+ * nothing anywhere explained it. This records which branch was taken so a
+ * page can say "reading a blank elevation" rather than just looking broken.
+ */
+export type ActiveElevationSource = "matched" | "first-available" | "fallback";
+
+let lastElevationSource: ActiveElevationSource = "matched";
+
+export function getActiveElevationSource(): ActiveElevationSource {
+  return lastElevationSource;
+}
+
 export function getActiveElevation(): ProjectElevation {
   const project = getActiveProject();
   const activeElevationId = getActiveElevationId();
   const allElevations = project.takeoff.levels.flatMap((level) => level.elevations);
-  const elevation =
-    allElevations.find((item) => item.elevationId === activeElevationId) ??
-    project.takeoff.levels[0]?.elevations[0] ??
-    createDemoElevation();
-  console.log("Loaded active elevation", elevation);
-  return elevation;
+
+  const matched = allElevations.find((item) => item.elevationId === activeElevationId);
+  if (matched) { lastElevationSource = "matched"; return matched; }
+
+  const first = project.takeoff.levels[0]?.elevations[0];
+  if (first) { lastElevationSource = "first-available"; return first; }
+
+  lastElevationSource = "fallback";
+  return createDemoElevation();
 }
 
 export function saveActiveElevation(elevation: ProjectElevation) {

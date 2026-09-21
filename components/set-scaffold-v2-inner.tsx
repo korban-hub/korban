@@ -6,8 +6,9 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveProject, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem } from "@/lib/backendStore";
+import SectionDrawing from "@/components/section-drawing";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PlanPoint = { x: number; y: number };
@@ -1181,6 +1182,19 @@ export default function SetScaffoldV2Inner() {
   const [showScaffold,   setShowScaffold]   = useState(true);
   const [editMode,       setEditMode]       = useState(false);
   /** Point-to-point measuring on the plan. A read, never an edit. */
+  /** Which cut is on screen. Each carries its own profile, scale and drawing. */
+  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
+  /**
+   * Which elevation the store handed back, and why.
+   *
+   * "blank - not saved" means the lookup found nothing and produced an empty
+   * one, which is how a page comes to show no takeoff on a job that has one.
+   */
+  const [elevationSource, setElevationSource] = useState<string>("matched");
+  /** Whether the project on screen is the one that was active, or a stand-in. */
+  const [projectSource, setProjectSource] = useState<string>("matched");
+  /** Anything that went wrong loading, said out loud rather than swallowed. */
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [measureMode,    setMeasureMode]    = useState(false);
   const [measureFrom,    setMeasureFrom]    = useState<PlanPoint|null>(null);
   const [measureTo,      setMeasureTo]      = useState<PlanPoint|null>(null);
@@ -1562,44 +1576,59 @@ export default function SetScaffoldV2Inner() {
     function load() {
       try {
         const raw = getActiveElevation(), p = getActiveProject();
-        // Arriving from Takeoff, quantities exist but no part numbers do.
-        // Writing the ledger on load means the yard sees real parts without
-        // anyone having to touch a control first.
+
         /*
-         * Recompute before anything reads it.
+         * The page gets its project and elevation FIRST.
          *
-         * The engine only ran when a control changed, so a project opened after
-         * a settings change - or after the engine itself was corrected - showed
-         * whatever was stored last time. That is how frames per leg stayed at
-         * two on a two-storey building: the number was right for a setting
-         * nobody had used in days.
+         * This used to rebuild the quantity engine and the part ledger before
+         * handing the page anything - and wrapped the lot in an empty catch.
+         * So if the rebuild threw, the page never received the job, sat on its
+         * blank defaults showing "no project", and nothing anywhere said why.
+         * Takeoff and the store were both fine; this page simply never got told.
          */
-        const freshEngine = calculateQuantityEngine({
-          linearFeet: raw.linearFeet,
-          wallHeight: raw.wallHeight,
-          ...raw.scaffoldInput,
-          workerReachHeight,
-        });
-        const e = writeScaffoldLedger({ ...raw, quantityEngine: freshEngine });
-        // Store it if anything moved, so the next page to open reads the same
-        // numbers this one is showing.
-        const engineChanged = JSON.stringify(freshEngine) !== JSON.stringify(raw.quantityEngine);
-        const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
-        if (engineChanged || ledgerChanged) saveActiveElevation(e);
-        setElevation(e); setProjectName(p.projectName || "");
-        const bs = getBackendSettings();
-        setSheetInfo({
-          jobNumber: p.proposalNumber || p.projectId || "",
-          address: p.projectAddress || "",
-          customer: p.customer || "",
-          estimator: bs.estimator?.estimatorName || p.estimator || "",
-          company: bs.company?.companyName || "",
-        });
-        const depth = getEstimateDepth();
-        setEstimateDepthState(depth);
-        setScaffoldWidth(e.scaffoldInput.scaffoldWidth >= 5 ? "5'" : e.scaffoldInput.scaffoldWidth >= 3.5 ? "3'-6\"" : "3'");
-        setBayLength(`${e.scaffoldInput.standardBayLength}'`);
-      } catch {}
+        setElevation(raw);
+        setProjectName(p.projectName || "");
+        setElevationSource(getActiveElevationSource());
+        setProjectSource(getActiveProjectSource());
+        try {
+          const bs = getBackendSettings();
+          setSheetInfo({
+            jobNumber: p.proposalNumber || p.projectId || "",
+            address: p.projectAddress || "",
+            customer: p.customer || "",
+            estimator: bs.estimator?.estimatorName || p.estimator || "",
+            company: bs.company?.companyName || "",
+          });
+          setEstimateDepthState(getEstimateDepth());
+          setScaffoldWidth(raw.scaffoldInput.scaffoldWidth >= 5 ? "5'" : raw.scaffoldInput.scaffoldWidth >= 3.5 ? "3'-6\"" : "3'");
+          setBayLength(`${raw.scaffoldInput.standardBayLength}'`);
+        } catch (err) {
+          setLoadError(`Settings: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        /*
+         * Then the rebuild, on its own. A failure here costs the fresh ledger,
+         * not the whole page - and it is reported, not swallowed.
+         */
+        try {
+          const freshEngine = calculateQuantityEngine({
+            linearFeet: raw.linearFeet,
+            wallHeight: raw.wallHeight,
+            ...raw.scaffoldInput,
+            workerReachHeight,
+          });
+          const e = writeScaffoldLedger({ ...raw, quantityEngine: freshEngine });
+          const engineChanged = JSON.stringify(freshEngine) !== JSON.stringify(raw.quantityEngine);
+          const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
+          if (engineChanged || ledgerChanged) saveActiveElevation(e);
+          setElevation(e);
+          setLoadError(null);
+        } catch (err) {
+          setLoadError(`Ledger rebuild: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } catch (err) {
+        setLoadError(`Load: ${err instanceof Error ? err.message : String(err)}`);
+      }
       setMounted(true);
     }
     load();
@@ -1837,6 +1866,26 @@ export default function SetScaffoldV2Inner() {
     if (before !== after) { setElevation(next); saveActiveElevation(next); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ledgerSignature, mounted]);
+
+  /**
+   * Keeps a section drawing after it has been corrected.
+   *
+   * Only the estimator's pieces are stored. Korban's are laid out again from
+   * the profile every time, so a change to the configuration is reflected
+   * rather than frozen into a drawing made under the old one.
+   */
+  function handleSaveSection(sectionId: string, drawn: SectionDraftingItem[]) {
+    if (!elevation) return;
+    const mine = drawn.filter(i => i.source === "user");
+    const next = {
+      ...elevation,
+      sectionViews: (elevation.sectionViews ?? []).map(sv =>
+        sv.id === sectionId ? { ...sv, draftingAdditions: mine } : sv,
+      ),
+    };
+    setElevation(next);
+    saveActiveElevation(next);
+  }
 
   const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
                            measureMode, measureFrom, addRunMode, runStart });
@@ -3031,7 +3080,14 @@ export default function SetScaffoldV2Inner() {
                     Built from
                   </p>
                   {([
-                    ["Job", projectName || "no project"],
+                    ...(loadError ? [["Error", loadError] as [string, string]] : []),
+                    ["Job", projectSource === "substituted"
+                      ? "recovered - was missing"
+                      : projectName || "no project"],
+                    ["Elevation", elevationSource === "fallback"
+                      ? "blank - not saved"
+                      : elevation?.elevationName || "unnamed"],
+                    ["Sections", String(elevation?.sectionViews?.length ?? 0)],
                     ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
                     ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
                     ["Levels traced", String(levelOutlines.length || 0)],
@@ -3040,7 +3096,10 @@ export default function SetScaffoldV2Inner() {
                   ] as [string, string][]).map(([label, value]) => (
                     <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
                       <span className="text-[9.5px] text-zinc-500">{label}</span>
-                      <span className={`font-mono text-[10px] font-bold ${value === "not set" || value === "no project" ? "text-red-400" : "text-zinc-300"}`}>
+                      <span className={`font-mono text-[10px] font-bold ${
+                        (["not set", "no project", "blank - not saved", "recovered - was missing"].includes(value) || label === "Error")
+                          ? "text-red-400" : "text-zinc-300"
+                      }`}>
                         {value}
                       </span>
                     </div>
@@ -3102,7 +3161,37 @@ export default function SetScaffoldV2Inner() {
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
             </div>
+            {/*
+              * Every cut the estimator traced. A job can have several and they
+              * share nothing - not the profile, not the scale, not the drawing.
+              */}
+            {(elevation?.sectionViews?.length ?? 0) > 0 && (
+              <div className="flex flex-wrap gap-1 border-b border-zinc-900 bg-black px-3 py-2">
+                {(elevation?.sectionViews ?? []).map(sv => (
+                  <button key={sv.id} onClick={() => setActiveSectionId(sv.id)}
+                    className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${
+                      (activeSectionId ?? elevation?.sectionViews?.[0]?.id) === sv.id
+                        ? "border-emerald-500 bg-emerald-500 text-black"
+                        : "border-zinc-800 text-zinc-400 hover:border-emerald-500/40"
+                    }`}>
+                    {sv.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+              {(elevation?.sectionViews?.length ?? 0) > 0 ? (
+                <SectionDrawing
+                  section={(elevation?.sectionViews ?? []).find(
+                    sv => sv.id === (activeSectionId ?? elevation?.sectionViews?.[0]?.id),
+                  ) ?? null}
+                  frameTall={liveFrameTall}
+                  scaffoldWidthFt={scaffoldWidthFt}
+                  planksPerDeck={planksPerBayForWidth(scaffoldWidthFt)}
+                  onSave={handleSaveSection}
+                />
+              ) : (
               <SectionViewPanel
                 wallOutline={sectionWallOutline}
                 wallOffset={wallOffset}
@@ -3117,6 +3206,7 @@ export default function SetScaffoldV2Inner() {
                 isExpanded={sectionExpanded}
                 onToggleExpand={() => setSectionExpanded(v => !v)}
               />
+              )}
             </div>
           </div>
 
