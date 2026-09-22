@@ -84,6 +84,7 @@ export function KorbanGuidance({
   accent = "orange",
   className = "",
   onDismiss,
+  requireAck = false,
 }: {
   flags?: KorbanGuidanceFlag[];
   steps?: KorbanGuidanceStep[];
@@ -92,7 +93,28 @@ export function KorbanGuidance({
   className?: string;
   /** Shown as a close control when supplied. Advice you cannot dismiss is nagging. */
   onDismiss?: () => void;
+  /**
+   * Pulse until the estimator ticks that they have seen it.
+   *
+   * Tied to the content, not to the panel: a new or changed suggestion starts
+   * it pulsing again, so ticking the box never silences advice that has not
+   * been read yet. Remembered across reloads, so the same advice does not nag
+   * every time the page opens.
+   */
+  requireAck?: boolean;
 }) {
+  const contentKey = flags.map((f) => f.text).join("|");
+  const storageKey = `korbanAck:${title}`;
+  const [ackedKey, setAckedKey] = useState<string>("");
+  useEffect(() => {
+    try { setAckedKey(localStorage.getItem(storageKey) ?? ""); } catch { /* no storage */ }
+  }, [storageKey]);
+  const needsAck = requireAck && flags.length > 0 && ackedKey !== contentKey;
+  function acknowledge(seen: boolean) {
+    const next = seen ? contentKey : "";
+    setAckedKey(next);
+    try { localStorage.setItem(storageKey, next); } catch { /* no storage */ }
+  }
   const tone = ACCENTS[accent];
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -179,7 +201,7 @@ export function KorbanGuidance({
       ref={panel}
       className={`overflow-hidden rounded-xl border ${tone.border} ${tone.bg} p-3.5 backdrop-blur-sm ${
         floating ? "shadow-2xl" : ""
-      } ${className}`}
+      } ${needsAck ? "korban-ack-pulse" : ""} ${className}`}
       style={
         floating
           ? {
@@ -193,6 +215,17 @@ export function KorbanGuidance({
           : { position: "relative" }
       }
     >
+      <style>{`
+        /* A slow breath until it has been read. Slow enough not to nag. */
+        @keyframes korbanAckPulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0); }
+          50% { box-shadow: 0 0 0 4px rgba(251,191,36,0.28), 0 0 18px rgba(251,191,36,0.22); }
+        }
+        .korban-ack-pulse { animation: korbanAckPulse 2.4s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .korban-ack-pulse { animation: none; box-shadow: 0 0 0 2px rgba(251,191,36,0.5); }
+        }
+      `}</style>
       <span
         aria-hidden
         className={`korban-guidance-glow pointer-events-none absolute -left-8 top-1/2 h-24 w-24 -translate-y-1/2 rounded-full ${tone.glow} blur-2xl`}
@@ -222,6 +255,21 @@ export function KorbanGuidance({
           </button>
         ) : (
           <span className="font-mono text-[9px] text-zinc-700">drag</span>
+        )}
+        {requireAck && flags.length > 0 && (
+          <label
+            onPointerDown={(event) => event.stopPropagation()}
+            title="Tick once you have read these"
+            className="ml-1 flex cursor-pointer items-center gap-1 font-mono text-[9px] text-zinc-500 hover:text-zinc-300"
+          >
+            <input
+              type="checkbox"
+              checked={!needsAck}
+              onChange={(e) => acknowledge(e.target.checked)}
+              className="h-2.5 w-2.5 cursor-pointer accent-amber-400"
+            />
+            seen
+          </label>
         )}
         {onDismiss && (
           <button

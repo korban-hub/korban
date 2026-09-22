@@ -1,7 +1,14 @@
 # KORBAN — Scaffold Geometry Rules
 
-Agreed 9 September 2026. This is the specification the leg engine is built to.
-Where the code and this document disagree, this document is right.
+Agreed 9 September 2026. Section 2 corrected 13 September 2026 after the first
+implementation got the corner rule backwards - it started each run *inside* its
+corner rather than past it, which left every corner of the building bare.
+
+This is the specification the leg engine is built to. Where the code and this
+document disagree, this document is right.
+
+Section 3b corrected 14 September 2026: the deviation threshold is 3', not 4', and
+a secondary run starts at the deviation rather than carrying to grade.
 
 ---
 
@@ -15,53 +22,131 @@ makes a corner read as a tight L rather than a diagonal.
 
 ---
 
-## 2. The invisible stop
+## 2. Laying out a wall
 
-Every corner carries a limit of **`frameWidth + 1'`** measured along each wall from the
-corner point.
+Every wall follows the same four steps. No wall needs to know what any other wall
+did - which is what makes the corners resolve without a sequencing puzzle.
 
-**No leg lands beyond it, in either direction.** It is a boundary, not an offset.
+**Step 1.** Place a leg `frameWidth + 1'` **past the corner the wall starts from**.
+This leg floats: it sits out beyond the building with no wall in front of it.
 
-The first leg of any run sits exactly on this boundary at its starting corner.
+**Step 2.** March at bay length from there, along the wall.
+
+**Step 3.** Stop when the next bay would not have wall in front of it.
+
+**Step 4.** Whatever is left between the last leg and the far corner is left alone.
+It rails across to the next run.
+
+### The floating leg belongs to the wall that is starting
+
+Not to the wall that is ending. This is the whole of it.
+
+Walking a rectangle clockwise, the south wall runs out of wall somewhere short of
+the south-east corner and stops there. The east wall then places **its** floating
+leg past that same corner and marches north. The gap between the south wall's last
+leg and the east wall's floating leg is the rail bay, and the 8' rule governs it.
+
+One floating leg per corner. Placed by the arriving wall, not shared between two.
+
+### Direction
+
+A floating leg has no wall in front of it, so it keeps the direction of the wall it
+belongs to - the one it is about to run along. Every other leg faces its own wall
+square, including the last leg before an inside corner.
 
 ---
 
-## 3. Sequencing
+## 3. Inside corners
 
-Runs resolve in order around the perimeter. **Each run starts at its free corner** — the
-end away from the previously placed run — and marches toward the junction.
+**The scaffold does not turn.** The run stops, 1' of wall is left bare, and a new
+perpendicular run begins.
 
-This is not cosmetic. Started from the wrong end, the remainder lands mid-wall where it
-means nothing and the corner connection is whatever is left over. Started correctly, the
-arithmetic resolves where it actually matters.
-
-On a closed perimeter the last wall is boxed in at both ends. It takes what is left and
-the termination rules below guarantee it can always finish.
+No floating leg. The last leg before the break still faces the wall it was serving.
 
 ---
 
-## 4. Marching and terminating
+## 3b. Runs belong to levels
 
-Legs march at nominal bay length while the distance remaining to the far boundary
-exceeds 10'.
+A run belongs to a level. It is not a full-height thing that happens to pass several
+floors - it starts at its level and rises from there.
 
-Once remaining is 10' or less:
+**A new run only begins where a level's line deviates from the key level.** Where an
+upper floor sits directly over the one below, it is the same run carrying on upward:
+more frames in the same legs, not a second run.
 
-| Remaining | Action | Result |
+### What counts as a deviation
+
+| Change | Result |
+|---|---|
+| parallel offset under 3' | **one run.** Brackets reach the offset wall. |
+| parallel offset of 3' or more | **secondary run** |
+| any perpendicular change | **secondary run**, always |
+
+A wall that turns is always a secondary run, however small the turn.
+
+### Under 3' - brackets, not a run
+
+One line of legs. Brackets reach across to the offset wall, and Korban picks the
+bracket size that keeps the 1' standoff off that wall face. This is the same
+decision as an inset or a pop-out; the wall having moved between levels does not
+change it.
+
+### Over 3' - a secondary run
+
+A second run on the second wall line.
+
+**It starts at the deviation, not at grade.** A run that only exists above a
+setback begins above that setback - it does not carry its own legs all the way to
+the ground on a line where there is no wall to work on. The same applies beneath:
+a run serving a wall that only exists at the lower level stops where that wall
+stops.
+
+### How tall it has to be to earn one
+
+**A deviating section only gets its own run if it stands more than 8' tall.**
+Below that it is not worth a run, and the deviation is picked up by brackets
+instead.
+
+### Where a run starts and stops vertically
+
+The top of a run is the wall height, which comes from the grip of that area. The
+bottom is worker reach below that - 6' by default, set in Backend. Same at every
+level.
+
+### Set back or standing out, the rule is the same
+
+Whether the upper floor overhangs the lower wall or sits back from it, **the
+scaffold follows the wall line at every level**. Legs go where the wall is. There
+is no case where a run covers a wall it cannot reach, and no case where a wall is
+left without scaffold because the level below took a different line.
+
+This is the failure that made hand-drawn runs necessary: the engine ran one
+outline from grade, so everywhere an upper floor took a different line there was
+gripped area with no legs under it.
+
+---
+
+## 4. Where a run stops
+
+A run marches at bay length until the next bay would not have wall in front of it.
+Then it stops, and whatever is left to the far corner rails across to the next run.
+
+| Remaining wall | Action | Result |
 |---|---|---|
-| 10' exactly | Leg at 10'. Lands on the boundary. | braced bay, clean |
-| over 8', under 10' | Leg at the largest standard brace length that fits. | braced bay, then rail bay |
-| 8' or less | **No further leg.** Rail across to the perpendicular leg that starts the next run. | rail bay |
+| a full bay or more | place a leg, keep marching | braced bay |
+| over 8', under a full bay | leg at the largest standard brace length that fits | braced bay, then rail bay |
+| 8' or less | **no further leg** - rail across to the next run's floating leg | rail bay |
 
-**When the remainder is 8' or less, always rail across when closing or ending a run.**
+**When the remainder is 8' or less, always rail across.**
 
-This is the preferred outcome, not a fallback. A leg is a full stack of frames from grade
-to working height - on a sixty-foot building that is ten frames, plus their braces, plates,
-jacks and pins. Closing a six-foot gap with a leg to keep the drawing tidy costs real money
-for no gain. Stretching plank and rail across to the next run saves all of it.
+This is the preferred outcome, not a fallback. A leg is a full stack of frames from
+grade to working height - on a sixty-foot building that is ten frames, plus their
+braces, plates, jacks and pins. Closing a six-foot gap with a leg to keep the
+drawing tidy costs real money for no gain.
 
-**It always resolves.** There is no failure state and no warning. Anything 8' or under is a
-legal unbraced span under Cal-OSHA, so the largest-brace-that-fits rule always lands.
+**It always resolves.** There is no failure state and no warning. Anything 8' or
+under is a legal unbraced span under Cal-OSHA, so the largest-brace-that-fits rule
+always lands.
 
 ---
 
@@ -112,20 +197,6 @@ one part multiplied by a total.
 
 ---
 
-## 7. Corners
-
-### Outside corners
-
-The run ends on or before the invisible stop. The next run begins on the invisible stop of
-its own wall. Both legs face their own wall square, 90° apart.
-
-### Inside corners
-
-**The scaffold does not turn.** The run stops, **1' of wall is left bare** — the Backend
-wall offset — and a new perpendicular run begins.
-
----
-
 ## 8. Wall jogs
 
 **Anything protruding or setting back less than 8" is ignored.** The run carries straight
@@ -162,8 +233,9 @@ End brackets hang two per frame, on the short side.
 to any global direction. Bay length is measured **along the wall face**, not its horizontal
 projection.
 
-**Acute corners.** The invisible stop stays at `frameWidth + 1'` along each wall regardless
-of the angle between them. It does not grow at acute angles.
+**Acute corners.** The floating leg still sits `frameWidth + 1'` past the corner along
+its own wall, regardless of the angle between the two walls. The distance does not grow
+at acute angles.
 
 **Sharp V-notches.** The run does not enter them. It passes the mouths and gets as close as
 it can; anywhere that leaves the wall beyond 1'-8", end brackets fill the reach. Legs near
@@ -241,9 +313,98 @@ When toggled on, adds a leg **one frame width inboard of the outer leg**.
 1. Brace selection by frame height — corrects a live bug where every job gets the same
    brace part regardless of makeup
 2. 8" jog absorption
-3. Leg placement: boundary, sequencing, marching, termination, bastard bays
-4. Bay type carried per bay so bastard bays reach the ledger as guardrail
+3. Leg placement: floating leg past each corner, marching, termination, rail bays
+3b. Runs per level, split where a level deviates from the key level
+4. Bay type carried per bay so bastard and rail bays reach the ledger as guardrail
 5. Standoff check — flag anywhere beyond 1'-8" and place end brackets
 6. Recess strategies — bracket, straddle, double run
 7. Non-orthogonal handling — slanted runs, acute corners, V-notches, sawtooth
 8. Free-drawn runs
+9. Section views — own height, 8' access rule, smallest bracket, second runs, tied legs
+
+
+---
+
+## 12. Section views
+
+Added 21 September 2026.
+
+A section is a drawing of what the plan already decided, cut where the architect
+cut it. Its height comes from its own traced profile - top of the trace to grade,
+at the section sheet's own scale. If the leg it needs differs from the one Takeoff
+built from the elevation grip, Korban says so.
+
+### The leg
+
+**The main leg stands plumb, one foot off the outermost face of the finished wall**,
+the full height. The outermost face is the one nearest the scaffold.
+
+### Recessed bands
+
+Wherever the wall falls back further than a worker on the main deck can reach, it
+is recessed. **A band is one face of wall**, not one recessed stretch - two setbacks
+of different depth, one above the other, are two bands, and the upper one stands on
+the ledge the lower one makes.
+
+### How tall a setback has to be
+
+| Height | What it gets |
+|---|---|
+| under 8' | **nothing.** A man on a bracket in it has the soffit at his head. Reached from the deck or the ground. |
+| 8' and over | a **bracket** if one reaches, otherwise a **run of its own** |
+
+Height only decides whether anyone can work in there. **Depth decides what goes
+in** - a bracket if one reaches the wall, a run if none does.
+
+### Brackets
+
+**The smallest bracket that brings the deck within 1'-8" of the wall.** Rounding
+up to the next size put the deck closer than a foot. Smallest-that-reaches keeps
+it between one foot and 1'-8".
+
+| Bracket | Reach | Boards carried |
+|---|---|---|
+| BR12S | 1'-0" | 1 |
+| BR20S | 1'-8" | 2 |
+| BR30S | 2'-6" | 3 |
+
+The boards on a bracket are material, the same as the boards on a frame.
+
+### A second run
+
+**Where no bracket reaches, the setback gets a run of its own**, standing at the
+foot of it and rising its height. **Never a frame narrower than 3'.**
+
+Three ways it can sit, and the wall decides which:
+
+| The ledge | How it sits |
+|---|---|
+| takes the frame with a foot to spare, or the setback runs to the ground | **stands on it**, a foot off the face |
+| takes the front leg but not the back | front leg still a foot off the face; **back leg hangs, tied back** to the main run's inner leg |
+| no ledge worth the name | frame **hangs off the main leg**, and a **bracket carries its front** in to the wall |
+
+Clamping back is the **tie, not the position**. Butting the frame against the
+main leg instead leaves its front four feet off the wall it was built to reach.
+
+A tie is one tube, and a tube is always two clamps.
+
+### Bearing
+
+**At grade** the jack, base plate and mudsill bed into the ground, so they sit
+below the grade line.
+
+**On a building** there is nothing to bed into. The plate sits on the ledge and
+the frame starts above it - never hanging below, through the floor of the
+setback.
+
+### Decking a double run
+
+**Where a deck on the second run lands level with one on the main run, boards
+carry across the gap between them.** That is what makes a double run one working
+surface rather than two a step apart.
+
+### Viewing
+
+**Left and Right mirror the drawing.** Same wall, same brackets, seen from the
+other side. They do not change which side the building is on - that is set when
+the section is traced in Takeoff.

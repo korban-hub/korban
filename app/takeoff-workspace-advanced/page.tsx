@@ -1282,6 +1282,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
       <KorbanGuidance
         flags={flags}
         title="Korban reads it"
+        requireAck
         accent="amber"
         className="w-full sm:w-[300px]"
         onDismiss={() => setReadsItHidden(true)}

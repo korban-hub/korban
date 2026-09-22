@@ -1523,24 +1523,45 @@ export function layoutSection(options: {
   planksPerDeck: number;
   /** Which side of the profile the scaffold stands on. */
   side?: "left" | "right";
+  /**
+   * The height of each jump, bottom first. A real leg mixes 6'-4", 5' and 3'
+   * frames to land the deck where it needs to be; without this every jump is
+   * drawn 6'-4" and the section overshoots the wall it is meant to fit.
+   */
+  jumpHeightsFt?: number[];
 }): SectionDraftingItem[] {
   const {
-    profile, pageUnitsPerFoot: puf, frameTall,
+    profile, pageUnitsPerFoot: puf,
     frameHeightFt = 6.333, scaffoldWidthFt, planksPerDeck, side = "left",
   } = options;
+  const jumpsFt = options.jumpHeightsFt && options.jumpHeightsFt.length > 0
+    ? options.jumpHeightsFt
+    : Array.from({ length: Math.max(0, options.frameTall) }, () => frameHeightFt);
+  const frameTall = jumpsFt.length;
 
   if (profile.length < 2 || puf <= 0 || frameTall <= 0) return [];
+  const frameParts = partsForConfiguration(scaffoldWidthFt, 10);
+  const partForHeight = (h: number) =>
+    h >= 6 ? frameParts.frame : h >= 4.5 ? frameParts.frame5 : frameParts.frame3;
 
   const dir = side === "left" ? -1 : 1;
   const standoff = 1 * puf;
   const maxReach = (20 / 12) * puf;
-  const frameH = frameHeightFt * puf;
   const frameW = scaffoldWidthFt * puf;
 
   // The outermost face is what the leg is set off. Everything behind it is
   // something a bracket has to reach.
   const faces = profile.map((p) => p.x);
-  const outerFace = dir === -1 ? Math.max(...faces) : Math.min(...faces);
+  /*
+   * The outermost face is the one nearest the scaffold. With the scaffold on
+   * the left the building is to the right, so that is the SMALLEST x.
+   *
+   * This was inverted - it took the largest x, the deepest recess - so the leg
+   * stood a foot off the back of the wall, everything that projected sat past
+   * it, and a bracket was drawn at every jump. That one sign was the flipped
+   * look and the brackets everywhere.
+   */
+  const outerFace = dir === -1 ? Math.min(...faces) : Math.max(...faces);
   const legFace = outerFace + dir * standoff;
 
   const grade = Math.max(...profile.map((p) => p.y));
@@ -1583,13 +1604,93 @@ export function layoutSection(options: {
     return nearest.x;
   }
 
+  /** How far back the wall sits from the main leg at a height, toward the building. */
+  const gapAt = (y: number) => (faceAt(y) - legFace) * -dir;
+
+  /*
+   * The recessed stretches of wall, found before a single deck is decided.
+   *
+   * A stretch is recessed where the wall falls further back than a worker on
+   * the main deck can reach. Knowing each stretch whole - how tall, how deep,
+   * where it starts - is what the rules below need; deciding deck by deck
+   * without it put brackets into places nobody could stand.
+   */
+  type Band = { top: number; bottom: number; deepest: number; faceX: number };
+  const topOfWall = Math.min(...profile.map((p) => p.y));
+  const step = puf * 0.25;
+  const bands: Band[] = [];
+  let open: Band | null = null;
+  /*
+   * A band is one face of wall, not one recessed stretch. Two setbacks of
+   * different depth, one above the other, are two bands - the upper one stands
+   * on the ledge the lower one makes. Joined, a second run was put at grade
+   * inside the lower projection.
+   */
+  const faceTolerance = (8 / 12) * puf;
+  for (let y = grade; y >= topOfWall - 1e-6; y -= step) {
+    const g = gapAt(y);
+    const face = faceAt(y);
+    if (g > maxReach + 1e-6) {
+      if (open && Math.abs(face - open.faceX) > faceTolerance) { bands.push(open); open = null; }
+      if (!open) open = { top: y, bottom: y, deepest: g, faceX: face };
+      else {
+        open.top = y;
+        if (g > open.deepest) open.deepest = g;
+      }
+    } else if (open) { bands.push(open); open = null; }
+  }
+  if (open) bands.push(open);
+  // Pull each band's ends onto the traced corners, so a ledge is where the
+  // wall actually steps rather than a quarter-foot off it.
+  const cornerYs = profile.map((p) => p.y);
+  const onCorner = (y: number) => {
+    let best = y, bestD = step * 2;
+    cornerYs.forEach((c) => { const d = Math.abs(c - y); if (d < bestD) { bestD = d; best = c; } });
+    return best;
+  };
+  bands.forEach((band) => { band.top = onCorner(band.top); band.bottom = onCorner(band.bottom); });
+  const bandAt = (y: number) => bands.find((b) => y >= b.top - 1e-6 && y <= b.bottom + 1e-6);
+
+  /*
+   * Under ten feet there is nowhere to stand. A bracket into a recess shorter
+   * than that puts a man on it with the soffit at his head - it is a setback,
+   * but it is not a place anyone can work from, so it gets nothing.
+   */
+  /*
+   * Under eight feet there is nowhere to stand - a man on a bracket in it has
+   * the soffit at his head, so the stretch gets nothing and is reached from the
+   * deck or the ground.
+   */
+  const MIN_ACCESS_FT = 8;
+  /** Never narrower than a 3' frame, however tight the ledge. */
+  const MIN_RUN_WIDTH_FT = 3;
+  /** How far the run may sit off the recessed face before it needs a bracket. */
+  const MAX_OFFSET_FT = 18 / 12;
+  /** How far a worker can reach off the edge of a deck. */
+  const WORK_REACH_FT = 20 / 12;
+  const BRACKETS = [
+    { part: "BR12S", ft: 1 },
+    { part: "BR20S", ft: 20 / 12 },
+    { part: "BR30S", ft: 2.5 },
+  ];
+  /*
+   * The smallest bracket that brings the deck within a worker's reach of the
+   * wall. Rounding up to the next size instead put a 30" bracket on a 2'
+   * setback and left the deck 6" off the wall - closer than the foot it is
+   * meant to keep. Smallest-that-reaches keeps it between one foot and 1'-8".
+   */
+  const bracketFor = (gapFt: number) =>
+    BRACKETS.find((b) => gapFt - b.ft <= WORK_REACH_FT + 1e-6) ?? null;
+
+  /** Where the main run's decks landed, so a second run can be bridged to them. */
+  const mainDecks: number[] = [];
+  let bottom = grade;
   for (let jump = 0; jump < frameTall; jump++) {
-    const bottom = grade - jump * frameH;
-    const top = bottom - frameH;
+    const jumpFt = jumpsFt[jump];
+    const top = bottom - jumpFt * puf;
+    mainDecks.push(top);
 
-    add({ kind: "frame", variant: "FO6L3", level: jump, x: legFace, y: top });
-
-    // Deck at the head of every jump.
+    add({ kind: "frame", variant: partForHeight(jumpFt), level: jump, x: legFace, y: top, label: String(jumpFt) });
     for (let plank = 0; plank < planksPerDeck; plank++) {
       add({
         kind: "plank", variant: "WP10", level: jump,
@@ -1597,23 +1698,196 @@ export function layoutSection(options: {
       });
     }
 
-    /*
-     * A bracket where the wall has fallen back out of reach. Sized so the
-     * deck it carries still holds its foot of clearance off that face, which
-     * is what makes the wall workable rather than merely visible.
-     */
-    const wallX = faceAt(top);
-    const gap = Math.abs(wallX - legFace);
-    if (gap > maxReach) {
-      const reachFt = (gap - standoff) / puf;
-      const variant = reachFt <= 1.05 ? "BR12S" : reachFt <= 1.7 ? "BR20S" : "BR30S";
-      add({ kind: "bracket", variant, level: jump, x: legFace, y: top });
+    const band = bandAt(top);
+    if (band) {
+      const bandFt = (band.bottom - band.top) / puf;
+      const bracket = bracketFor(gapAt(top) / puf);
+      if (bandFt >= MIN_ACCESS_FT && bracket) {
+        add({ kind: "bracket", variant: bracket.part, level: jump, x: legFace, y: top });
+        /*
+         * The boards the bracket carries - a 12" takes one, a 20" two, a 30"
+         * three. They are real material, so they are pieces, not decoration.
+         * Each board's width rides in its label; they run from the leg toward
+         * the wall, the way the bracket does.
+         */
+        const boards = bracket.part === "BR12S" ? 1 : bracket.part === "BR20S" ? 2 : 3;
+        const boardFt = bracket.ft / boards;
+        for (let k = 0; k < boards; k++) {
+          add({
+            kind: "plank", variant: "WP10", level: jump,
+            x: legFace - dir * (k + 1) * boardFt * puf, y: top,
+            label: String(boardFt),
+          });
+        }
+      }
+      // Shorter than ten feet: nothing. Beyond any bracket: the run below.
     }
+    bottom = top;
   }
 
-  // Guardrail on the working deck, jack and plate at grade.
-  add({ kind: "guardrail", variant: "GR10", level: frameTall - 1, x: legFace, y: grade - frameTall * frameH });
+  add({ kind: "guardrail", variant: "GR10", level: frameTall - 1, x: legFace, y: bottom });
   add({ kind: "jack", variant: "AL1S", level: 0, x: legFace, y: grade });
+
+  /*
+   * A setback too deep to bracket gets a run of its own.
+   *
+   * It stands on the ledge at the foot of the setback, a foot off the recessed
+   * face, and goes up the height of it - a second leg rather than a bracket
+   * reaching for a wall it cannot get within a foot of. If the setback is
+   * shallow enough that the two runs would overlap, the second is pushed hard
+   * against the first, which is how a double run is built.
+   */
+  bands.forEach((band, bandIndex) => {
+    const bandFt = (band.bottom - band.top) / puf;
+    // Anywhere a man can stand that no bracket reaches. Height is not the
+    // question - depth is; a short setback still gets a run, tied back.
+    if (bandFt < MIN_ACCESS_FT || bracketFor(band.deepest / puf)) return;
+
+    const faceX = faceAt((band.top + band.bottom) / 2);
+
+    /*
+     * The shelf this run stands on, and how it sits on it.
+     *
+     * A narrow ledge never gets a narrower frame - 3' is the shortest made. It
+     * gets a 3' frame whose back leg hangs off the shelf and is clamped to the
+     * main run's inner leg instead. The offset off the wall may open as far as
+     * 18" if that lands the back leg on the shelf rather than leaving it in the
+     * air; past 18" a bracket carries the front instead.
+     */
+    const faceBelow = faceAt(Math.min(grade, band.bottom + step));
+    const ledgeFt = Math.abs(faceBelow - faceX) / puf;
+
+    /*
+     * Where the run sits.
+     *
+     * If the ledge can take the frame with a foot off the wall, the run stands
+     * on it and needs nothing else. Only when it cannot does the back leg
+     * float - and then it is clamped to the main run's inner leg, which fixes
+     * where the frame sits: the front leg lands one frame width off the main
+     * leg and the offset off the wall is whatever is left. Up to 18" that is
+     * fine; past 18" a bracket carries the front in.
+     *
+     * Never a frame narrower than 3', however tight the ledge.
+     */
+    const widthFt = ledgeFt >= scaffoldWidthFt + 1 ? scaffoldWidthFt : MIN_RUN_WIDTH_FT;
+    const runW = widthFt * puf;
+    const runParts = partsForConfiguration(widthFt, 10);
+    const runPartFor = (h: number) =>
+      h >= 6 ? runParts.frame : h >= 4.5 ? runParts.frame5 : runParts.frame3;
+
+    /*
+     * Three ways it can sit, and the wall decides which.
+     *
+     *   The ledge takes the whole frame with a foot to spare: it stands on it.
+     *   The ledge takes the front leg but not the back: the front leg still
+     *     sits a foot off the wall and the back one hangs, tied back to the
+     *     main run's inner leg. Clamping back is the tie, not the position -
+     *     butting the frame against the main leg instead left its front four
+     *     feet off the wall it was built to reach.
+     *   No ledge worth the name: the frame hangs off the main leg entirely and
+     *     a bracket carries its front in to the wall.
+     */
+    // A setback that runs to the ground has no ledge and needs none - the run
+    // stands on the ground like any other.
+    const onGround = Math.abs(band.bottom - grade) < step * 2;
+    const standsOnLedge = onGround || ledgeFt >= widthFt + 1;
+    const bearsFrontLeg = ledgeFt >= 1;
+    let secondLeg: number;
+    let offsetFt: number;
+    if (standsOnLedge || bearsFrontLeg) {
+      secondLeg = faceX + dir * standoff;
+      offsetFt = 1;
+    } else {
+      secondLeg = legFace - dir * runW;
+      offsetFt = Math.abs(faceX - secondLeg) / puf;
+    }
+    const floating = !standsOnLedge;
+    const frontBracket = offsetFt > MAX_OFFSET_FT + 1e-6 ? bracketFor(offsetFt) : null;
+
+    const deckFt = Math.max(0, bandFt - 6);
+    const makeup = computeFrameMakeup(deckFt, 18);
+    const heights: number[] = [];
+    [...makeup.pieces].sort((m, n) => n.size - m.size)
+      .forEach((piece) => { for (let i = 0; i < piece.qty; i++) heights.push(piece.size); });
+    if (heights.length === 0) return;
+
+    /*
+     * A run on a building stands on the ledge, not below it.
+     *
+     * At grade the jack and plate bed down into the ground, so they are drawn
+     * below the line. On a ledge there is nothing to bed into - the plate sits
+     * on the slab and the frame starts above it.
+     */
+    const JACK_FT = 0.75;
+    const base = 100 * (bandIndex + 1);
+    let floor = onGround ? band.bottom : band.bottom - JACK_FT * puf;
+    heights.forEach((h, j) => {
+      const top = floor - h * puf;
+      add({ kind: "frame", variant: runPartFor(h), level: base + j, x: secondLeg, y: top, label: String(h) });
+      const runBoards = Math.max(1, Math.round(planksPerDeck * (widthFt / Math.max(scaffoldWidthFt, 0.1))));
+      for (let plank = 0; plank < runBoards; plank++) {
+        add({
+          kind: "plank", variant: "WP10", level: base + j,
+          x: secondLeg + dir * (plank * (runW / runBoards)), y: top,
+          label: String(widthFt / runBoards),
+        });
+      }
+      /*
+       * A back leg with no shelf under it is tied to the main run's inner leg
+       * rather than left standing on nothing. One tube, and a tube is always
+       * two clamps.
+       */
+      if (floating) {
+        const spanFt = Math.abs((secondLeg + dir * runW) - legFace) / puf;
+        add({
+          kind: "tube", variant: spanFt <= 4 ? "ST4SG" : spanFt <= 6 ? "ST6SG" : "ST8SG",
+          level: base + j, x: secondLeg + dir * runW, y: top,
+          label: String(Math.max(spanFt, 0.5)),
+        });
+      }
+      // Too far off the face to reach it: the front is carried by a bracket.
+      if (frontBracket) {
+        add({ kind: "bracket", variant: frontBracket.part, level: base + j, x: secondLeg, y: top });
+      }
+      floor = top;
+    });
+    add({ kind: "guardrail", variant: "GR10", level: base + heights.length - 1, x: secondLeg, y: floor, label: String(widthFt) });
+    add({
+      kind: "jack", variant: "AL1S", level: base, x: secondLeg, y: band.bottom,
+      // Where it bears, so the drawing knows which way to build it.
+      label: `${widthFt}|${onGround ? "ground" : "ledge"}`,
+    });
+
+    /*
+     * Planks bridging the two runs.
+     *
+     * Where a deck on this run lands level with one on the main run, boards
+     * carry across the gap between them - that is what makes a double run one
+     * working surface rather than two a step apart.
+     */
+    const boardFt = 1;
+    const secondBack = secondLeg + dir * runW;
+    const gapFt = Math.abs(legFace - secondBack) / puf;
+    if (gapFt > 0.25) {
+      const near = (y: number) => mainDecks.find((m) => Math.abs(m - y) <= puf);
+      const decks: number[] = [];
+      let f = onGround ? band.bottom : band.bottom - JACK_FT * puf;
+      heights.forEach((h) => { f -= h * puf; decks.push(f); });
+      decks.forEach((y, j) => {
+        const mate = near(y);
+        if (mate === undefined) return;
+        const boards = Math.max(1, Math.round(gapFt / boardFt));
+        for (let k = 0; k < boards; k++) {
+          add({
+            kind: "plank", variant: "WP10", level: base + j,
+            x: secondBack + dir * ((k + 1) * (gapFt / boards)) * puf,
+            y: mate,
+            label: String(gapFt / boards),
+          });
+        }
+      });
+    }
+  });
 
   return items;
 }

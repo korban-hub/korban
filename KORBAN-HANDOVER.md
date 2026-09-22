@@ -1,6 +1,6 @@
 # KORBAN — Handover
 
-Written 18 September 2026, updated 20 September. Repo on `section-view-v2-current`.
+Written 18 September 2026, updated 21 September. Repo on `section-view-v2-current`.
 
 Read this alongside `KORBAN-Scaffold-Geometry-Rules.md`, which holds the scaffold
 rules themselves and is the authority where the two disagree.
@@ -205,8 +205,61 @@ a dimension tool with 90/0, vertical, horizontal and free snapping. Korban's
 pieces render grey, the estimator's cyan. Only the estimator's are stored;
 Korban's are laid out fresh each time so a configuration change shows up.
 
-**It has never rendered on screen.** Every attempt to see it hit the project
-disconnect below, so the drawing, the picker and the editor are all unverified.
+**Seen working on 21 September** and corrected through several rounds: the leg
+was being set off the deepest point of the wall rather than the outermost, which
+flipped the drawing and put a bracket on every jump. Since fixed, along with the
+rules in specification section 12 - the 8' access rule, smallest-bracket sizing,
+second runs on a ledge with tied floating legs, bearing on a ledge rather than
+below it, and planks bridging a double run.
+
+Still unseen: the edit tools as they now stand - the material bank with grouped
+frame sizes, Delete and Escape, pan and wheel zoom, snapping to every endpoint,
+and dimensions that move by either end.
+
+---
+
+## The process review — 21 September
+
+The whole flow was mapped mechanically: every page's reads, writes and routes
+against the stores. The flow itself is wired properly - Bid Room, Plan Desk,
+Takeoff, Set Scaffold, Korban Review, Estimate, Margin Review and Compose all
+connect, and only Takeoff and Set Scaffold write geometry, which is right.
+
+Three real problems, worst first. **None of them are fixed yet.**
+
+### 1. The price and the load list count the job differently
+
+**The Estimate prices from `quantityEngine`. The Load List reads the
+`partLedger`.** The engine works from linear feet divided by bay length; the
+ledger counts what Set Scaffold actually laid out - real legs, level runs, drawn
+runs, recesses, section pieces. The ledger was changed to count from the plan;
+the Estimate never followed.
+
+So the yard can load a different scaffold from the one the customer is paying
+for, and neither page says so.
+
+**Proposed, awaiting the owner's decision:** the ledger becomes the single
+count. The engine stays as the first estimate on a Quick Bid, where there is no
+plan to lay out, but once a takeoff exists the price comes from the same list
+the yard loads.
+
+### 2. Quick Bid saves nothing
+
+The form has no `saveActiveElevation`, no store field, no storage of any kind -
+and there is no quick-bid record in the store. Everything typed into it is gone
+when the page is left, and never reaches the Estimate.
+
+**Agreed fix:** Quick Bid writes lineal feet and heights onto the same elevation
+record the other tiers use, so the Estimate prices it identically.
+
+### 3. Wall height is typed twice
+
+Gripping an elevation sets the wall height. The Section tab has its own **Top of
+Wall Ht.** field, typed by hand, which Set Scaffold never reads.
+
+**Agreed fix:** it shows the gripped height with worker reach from Backend
+applied, and is not typed. Backend's setting applies everywhere working scaffold
+height is considered.
 
 ---
 

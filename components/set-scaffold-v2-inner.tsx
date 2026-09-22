@@ -8,7 +8,7 @@ import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
 import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem } from "@/lib/backendStore";
-import SectionDrawing from "@/components/section-drawing";
+import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PlanPoint = { x: number; y: number };
@@ -92,6 +92,10 @@ function getPrimaryGeometryPoints(elev: ProjectElevation | null): PlanPoint[] {
   return [];
 }
 
+/** No traced plan. Everything downstream treats an empty outline as "nothing to lay out". */
+const EMPTY_OUTLINE: PlanPoint[] = [];
+
+/** Kept only so older references compile; never drawn or counted. */
 const FALLBACK: PlanPoint[] = [
   { x: 160, y: 120 }, { x: 880, y: 120 }, { x: 880, y: 300 }, { x: 700, y: 300 },
   { x: 700, y: 480 }, { x: 880, y: 480 }, { x: 880, y: 600 }, { x: 160, y: 600 },
@@ -476,6 +480,7 @@ function ScaffoldModel3D({
   placement?: "exterior" | "interior";
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<HTMLImageElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const frameRef = useRef<number>(0);
   const [rotating, setRotating] = useState(true);
@@ -509,15 +514,17 @@ function ScaffoldModel3D({
     // (heaviest compositing feature, common trigger on flaky drivers),
     // no shadow maps, pixel ratio capped at 1, low-power GPU preference
     // (avoids discrete-GPU driver bugs on Windows laptops/desktops), and
-    // Default swap behaviour. preserveDrawingBuffer used to be set here so
-    // frames could be read back out with toDataURL - that readback was what
-    // froze the browser, so both are gone.
+    // preserveDrawingBuffer for a stable backbuffer instead of the fast-swap
+    // path some drivers white out on. It was removed once on the mistaken
+    // belief that it only existed for reading frames back, and the canvas
+    // went straight back to blank white on the machine it was written for.
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: false,
         powerPreference: "low-power",
         failIfMajorPerformanceCaveat: false,
+        preserveDrawingBuffer: true,
       });
     } catch (err) {
       console.error("[3D model] Failed to create WebGL renderer — likely out of GPU contexts. Try fully restarting the browser.", err);
@@ -746,6 +753,7 @@ function ScaffoldModel3D({
     (mountRef.current as any).__setZoomFactor = (z: number) => { zoomFactor = z; };
     (mountRef.current as any).__snapshot = () => renderer.domElement.toDataURL("image/png");
 
+    let lastMirror = 0;
     function animate() {
       frameRef.current = requestAnimationFrame(animate);
       // TEMPORARY DIAGNOSTIC — logs once every ~2 seconds so we can see in
@@ -770,6 +778,29 @@ function ScaffoldModel3D({
         camera.lookAt(center.x, center.y * 0.4, center.z);
       }
       renderer.render(scene, camera);
+
+      /*
+       * Copy the frame to an image, a few times a second.
+       *
+       * On the machine this was built on, the WebGL canvas composites as blank
+       * white while drawing perfectly - verified - and an <img> displays fine.
+       * It used to copy every fifth frame, twelve times a second, which on a
+       * scene with thousands of pieces froze the browser. Five a second on a
+       * scene of sane size costs a few milliseconds and keeps it visible.
+       */
+      const now = performance.now();
+      if (now - lastMirror > 200 && document.visibilityState === "visible") {
+        lastMirror = now;
+        const img = mirrorRef.current;
+        if (img) {
+          try {
+            img.src = renderer.domElement.toDataURL("image/jpeg", 0.8);
+            // Hidden until it has a picture, so the browser never shows its
+            // broken-image icon in the gap before the first frame.
+            img.style.visibility = "visible";
+          } catch { /* skip a frame */ }
+        }
+      }
       // IMAGE-MIRROR WORKAROUND — this machine's browser compositing of
       // live WebGL canvases is broken (confirmed: the Capture PNG shows a
       // perfect scene while the on-screen canvas displays blank white; the
@@ -828,16 +859,13 @@ function ScaffoldModel3D({
     <div className="flex flex-col h-full">
       <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#080604]" style={{ minHeight: 0 }}>
         {/*
-          * The canvas, shown directly.
-          *
-          * This used to be hidden behind an <img> that received a JPEG of
-          * every fifth frame, as a workaround for one machine's compositing.
-          * toDataURL forces a full GPU readback and a JPEG encode on the main
-          * thread - twelve times a second, on a scene with hundreds of meshes.
-          * That is what was freezing the browser and warping the model, and no
-          * compositing bug is worth paying that.
+          * The canvas renders underneath; the image on top shows what it drew.
+          * See the note in the render loop for why - in short, on some Windows
+          * drivers a WebGL canvas displays white no matter what it draws.
           */}
-        <div ref={mountRef} className="absolute inset-0" />
+        <div ref={mountRef} className="absolute inset-0 opacity-0" />
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img ref={mirrorRef} alt="" style={{ visibility: "hidden" }} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
         {renderError && (
           <div className="absolute inset-0 flex items-center justify-center p-4 text-center">
             <p className="max-w-xs text-[11px] leading-[1.6] text-zinc-500">{renderError}</p>
@@ -1184,6 +1212,8 @@ export default function SetScaffoldV2Inner() {
   /** Point-to-point measuring on the plan. A read, never an edit. */
   /** Which cut is on screen. Each carries its own profile, scale and drawing. */
   const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
+  /** What the section on screen needs, reported by the drawing. */
+  const [sectionSummary, setSectionSummary] = useState<SectionSummary | null>(null);
   /**
    * Which elevation the store handed back, and why.
    *
@@ -1259,7 +1289,16 @@ export default function SetScaffoldV2Inner() {
   const effPuf   = puf ?? 4;
 
   const rawPoints = useMemo(() => getPrimaryGeometryPoints(elevation), [elevation]);
-  const outline   = rawPoints.length >= 3 ? rawPoints : FALLBACK;
+  /*
+   * The traced plan, or nothing.
+   *
+   * This used to substitute a hardcoded placeholder building whenever no floor
+   * plan had been traced - and then lay legs around it and count its frames
+   * and planks as if it were the job. A made-up building priced as real is
+   * worse than an empty screen, because it looks like an answer.
+   */
+  const outline   = rawPoints.length >= 3 ? rawPoints : EMPTY_OUTLINE;
+  const hasPlan   = rawPoints.length >= 3;
 
   /**
    * Every level that was traced, with the key one first.
@@ -1874,6 +1913,19 @@ export default function SetScaffoldV2Inner() {
    * the profile every time, so a change to the configuration is reflected
    * rather than frozen into a drawing made under the old one.
    */
+  /** Which side of the wall a section's scaffold stands on - saved with it. */
+  function handleSectionSide(sectionId: string, side: "left" | "right") {
+    if (!elevation) return;
+    const next = {
+      ...elevation,
+      sectionViews: (elevation.sectionViews ?? []).map(sv =>
+        sv.id === sectionId ? { ...sv, scaffoldSide: side } : sv,
+      ),
+    };
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+
   function handleSaveSection(sectionId: string, drawn: SectionDraftingItem[]) {
     if (!elevation) return;
     const mine = drawn.filter(i => i.source === "user");
@@ -2136,6 +2188,18 @@ export default function SetScaffoldV2Inner() {
      */
     const drawnLegCount = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0);
     const legs = drawnLegCount > 0 ? drawnLegCount : qe.legCount;
+    /*
+     * Bays, declared here with legs - before anything counts from them.
+     *
+     * This used to sit further down, below the plank count that uses it.
+     * JavaScript refuses to read a const before its line, so every ledger
+     * rebuild threw "Cannot access 'bayCount' before initialization" - and
+     * the load wrapped it in an empty catch, so Set Scaffold never received
+     * the project and showed a blank job with no explanation for a week.
+     */
+    const bayCount = drawnLegCount > 0
+      ? allSegmentLegs.reduce((sum, seg) => sum + Math.max(0, seg.legs.length - 1), 0)
+      : (qe.bayCount ?? 0);
     const entries: { partNo: string; qty: number; note?: string }[] = [];
 
     // Frames, by the actual makeup of a leg rather than one tall stack.
@@ -2173,9 +2237,6 @@ export default function SetScaffoldV2Inner() {
     const bracesPerBayPerJump =
       (getBackendSettings()?.scaffold as Record<string, number | undefined> | undefined)
         ?.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
-    const bayCount = drawnLegCount > 0
-      ? allSegmentLegs.reduce((sum, seg) => sum + Math.max(0, seg.legs.length - 1), 0)
-      : (qe.bayCount ?? 0);
     if (makeup.length > 0 && bayCount > 0) {
       makeup.forEach((piece) => {
         const heightFt = piece.label.startsWith("6") ? 6.333 : piece.label.startsWith("5") ? 5 : 3;
@@ -2309,6 +2370,110 @@ export default function SetScaffoldV2Inner() {
   const sectionType = elevation?.sectionView?.sectionType ?? "A-A";
   const wallOffset = elevation?.sectionView?.wallOffset ?? 1;
 
+  /*
+   * Configuration and Project Data, as one piece shared by the Overlay and the
+   * Section tabs - so a change to it can never reach one tab and miss the other.
+   */
+  const configColumn = (
+          <div className="flex flex-col border-l border-zinc-900 bg-[#0a0a0a] flex-shrink-0 overflow-y-auto" style={{ width: "220px" }}>
+            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
+              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Configuration</p>
+            </div>
+            <div className="px-3 py-3 space-y-3 border-b border-zinc-900">
+              <div>
+                <label className="text-[9px] text-zinc-600 block mb-1">Width</label>
+                <select value={scaffoldWidth} onChange={e => { setScaffoldWidth(e.target.value as ScaffoldWidth); saveConfig({ scaffoldWidth: parseFt(e.target.value) }); }}
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none">
+                  <option>3&apos;</option><option>3&apos;-6&quot;</option><option>5&apos;</option>
+                </select>
+              </div>
+              <div>
+                {/*
+                  * What the layout is built from.
+                  *
+                  * Everything below depends on these numbers and none of them
+                  * were visible - so a wall height of zero looked exactly like
+                  * a wall height of twenty-one, and the only symptom was frames
+                  * per leg quietly reading two.
+                  */}
+                <div className="mb-3 rounded-lg border border-zinc-800 bg-black p-2">
+                  <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.16em] text-zinc-600">
+                    Built from
+                  </p>
+                  {([
+                    ...(loadError ? [["Error", loadError] as [string, string]] : []),
+                    ["Job", projectSource === "substituted"
+                      ? "recovered - was missing"
+                      : projectName || "no project"],
+                    ["Elevation", elevationSource === "fallback"
+                      ? "blank - not saved"
+                      : elevation?.elevationName || "unnamed"],
+                    ["Sections", String(elevation?.sectionViews?.length ?? 0)],
+                    ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
+                    ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
+                    ["Levels traced", String(levelOutlines.length || 0)],
+                    ["Scale", scaleOk ? "set" : "not set"],
+                    ["Frames per leg", liveFrameTall > 0 ? String(liveFrameTall) : "-"],
+                  ] as [string, string][]).map(([label, value]) => (
+                    <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
+                      <span className="text-[9.5px] text-zinc-500">{label}</span>
+                      <span className={`font-mono text-[10px] font-bold ${
+                        (["not set", "no project", "blank - not saved", "recovered - was missing"].includes(value) || label === "Error")
+                          ? "text-red-400" : "text-zinc-300"
+                      }`}>
+                        {value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <label className="text-[9px] text-zinc-600 block mb-1">Bay Length</label>
+                <input value={bayLength} onChange={e => { setBayLength(e.target.value); saveConfig({ standardBayLength: parseFt(e.target.value) || 10 }); }}
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none" />
+              </div>
+              <div className="text-[9px] text-zinc-600 pt-1">
+                {scaleOk ? <span className="text-emerald-400">⊠ Scale set</span> : <span className="text-yellow-600">⚠ No scale</span>}
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
+              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Project Data</p>
+            </div>
+            <div className="px-3 py-3 space-y-2">
+              {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (
+                <div key={l as string} className="flex items-center justify-between rounded-lg border border-orange-500/25 bg-orange-500/5 px-2.5 py-1.5">
+                  <span className="text-[9px] uppercase tracking-wider text-orange-700">{l}</span>
+                  <span className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</span>
+                </div>
+              ))}
+
+              {/* Courtyards — only surfaced when some exist. Toggling
+                  recalculates every figure above in place. */}
+              {courtyardTotals.courtyardCount > 0 && (
+                <div className={`rounded-lg border px-2.5 py-2 transition ${includeCourtyards ? "border-emerald-500/30 bg-emerald-500/5" : "border-zinc-800 bg-black"}`}>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input type="checkbox" checked={includeCourtyards}
+                      onChange={e => handleToggleCourtyards(e.target.checked)}
+                      className="h-3 w-3 accent-emerald-500" />
+                    <span className={`text-[9px] font-bold ${includeCourtyards ? "text-emerald-300" : "text-zinc-500"}`}>
+                      Include courtyards
+                    </span>
+                  </label>
+                  <p className="mt-1 text-[8px] leading-relaxed text-zinc-500">
+                    {courtyardTotals.courtyardCount} courtyard{courtyardTotals.courtyardCount > 1 ? "s" : ""} · {courtyardTotals.faceCount} face{courtyardTotals.faceCount > 1 ? "s" : ""} · {courtyardTotals.linearFeet.toLocaleString()} LF
+                  </p>
+                  {includeCourtyards && courtyardContribution.legs > 0 && (
+                    <p className="mt-0.5 text-[8px] text-emerald-500/80">
+                      Adding {courtyardContribution.legs} legs · {courtyardContribution.frames.toLocaleString()} frames
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+  );
+
   return (
     <main className="h-screen flex flex-col overflow-hidden bg-[#080604] text-white">
       <KorbanHeader
@@ -2433,6 +2598,8 @@ export default function SetScaffoldV2Inner() {
           change how everything below them should be read. */}
       {!isQuickBid && (
         <div className="flex flex-wrap items-start gap-3 border-b border-zinc-900 bg-[#0b0b0b] px-6 py-2">
+          {/* Placement is a plan decision - it has no meaning on a section. */}
+          {activeMainTab === "overlay" && (
           <div className="flex items-center gap-2">
             <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
               Scaffold sits
@@ -2454,6 +2621,7 @@ export default function SetScaffoldV2Inner() {
               {placement === "interior" ? "legs inside the wall line" : "legs outside the wall line"}
             </span>
           </div>
+          )}
 
           {(() => {
             const flags: KorbanGuidanceFlag[] = [];
@@ -2461,7 +2629,7 @@ export default function SetScaffoldV2Inner() {
               flags.push({ tone: "warn", text: "No scale set. Nothing here is a real dimension yet." });
             }
             if (outline.length < 3) {
-              flags.push({ tone: "warn", text: "No traced plan. This shape is a placeholder - do not price it." });
+              flags.push({ tone: "warn", text: "No floor plan traced. Nothing laid out on the plan until a level is traced." });
             }
             // Two runs turning into the same notch need room for both.
             const minNotch = (scaffoldWidthFt + 1) * 2;
@@ -2481,6 +2649,16 @@ export default function SetScaffoldV2Inner() {
             }
             if ((elevation?.wallHeight ?? 0) <= 0) {
               flags.push({ tone: "warn", text: "No wall height, so every leg is at minimum. Grip an elevation in Takeoff." });
+            }
+            /*
+             * The section draws what its own profile needs. If that is a
+             * different leg from the one Takeoff built from the elevation grip,
+             * one of them is describing the wrong wall - and the material list
+             * is priced off Takeoff's. Say so rather than quietly disagree.
+             */
+            if (sectionSummary && liveFrameTall > 0 && sectionSummary.frameTall !== liveFrameTall) {
+              const h = sectionSummary.heightFt;
+              flags.push({ tone: "warn", text: `${sectionSummary.label} needs ${sectionSummary.frameTall} frame${sectionSummary.frameTall === 1 ? "" : "s"} per leg - that cut is ${Math.floor(h)}'-${Math.round((h % 1) * 12)}". Takeoff built ${liveFrameTall}. Check the grip on that face.` });
             }
             if (recesses.length > 0) {
               const by = (k: string) => recesses.filter(r => r.strategy === k).length;
@@ -2504,7 +2682,7 @@ export default function SetScaffoldV2Inner() {
               flags.push({ tone: "warn", text: "No wall height. Stack falls back to one jump - grip an elevation in Takeoff." });
             }
             if (flags.length === 0) return null;
-            return <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-xl" />;
+            return <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-xl" requireAck />;
           })()}
         </div>
       )}
@@ -2687,6 +2865,18 @@ export default function SetScaffoldV2Inner() {
 
             {/* SVG canvas */}
             <div className="flex-1 relative overflow-hidden bg-black">
+              {mounted && scaleOk && !hasPlan && (
+              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
+                <div className="rounded-2xl border border-zinc-700 bg-zinc-900/60 p-6 text-center">
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-300">No floor plan traced</p>
+                  <p className="mt-2 max-w-xs text-xs text-zinc-500">
+                    Nothing to lay legs around. Trace a level in Takeoff and it shows up here.
+                    Coverage from your grips still counts toward material.
+                  </p>
+                  <a href="/takeoff-workspace-advanced" className="mt-4 inline-block rounded-xl bg-orange-500 px-5 py-2 text-xs font-bold text-black">Go to Takeoff &rarr;</a>
+                </div>
+              </div>
+            )}
               {mounted && !scaleOk && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
                 <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 p-6 text-center">
@@ -3054,110 +3244,21 @@ export default function SetScaffoldV2Inner() {
           </div>
 
           {/* Right sidebar — configuration + stats, out of the way of the drawing */}
-          <div className="flex flex-col border-l border-zinc-900 bg-[#0a0a0a] flex-shrink-0 overflow-y-auto" style={{ width: "220px" }}>
-            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
-              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Configuration</p>
-            </div>
-            <div className="px-3 py-3 space-y-3 border-b border-zinc-900">
-              <div>
-                <label className="text-[9px] text-zinc-600 block mb-1">Width</label>
-                <select value={scaffoldWidth} onChange={e => { setScaffoldWidth(e.target.value as ScaffoldWidth); saveConfig({ scaffoldWidth: parseFt(e.target.value) }); }}
-                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none">
-                  <option>3&apos;</option><option>3&apos;-6&quot;</option><option>5&apos;</option>
-                </select>
-              </div>
-              <div>
-                {/*
-                  * What the layout is built from.
-                  *
-                  * Everything below depends on these numbers and none of them
-                  * were visible - so a wall height of zero looked exactly like
-                  * a wall height of twenty-one, and the only symptom was frames
-                  * per leg quietly reading two.
-                  */}
-                <div className="mb-3 rounded-lg border border-zinc-800 bg-black p-2">
-                  <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.16em] text-zinc-600">
-                    Built from
-                  </p>
-                  {([
-                    ...(loadError ? [["Error", loadError] as [string, string]] : []),
-                    ["Job", projectSource === "substituted"
-                      ? "recovered - was missing"
-                      : projectName || "no project"],
-                    ["Elevation", elevationSource === "fallback"
-                      ? "blank - not saved"
-                      : elevation?.elevationName || "unnamed"],
-                    ["Sections", String(elevation?.sectionViews?.length ?? 0)],
-                    ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
-                    ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
-                    ["Levels traced", String(levelOutlines.length || 0)],
-                    ["Scale", scaleOk ? "set" : "not set"],
-                    ["Frames per leg", liveFrameTall > 0 ? String(liveFrameTall) : "-"],
-                  ] as [string, string][]).map(([label, value]) => (
-                    <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
-                      <span className="text-[9.5px] text-zinc-500">{label}</span>
-                      <span className={`font-mono text-[10px] font-bold ${
-                        (["not set", "no project", "blank - not saved", "recovered - was missing"].includes(value) || label === "Error")
-                          ? "text-red-400" : "text-zinc-300"
-                      }`}>
-                        {value}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                <label className="text-[9px] text-zinc-600 block mb-1">Bay Length</label>
-                <input value={bayLength} onChange={e => { setBayLength(e.target.value); saveConfig({ standardBayLength: parseFt(e.target.value) || 10 }); }}
-                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-mono text-orange-300 outline-none" />
-              </div>
-              <div className="text-[9px] text-zinc-600 pt-1">
-                {scaleOk ? <span className="text-emerald-400">⊠ Scale set</span> : <span className="text-yellow-600">⚠ No scale</span>}
-              </div>
-            </div>
-
-            {/* Stats */}
-            <div className="border-b border-zinc-900 px-3 py-2 flex-shrink-0">
-              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">Project Data</p>
-            </div>
-            <div className="px-3 py-3 space-y-2">
-              {[["Frames", totals.frames], ["Planks", totals.planks], ["Bays", totals.bays], ["Legs", totals.legs]].map(([l, v]) => (
-                <div key={l as string} className="flex items-center justify-between rounded-lg border border-orange-500/25 bg-orange-500/5 px-2.5 py-1.5">
-                  <span className="text-[9px] uppercase tracking-wider text-orange-700">{l}</span>
-                  <span className="font-mono text-sm font-bold text-orange-300">{Number(v).toLocaleString()}</span>
-                </div>
-              ))}
-
-              {/* Courtyards — only surfaced when some exist. Toggling
-                  recalculates every figure above in place. */}
-              {courtyardTotals.courtyardCount > 0 && (
-                <div className={`rounded-lg border px-2.5 py-2 transition ${includeCourtyards ? "border-emerald-500/30 bg-emerald-500/5" : "border-zinc-800 bg-black"}`}>
-                  <label className="flex cursor-pointer items-center gap-2">
-                    <input type="checkbox" checked={includeCourtyards}
-                      onChange={e => handleToggleCourtyards(e.target.checked)}
-                      className="h-3 w-3 accent-emerald-500" />
-                    <span className={`text-[9px] font-bold ${includeCourtyards ? "text-emerald-300" : "text-zinc-500"}`}>
-                      Include courtyards
-                    </span>
-                  </label>
-                  <p className="mt-1 text-[8px] leading-relaxed text-zinc-500">
-                    {courtyardTotals.courtyardCount} courtyard{courtyardTotals.courtyardCount > 1 ? "s" : ""} · {courtyardTotals.faceCount} face{courtyardTotals.faceCount > 1 ? "s" : ""} · {courtyardTotals.linearFeet.toLocaleString()} LF
-                  </p>
-                  {includeCourtyards && courtyardContribution.legs > 0 && (
-                    <p className="mt-0.5 text-[8px] text-emerald-500/80">
-                      Adding {courtyardContribution.legs} legs · {courtyardContribution.frames.toLocaleString()} frames
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+          {configColumn}
         </section>
         )}
 
         {/* ── Tab: Section View & Frame Configuration ──────────────────── */}
         {activeMainTab === "section" && (
         <section className="flex w-full overflow-hidden">
-          <div className="flex flex-col overflow-hidden border-r border-zinc-900" style={{ width: sectionExpanded ? "75%" : "33.33%", transition: "width 0.2s ease" }}>
+          {/*
+            * The section gets the whole width. Frame Configuration Options had a
+            * column of its own offering alternates nobody chose between; the
+            * optimal configuration now sits at the top of Materials at this
+            * Section in the right-hand column, and the editing tools live in a
+            * slim column inside the drawing.
+            */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Section View</p>
             </div>
@@ -3186,10 +3287,13 @@ export default function SetScaffoldV2Inner() {
                   section={(elevation?.sectionViews ?? []).find(
                     sv => sv.id === (activeSectionId ?? elevation?.sectionViews?.[0]?.id),
                   ) ?? null}
-                  frameTall={liveFrameTall}
                   scaffoldWidthFt={scaffoldWidthFt}
                   planksPerDeck={planksPerBayForWidth(scaffoldWidthFt)}
+                  workerReachFt={workerReachHeight}
+                  screwJackMaxIn={screwJackMaxExtensionIn}
                   onSave={handleSaveSection}
+                  onSideChange={handleSectionSide}
+                  onSummary={setSectionSummary}
                 />
               ) : (
               <SectionViewPanel
@@ -3210,48 +3314,7 @@ export default function SetScaffoldV2Inner() {
             </div>
           </div>
 
-          <div className="flex flex-col overflow-y-auto border-r border-zinc-900" style={{ width: sectionExpanded ? "12.5%" : "33.33%", transition: "width 0.2s ease" }}>
-            <FrameConfigOptions effectiveHeightFt={effectiveStackHeightFt} screwJackMaxExtensionIn={screwJackMaxExtensionIn} scaffoldWidthFt={scaffoldWidthFt} />
-          </div>
-
-          {/* Materials used at this section only — not the full project count.
-              For the whole project's material list, use the button below. */}
-          <div className="flex flex-col overflow-y-auto" style={{ width: sectionExpanded ? "12.5%" : "33.33%", transition: "width 0.2s ease" }}>
-            <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Materials at This Section</p>
-            </div>
-            <div className="px-3 pt-2 pb-3 space-y-1.5">
-              {(elevation?.quantityEngine?.frameMakeup ?? []).map(p => {
-                const partNo = p.label === "6'-4\"" ? "FO6L3" : p.label === "5'-0\"" ? "FO5L3" : "FM33";
-                return (
-                  <div key={p.label} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
-                    <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">{partNo}</span>
-                    <span className="text-[9px] text-zinc-500 flex-1 truncate">{p.label} Scaffold Frame</span>
-                    <span className="font-mono text-[10px] font-bold text-orange-300">× {p.qty}</span>
-                  </div>
-                );
-              })}
-              {manualFrameCount > 0 && (
-                <div className="flex items-center gap-1.5 rounded-lg border border-orange-500/25 bg-orange-500/5 px-2 py-1.5">
-                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">FRM-A</span>
-                  <span className="text-[9px] text-zinc-500 flex-1 truncate">Added Frames (manual)</span>
-                  <span className="font-mono text-[10px] font-bold text-orange-300">× {manualFrameCount}</span>
-                </div>
-              )}
-              {manualBracketCount > 0 && (
-                <div className="flex items-center gap-1.5 rounded-lg border border-orange-500/25 bg-orange-500/5 px-2 py-1.5">
-                  <span className="text-[8px] font-mono text-orange-400 w-12 flex-shrink-0">BRKT</span>
-                  <span className="text-[9px] text-zinc-500 flex-1 truncate">Wall Bracket (Added)</span>
-                  <span className="font-mono text-[10px] font-bold text-orange-300">× {manualBracketCount}</span>
-                </div>
-              )}
-            </div>
-            <div className="px-3 pb-3 mt-auto">
-              <a href="/inventory/load-list" className="block w-full text-center rounded-xl border border-zinc-800 py-2 text-[10px] font-bold text-orange-400 hover:border-orange-500/40 hover:text-orange-300 transition">
-                Full Project Load List →
-              </a>
-            </div>
-          </div>
+          {configColumn}
         </section>
         )}
           </div>
@@ -3260,13 +3323,22 @@ export default function SetScaffoldV2Inner() {
         {/* ── Persistent right column — 3D model, always mounted & rotating,
               with the Total Project Material List beneath it ─────────── */}
         <div className="flex flex-col flex-shrink-0 overflow-hidden" style={{ width: "30%" }}>
-          {depthAtLeast(estimateDepth, "korban-bid") && (
+          {/* Not on the section tab - it has its own drawing, and dropping the
+              model lifts the material lists to the top of the column. */}
+          {depthAtLeast(estimateDepth, "korban-bid") && activeMainTab !== "section" && (
           <div className="flex flex-col flex-shrink-0" style={{ height: "55%" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
             </div>
             <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-              {mounted && (
+              {mounted && !hasPlan && (
+                <div className="flex h-full items-center justify-center p-4 text-center">
+                  <p className="max-w-[16rem] text-[11px] leading-[1.6] text-zinc-600">
+                    No floor plan traced, so there is no building to model yet.
+                  </p>
+                </div>
+              )}
+              {mounted && hasPlan && (
                 <ScaffoldModel3D
                   outline={outline}
                   puf={effPuf}
@@ -3279,6 +3351,48 @@ export default function SetScaffoldV2Inner() {
               )}
             </div>
           </div>
+          )}
+
+          {/*
+            * This section's own materials, above the project's - only while a
+            * section is on screen. The optimal frame configuration leads it:
+            * the one leg this cut calls for, from its own traced height.
+            */}
+          {activeMainTab === "section" && sectionSummary && (
+            <div className="flex-shrink-0 border-b-4 border-zinc-900 px-4 pt-3 pb-2" style={{ maxHeight: "55%", overflowY: "auto" }}>
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">
+                  Materials at {sectionSummary.label}
+                </p>
+                <span className="font-mono text-[9px] text-zinc-600">
+                  {Math.floor(sectionSummary.heightFt)}&apos;-{Math.round((sectionSummary.heightFt % 1) * 12)}&quot; wall
+                </span>
+              </div>
+
+              <div className="mt-2 rounded-lg border border-orange-500/30 bg-orange-500/5 px-2.5 py-2">
+                <p className="text-[8.5px] font-bold uppercase tracking-[0.16em] text-orange-300">
+                  Optimal &middot; {sectionSummary.frameTall} frame{sectionSummary.frameTall === 1 ? "" : "s"} per leg
+                </p>
+                {sectionSummary.pieces.map(piece => (
+                  <div key={piece.label} className="mt-1 flex justify-between text-[9.5px]">
+                    <span className="text-zinc-400">{piece.label} frame</span>
+                    <span className="font-mono text-zinc-300">&times; {piece.qty}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-2 space-y-1">
+                {sectionSummary.materials.map(row => (
+                  <div key={`${row.kind}-${row.partNo}`} className="flex items-center gap-2 rounded border border-zinc-900 bg-black px-2 py-1">
+                    <span className="w-14 flex-shrink-0 font-mono text-[8.5px] text-orange-400">{row.partNo}</span>
+                    <span className="flex-1 truncate text-[9.5px] capitalize text-zinc-500">
+                      {getStockItem(row.partNo)?.description ?? row.kind}
+                    </span>
+                    <span className="font-mono text-[10px] font-bold text-orange-300">{row.qty}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           {/* Clear separation between the 3D view and the material list */}
