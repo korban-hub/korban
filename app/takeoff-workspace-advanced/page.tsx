@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KorbanGuidance, KorbanHeader, type KorbanGuidanceFlag, type KorbanGuidanceStep, type KorbanMenuLink } from "@/components/korban";
 import {
+  switchElevationTier,
+  calculateQuantityEngine,
+  type StoredHighlight,
+  courtyardQuantities,
   createProject,
   updateActiveProject,
   parseFeetInches, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
@@ -251,6 +255,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [selectedElev,  setSelectedElev]  = useState("North");
   const [selectedArea,  setSelectedArea]  = useState(1);
   const [gripMode,      setGripMode]      = useState(false);
+  /*
+   * The highlighter.
+   *
+   * Full Bid's way onto a floor plan: press at one end of a face, drag to the
+   * other, release. The stroke owns everything inside its length - setbacks,
+   * pop-outs, every in and out - the way a project manager's marker does when
+   * he shows a crew where they are working.
+   */
+  const [highlightMode, setHighlightMode] = useState(false);
+  const [highlights,    setHighlights]    = useState<StoredHighlight[]>([]);
+  /** One elevation tile per stroke, kept in step with them. */
+  const [highlightElev, setHighlightElev] = useState<ElevationData[]>([]);
+  /** The tile a swipe will fill. Tiles come first; the stroke measures one. */
+  const [activeHighlight, setActiveHighlight] = useState<string|null>(null);
+  const [strokeFrom,    setStrokeFrom]    = useState<{x:number;y:number}|null>(null);
+  const [strokeTo,      setStrokeTo]      = useState<{x:number;y:number}|null>(null);
   const [gripStart,     setGripStart]     = useState<Pt|null>(null);
   const [gripCurrent,   setGripCurrent]   = useState<Pt|null>(null);
   const [elevStored,    setElevStored]    = useState(false);
@@ -378,6 +398,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
         }));
       }
 
+      /*
+       * Every section takes the gripped wall height. One height per job, from
+       * the one place it was measured.
+       */
+      const grippedHeight = elev.wallHeight ?? 0;
+      // Highlighter strokes come back with everything else.
+      if ((elev.highlights ?? []).length > 0) setHighlights(elev.highlights);
+
       // Traced sections come back the same as everything else does.
       const storedSections = elev.sectionViews ?? [];
       if (storedSections.length > 0) {
@@ -385,7 +413,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           id: row.id,
           label: row.label,
           wallOffset: row.wallOffset,
-          topOfWallDistance: row.topOfWallDistance,
+          topOfWallDistance: grippedHeight > 0 ? grippedHeight : row.topOfWallDistance,
           frameWidth: (row.frameWidth as ScaffoldWidth) || "3'",
           wallOutline: row.wallOutline.map(p => ({ x: p.x, y: p.y })),
           wallComplete: row.wallOutline.length >= 2,
@@ -872,6 +900,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
       return;
     }
 
+    if (highlightMode) {
+      if (!scale.locked) return;   // nothing measured without a scale
+      setStrokeFrom(pt); setStrokeTo(pt);
+      return;
+    }
+
     // Reference-point pick takes priority over every other mode - one
     // click sets the anchor for that level and exits pick mode.
     if (refPickLevelId) {
@@ -912,6 +946,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const pt=getImgPt(e); if(pt) setGripCurrent(pt);
   }
 
+  function handleHighlightMove(e:React.MouseEvent<HTMLDivElement>) {
+    if (!highlightMode || !strokeFrom) return;
+    const pt = getImgPt(e); if (pt) setStrokeTo(pt);
+  }
+
+  function handleHighlightUp() {
+    if (!highlightMode || !strokeFrom || !strokeTo) return;
+    const puf = tabScales.floor.pageUnitsPerFoot;
+    const lf = puf > 0 ? Math.hypot(strokeTo.x-strokeFrom.x, strokeTo.y-strokeFrom.y)/puf : 0;
+    // A stroke is a run, not a scribble - straight from press to release, so a
+    // shaky hand cannot add lineal feet.
+    if (lf >= 1) {
+      // Fills the tile that is selected, rather than making a new one - the
+      // tiles are the faces of the job and the stroke is how one is measured.
+      const target = activeHighlight ?? highlights[0]?.id;
+      setHighlights(prev => prev.map(h => h.id === target ? {
+        ...h,
+        a: { x: strokeFrom.x, y: strokeFrom.y },
+        b: { x: strokeTo.x, y: strokeTo.y },
+        lf: parseFloat(lf.toFixed(1)),
+      } : h));
+      setHighlightMode(false);
+    }
+    setStrokeFrom(null); setStrokeTo(null);
+  }
+
   function handleViewerMouseUp(e:React.MouseEvent<HTMLDivElement>) {
     if (!gripMode||!gripStart||!gripCurrent) return;
     const puf=tabScales.elevation.pageUnitsPerFoot;
@@ -919,7 +979,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const x=Math.min(gripStart.x,gripCurrent.x), y=Math.min(gripStart.y,gripCurrent.y);
     const w=Math.abs(gripCurrent.x-gripStart.x), h=Math.abs(gripCurrent.y-gripStart.y);
     if(w<5||h<5) { setGripStart(null); setGripCurrent(null); return; }
-    const calc=calcGripArea(w,h,puf);
+    /*
+     * On a highlight, the grip is for height only. The stroke already claimed
+     * the footage on the plan, and a grip box drawn on an elevation photo has
+     * no business overruling it.
+     */
+    const stroke = usingHighlights ? highlights.find(row=>row.label===selectedElev) : undefined;
+    const calc=calcGripArea(stroke ? stroke.lf*puf : w, h, puf);
     updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{
       ...ed,
       areas:ed.areas.map(a=>a.areaIndex===selectedArea?{ ...a, rect:{x,y,w,h}, ...calc }:a),
@@ -1042,11 +1108,94 @@ export default function TakeoffWorkspaceAdvancedPage() {
         }).filter(f=>f.totalLF>0),
       })).filter(cy=>cy.faces.length>0);
 
+      // The strokes, with whatever height each was given.
+      // The tier actually worked in, committed on every store - not only when
+      // the handoff button happens to be the way out of the page.
+      try{ setEstimateDepth(depthTab as EstimateDepth); setEstimateDepthState(depthTab as EstimateDepth); }catch{}
+
+      const storedHighlights = highlights.map(h => ({
+        ...h,
+        heightFt: highlightElev.find(row => row.direction === h.label)?.areas[0]?.heightFt ?? h.heightFt,
+      }));
+
+      /*
+       * What the strokes come to.
+       *
+       * Each one is a run of known length at its own gripped height, so it goes
+       * through the same engine as any other face - Full Bid gets real counts
+       * off a few swipes, not a division sum.
+       */
+      const highlightTotals = storedHighlights.reduce((acc, h) => {
+        if (h.lf <= 0 || h.heightFt <= 0) return acc;
+        const engine = calculateQuantityEngine({
+          linearFeet: h.lf,
+          wallHeight: h.heightFt,
+          standardBayLength: elev.scaffoldInput.standardBayLength,
+          scaffoldWidth: elev.scaffoldInput.scaffoldWidth,
+          frameHeight: elev.scaffoldInput.frameHeight,
+          plankCountPerBay: elev.scaffoldInput.plankCountPerBay,
+          bracePattern: elev.scaffoldInput.bracePattern,
+          wallOffset: elev.scaffoldInput.wallOffset,
+        });
+        acc.lf += h.lf;
+        acc.bayCount += engine.bayCount;
+        acc.legCount += engine.legCount;
+        acc.frameCount += engine.frameCount;
+        acc.plankCount += engine.plankCount;
+        acc.crossBraceCount += engine.crossBraceCount;
+        acc.guardrailCount += engine.guardrailCount;
+        acc.basePlateCount += engine.basePlateCount;
+        acc.screwJackCount += engine.screwJackCount;
+        acc.couplingPinCount += engine.couplingPinCount ?? 0;
+        acc.frameTall = Math.max(acc.frameTall, engine.frameTall);
+        acc.heightSum += h.heightFt * h.lf;
+        return acc;
+      }, { lf:0, bayCount:0, legCount:0, frameCount:0, plankCount:0, crossBraceCount:0,
+           guardrailCount:0, basePlateCount:0, screwJackCount:0, couplingPinCount:0,
+           frameTall:0, heightSum:0 });
+      const hasHighlights = highlightTotals.lf > 0;
+
+      const courtyardQty = courtyardQuantities({
+        ...elev, courtyards: storedCourtyards, includeCourtyards,
+      } as typeof elev);
+
       saveActiveElevation({
         ...elev,
-        wallHeight:src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
+        highlights: storedHighlights,
+        // Coverage and height from the strokes when there are any - the
+        // highlighter is the takeoff in Full Bid.
+        ...(hasHighlights ? { linearFeet: parseFloat(highlightTotals.lf.toFixed(1)) } : {}),
+        // Weighted by length, so a long face counts for more than a short one.
+        wallHeight:hasHighlights
+          ? parseFloat((highlightTotals.heightSum / highlightTotals.lf).toFixed(1))
+          : src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
         overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
-        quantityEngine:{ ...elev.quantityEngine, bayCount:totalBays, legCount:totalLegs, frameTall:maxFrameTall, frameCount:totalLegs*maxFrameTall },
+        /*
+         * Courtyards counted in with the rest. They are gripped like any other
+         * face, and leaving them out priced a building with a light well short
+         * by the whole of it. Set Scaffold recomputes this from the real layout
+         * later and counts them the same way, so they are never counted twice.
+         */
+        quantityEngine: hasHighlights ? {
+          ...elev.quantityEngine,
+          bayCount: highlightTotals.bayCount + courtyardQty.bayCount,
+          legCount: highlightTotals.legCount + courtyardQty.legCount,
+          frameTall: Math.max(highlightTotals.frameTall, courtyardQty.frameTall),
+          frameCount: highlightTotals.frameCount + courtyardQty.frameCount,
+          plankCount: highlightTotals.plankCount + courtyardQty.plankCount,
+          crossBraceCount: highlightTotals.crossBraceCount + courtyardQty.crossBraceCount,
+          guardrailCount: highlightTotals.guardrailCount + courtyardQty.guardrailCount,
+          basePlateCount: highlightTotals.basePlateCount + courtyardQty.basePlateCount,
+          screwJackCount: highlightTotals.screwJackCount + courtyardQty.screwJackCount,
+          couplingPinCount: highlightTotals.couplingPinCount + courtyardQty.couplingPinCount,
+        } : {
+          ...elev.quantityEngine,
+          bayCount: totalBays + courtyardQty.bayCount,
+          legCount: totalLegs + courtyardQty.legCount,
+          frameTall: Math.max(maxFrameTall, courtyardQty.frameTall),
+          frameCount: totalLegs * maxFrameTall + courtyardQty.frameCount,
+          plankCount: (elev.quantityEngine.plankCount ?? 0) + courtyardQty.plankCount,
+        },
         courtyards: storedCourtyards,
         includeCourtyards,
       });
@@ -1077,7 +1226,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
       // Use whichever scale was actually used to trace this section's
       // wall outline - the Section tab's own scale if set, otherwise
       // fall back to the Floor Plan scale (matches autoPopulateSectionInventory).
-      const tracePuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
+      /*
+       * The section sheet's own scale, or none.
+       *
+       * It used to borrow the floor plan's scale when the section had not been
+       * locked - silently, so a profile traced on a sheet drawn at a different
+       * scale measured a building several times the real size and nothing said
+       * why. A section without its own scale is not measured at all.
+       */
+      const tracePuf = tabScales.section.locked ? tabScales.section.pageUnitsPerFoot : null;
       const wallOutlineFt = (sec.wallOutline.length >= 2 && tracePuf && tracePuf > 0)
         ? wallOutlineToFeet(sec.wallOutline, tracePuf)
         : elev.sectionView.wallOutline;
@@ -1093,7 +1250,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
        * to feet here. Set Scaffold lays the drawing out against the section's
        * own scale, and converting twice is how a wall ends up the wrong size.
        */
-      const sectionPuf = tabScales.section.pageUnitsPerFoot ?? tabScales.floor.pageUnitsPerFoot ?? null;
+      const sectionPuf = tabScales.section.locked ? tabScales.section.pageUnitsPerFoot : null;
       const existing = elev.sectionViews ?? [];
       const sectionViews = sections
         .filter(row => row.wallOutline.length >= 2)
@@ -1112,7 +1269,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
               : prior?.scaleLabel ?? "",
             scaffoldSide: row.scaffoldSide,
             wallOffset: row.wallOffset,
-            topOfWallDistance: row.topOfWallDistance,
+            // The gripped height, saved with every section - one height per job.
+            topOfWallDistance: (elev.wallHeight ?? 0) > 0 ? elev.wallHeight : row.topOfWallDistance,
             frameWidth: row.frameWidth,
             // Korban redraws its own pieces; anything hand-placed survives.
             draftingAdditions: prior?.draftingAdditions ?? [],
@@ -1188,6 +1346,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
       traceMode: false, stored: false, refPoint: null,
     }]);
     setElevData(makeElevData(ELEVATION_DIRS));
+    setHighlights([]); setHighlightElev([]); setHighlightMode(false);
     setTabScales({ floor: DEFAULT_SCALE, elevation: DEFAULT_SCALE, section: DEFAULT_SCALE });
     setViewerUrl(""); setPdfDoc(null); setImageSource(null);
     setExtractedPages([]); setActiveExtracted(null);
@@ -1252,6 +1411,11 @@ export default function TakeoffWorkspaceAdvancedPage() {
         if (!scale.locked && viewerUrl) {
           flags.push({ tone:"warn", text:"Scale not locked. Nothing measured counts yet." });
         }
+        if (activeTab === "section" && !tabScales.section.locked && (sections.find(row => row.id === activeSection)?.wallOutline.length ?? 0) > 0) {
+          // Sections are drawn larger than the plan they were cut from. Borrowing
+          // the plan's scale measured a building several times the real size.
+          flags.push({ tone:"warn", text:"This section sheet has no scale of its own. Lock one here - it is not the floor plan's." });
+        }
         if (traced.length>0 && traced.some(l=>!l.refPoint)) {
           const missing = traced.filter(l=>!l.refPoint).length;
           flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
@@ -1263,7 +1427,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           flags.push({ tone:"note", text:"Floors traced, nothing gripped. Plan gives shape, grips give height." });
         }
         if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
-          flags.push({ tone:"warn", text:"Section has no wall height - one frame per leg. Set Top of Wall." });
+          flags.push({ tone:"warn", text:"No wall height yet - one frame per leg. Grip an elevation and it carries through." });
         }
         if (courtyards.length>0 && !includeCourtyards) {
           flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
@@ -1295,13 +1459,56 @@ export default function TakeoffWorkspaceAdvancedPage() {
   // Zone-aware face list: either the building's elevations or the active
   // courtyard's faces. Everything downstream (grips, tagging, rendering)
   // works off this, so courtyards reuse the identical UI and logic.
+  /*
+   * Full Bid always has a tile waiting.
+   *
+   * A highlight is a face of the job, not a by-product of a gesture - so the
+   * first one is there before anything is drawn, and the swipe fills it in.
+   */
+  useEffect(() => {
+    if (depthTab !== "full-bid") return;
+    setHighlights(prev => prev.length > 0 ? prev
+      : [{ id:`hl-${Date.now().toString(36)}`, label:"Highlight 1", a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"" }]);
+  }, [depthTab]);
+
+  useEffect(() => {
+    if (!activeHighlight && highlights.length > 0) setActiveHighlight(highlights[0].id);
+  }, [highlights, activeHighlight]);
+
+  /*
+   * In Full Bid the selected face is a highlight, not a compass point. Left on
+   * "North" the tiles read "North Elevation" over a highlight's numbers.
+   */
+  useEffect(() => {
+    if (depthTab !== "full-bid" || activeZone !== "building" || highlights.length === 0) return;
+    if (!highlights.some(h => h.label === selectedElev)) setSelectedElev(highlights[0].label);
+  }, [depthTab, activeZone, highlights, selectedElev]);
+
+  useEffect(() => {
+    setHighlightElev(prev => highlights.map(h =>
+      prev.find(row => row.direction === h.label)
+      ?? { direction: h.label, areas: [newElevArea(1, h.label)] },
+    ));
+  }, [highlights]);
+
   const activeCourtyard = courtyards.find(c=>c.id===activeZone) ?? null;
-  const activeFaces: ElevationData[] = activeCourtyard ? activeCourtyard.faces : elevData;
+  /*
+   * In Full Bid the elevation tiles are the highlighter strokes, not the four
+   * compass faces - one tile per swipe, carrying the footage it claimed, with
+   * its height typed or gripped underneath.
+   */
+  // Full Bid is highlights, always - there is a tile before anything is drawn.
+  const usingHighlights = depthTab === "full-bid";
+  const activeFaces: ElevationData[] = activeCourtyard
+    ? activeCourtyard.faces
+    : usingHighlights ? highlightElev : elevData;
 
   /** Routes a face-list update to the building or the active courtyard. */
   function updateActiveFaces(updater:(faces:ElevationData[])=>ElevationData[]) {
     if (activeCourtyard) {
       setCourtyards(prev=>prev.map(c=>c.id===activeCourtyard.id?{...c,faces:updater(c.faces)}:c));
+    } else if (usingHighlights) {
+      setHighlightElev(prev=>updater(prev));
     } else {
       setElevData(prev=>updater(prev));
     }
@@ -1354,7 +1561,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
               * This one is for stopping mid-job.
               */}
             <button onClick={saveWork} className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20">+ Save Work</button>
-            <a href="/set-scaffold-v2" className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Scaffold Layout &rarr;</a>
+            <button
+              onClick={()=>{ try{ setEstimateDepth(depthTab as EstimateDepth); }catch{} window.location.href="/set-scaffold-v2"; }}
+              className="rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black hover:bg-orange-400">Scaffold Layout &rarr;</button>
           </>
         }
       />
@@ -1371,13 +1580,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
           const active = depthTab===d.id;
           return (
           <button key={d.id} onClick={()=>{
+              /*
+               * Changing tier puts this tier's work away and brings out the
+               * other's.
+               *
+               * The three tiers measure the same building three ways and they
+               * do not mix - a traced outline underneath a set of highlighter
+               * strokes drew a second scaffold and counted it. Nothing is
+               * destroyed, so a job can be tried three ways and compared.
+               */
+              try{
+                const current = getActiveElevation();
+                const moved = switchElevationTier(current, d.id as EstimateDepth);
+                saveActiveElevation(moved);
+                setEstimateDepth(d.id as EstimateDepth);
+                setEstimateDepthState(d.id as EstimateDepth);
+              }catch{}
               setDepthTab(d.id);
               if(!d.tools.includes(activeTab)) setActiveTab(d.tools[0]);
-              // Opening a deeper tier promotes the project; going back to a
-              // shallower tab is just viewing, so the depth is left alone.
-              if(DEPTH_ORDER.indexOf(d.id as EstimateDepth) > DEPTH_ORDER.indexOf(estimateDepth)){
-                try{ setEstimateDepth(d.id as EstimateDepth); setEstimateDepthState(d.id as EstimateDepth); }catch{}
-              }
+              // Everything measured belongs to the tier that measured it, so
+              // the page starts from the incoming tier's work.
+              setTimeout(()=>window.location.reload(), 0);
             }}
             className={`relative flex items-center gap-2 rounded-t-lg border border-b-0 px-6 pt-2.5 pb-3 text-[11px] font-bold uppercase tracking-[0.15em] transition ${active?"text-white border-zinc-700":"text-zinc-600 hover:text-zinc-400 border-zinc-800"}`}
             style={{ background: active ? "#1a1a1a" : "#0b0b0b" }}>
@@ -1448,19 +1671,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
             body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
             why:"Nothing measures until Korban knows how big a foot is.",
             done: scale.locked || (scale.pageUnitsPerFoot ?? 0) > 0 },
-          { id:"trace", title:"Trace the floor outline",
-            body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
-            done: anyTraced },
-          { id:"ref", title:"Set reference points",
-            body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
-            why:"This stacks the floors. Without it a real step-back looks like a shaky trace.",
-            done: allRefs },
-          { id:"grip", title:"Grip the elevations",
-            body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
-            why:"The grip gives height. Height sets frames per leg.",
-            done: anyGrip },
+          ...(depthTab === "full-bid" ? [
+            { id:"highlight", title:"Highlight the coverage",
+              body:"Press Highlight, then swipe along a face - press at one end, drag to the other, release. Add Highlight for the next one.",
+              why:"A stroke owns everything inside its length: setbacks, pop-outs, every in and out. Same as running a marker down a set of plans.",
+              done: highlights.some(h => h.lf > 0) },
+            { id:"grip", title:"Give each highlight a height",
+              body:"Switch to Elevations. Each highlight is a tile there - set the scale, then grip top to bottom, or type the height.",
+              why:"The swipe gave the length. The grip gives the height. Together they are the takeoff.",
+              done: anyGrip },
+          ] : [
+            { id:"trace", title:"Trace the floor outline",
+              body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
+              done: anyTraced },
+            { id:"ref", title:"Set reference points",
+              body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
+              why:"This stacks the floors. Without it a real step-back looks like a shaky trace.",
+              done: allRefs },
+            { id:"grip", title:"Grip the elevations",
+              body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
+              why:"The grip gives height. Height sets frames per leg.",
+              done: anyGrip },
+          ]),
           { id:"store", title:"Store the work",
-            body:"Store Overlay on the floor plan, Store Elevations on the elevations.",
+            body: depthTab === "full-bid"
+              ? "Store Elevations once every highlight has a height."
+              : "Store Overlay on the floor plan, Store Elevations on the elevations.",
             done: overlayStored || elevStored },
         ];
 
@@ -1625,13 +1861,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
               </div>
             )}
 
+            {/*
+              * The highlighter, on the floor plan in Full Bid. Korban Bid
+              * traces instead - that is the difference between the two.
+              *
+              * It sits outside the scale block on purpose: it used to live in
+              * the branch that only renders while the scale is UNLOCKED, so
+              * locking the scale made the button disappear and leaving it
+              * unlocked left it unable to measure. It had no working state.
+              */}
+            {depthTab==="full-bid"&&activeTab==="floor"&&viewerUrl&&(
+              <button onClick={()=>{setHighlightMode(v=>!v);setStrokeFrom(null);setStrokeTo(null);}}
+                title={scale.locked?"Swipe along a face to claim it":"Set the scale on this sheet first"}
+                className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${highlightMode?"border-yellow-400 bg-yellow-400/20 text-yellow-300":"border-zinc-700 text-zinc-400 hover:border-yellow-400/40"}`}>
+                {highlightMode?"Highlighting...":"Highlight"}
+              </button>
+            )}
+
             {/* Elevation grip tools */}
             {activeTab==="elevation"&&viewerUrl&&scale.locked&&(
               <>
                 <div className="h-4 w-px bg-zinc-800"/>
                 <button onClick={()=>setGripMode(m=>!m)}
                   className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${gripMode?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"} ${currentGuide==="grip"&&!gripMode?"korban-guide-glow":""}`}>
-                  {gripMode?`Drag Area ${selectedArea} on ${selectedElev}`:"Add Grip"}
+                  {gripMode
+                    ? (usingHighlights ? `Drag top to bottom for ${selectedElev}` : `Drag Area ${selectedArea} on ${selectedElev}`)
+                    : usingHighlights ? "Grip height" : "Add Grip"}
                 </button>
               </>
             )}
@@ -1648,7 +1903,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   {wallOutlineMode?"Wall Outline":"Start Wall Outline"}
                 </button>
                 {activeSec?.wallOutline?.length>0&&!activeSec.wallComplete&&(
-                  <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
+                  <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,tabScales.section.locked?tabScales.section.pageUnitsPerFoot:null);}}
                     className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/20">
                     Complete
                   </button>
@@ -1685,12 +1940,33 @@ export default function TakeoffWorkspaceAdvancedPage() {
             </div>
           )}
 
+          {/*
+            * The highlighter, armed. A tool that is on and says nothing is a
+            * tool that looks broken - and one that cannot measure yet should
+            * say why rather than sit there disabled.
+            */}
+          {highlightMode&&activeTab==="floor"&&(
+            <div className={`flex items-center gap-2 border-b px-4 py-2 ${scale.locked?"border-yellow-500/30 bg-yellow-500/[0.07]":"border-red-500/30 bg-red-500/[0.07]"}`}>
+              <span className={`h-2 w-2 rounded-full ${scale.locked?"bg-yellow-400":"bg-red-400"}`} />
+              <p className={`text-[11px] ${scale.locked?"text-yellow-200":"text-red-300"}`}>
+                {scale.locked
+                  ? <>Swipe along a face for <span className="font-bold">{highlights.find(h=>h.id===(activeHighlight??highlights[0]?.id))?.label ?? "Highlight 1"}</span> &mdash; press at one end, drag, release.</>
+                  : <>This sheet has no scale yet. Set the scale on the floor plan and the highlighter can measure.</>}
+              </p>
+              <button onClick={()=>{setHighlightMode(false);setStrokeFrom(null);setStrokeTo(null);}}
+                className="ml-auto text-[10px] text-zinc-500 hover:text-white">cancel</button>
+            </div>
+          )}
+
           {/* PDF Canvas */}
           <div ref={viewerRef}
             className="relative flex-1 overflow-auto bg-zinc-950 p-6"
+            style={highlightMode ? { cursor: "crosshair", userSelect: "none" } : undefined}
+            onDragStart={(e)=>{ if (highlightMode) e.preventDefault(); }}
             onMouseDown={handleViewerMouseDown}
-            onMouseMove={handleViewerMouseMove}
-            onMouseUp={handleViewerMouseUp}
+            onMouseMove={(e)=>{handleHighlightMove(e);handleViewerMouseMove(e);}}
+            onMouseUp={(e)=>{handleHighlightUp();handleViewerMouseUp(e);}}
+            onMouseLeave={handleHighlightUp}
             onDoubleClick={handleViewerDblClick}
             style={{cursor:isCapturing?"crosshair":"default"}}>
 
@@ -1740,6 +2016,44 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   viewBox={naturalSize.w ? `0 0 ${naturalSize.w} ${naturalSize.h}` : undefined}>
 
                   {/* Floor traces */}
+                  {/*
+                    * Highlighter strokes. They stay lit, labelled with what
+                    * they cover, so the plan reads like a marked-up set.
+                    */}
+                  {activeTab==="floor"&&highlights.filter(h=>h.lf>0).map((h,i)=>(
+                    <g key={h.id}>
+                      <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
+                        stroke="#fbbf24" strokeWidth={14/viewerZoom} strokeLinecap="round" opacity="0.32" />
+                      <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
+                        stroke="#fbbf24" strokeWidth={2/viewerZoom} strokeLinecap="round" opacity="0.9" />
+                      {(() => {
+                        // Along its own line, off to one side, in the same
+                        // drawing type the layout uses.
+                        const mx=(h.a.x+h.b.x)/2, my=(h.a.y+h.b.y)/2;
+                        const dx=h.b.x-h.a.x, dy=h.b.y-h.a.y;
+                        const len=Math.hypot(dx,dy)||1;
+                        const off=14/viewerZoom;
+                        const at={ x: mx + (-dy/len)*off, y: my + (dx/len)*off };
+                        let ang=Math.atan2(dy,dx)*180/Math.PI;
+                        if (ang>90||ang<-90) ang+=180;
+                        return (
+                          <text x={at.x} y={at.y}
+                            textAnchor="middle" fontSize={12/viewerZoom} fill="#fbbf24"
+                            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                            fontWeight="bold" letterSpacing={0.8/viewerZoom}
+                            stroke="#000" strokeWidth={3/viewerZoom} paintOrder="stroke"
+                            transform={`rotate(${ang} ${at.x} ${at.y})`}>
+                            {h.label.toUpperCase()} &middot; {h.lf}&apos;
+                            {h.note ? ` \u00b7 ${h.note.toUpperCase()}` : ""}
+                          </text>
+                        );
+                      })()}
+                    </g>
+                  ))}
+                  {activeTab==="floor"&&strokeFrom&&strokeTo&&(
+                    <line x1={strokeFrom.x} y1={strokeFrom.y} x2={strokeTo.x} y2={strokeTo.y}
+                      stroke="#fbbf24" strokeWidth={14/viewerZoom} strokeLinecap="round" opacity="0.45" />
+                  )}
                   {activeTab==="floor"&&floorLevels.map(lvl=>{
                     if(lvl.tracePoints.length<1) return null;
                     const pts=[...lvl.tracePoints,...(lvl.traceClosed?[lvl.tracePoints[0]]:[])];
@@ -1901,12 +2215,85 @@ export default function TakeoffWorkspaceAdvancedPage() {
         <aside className="flex w-[250px] flex-shrink-0 flex-col border-l border-zinc-900 bg-[#080604] overflow-y-auto">
 
           {/* -- FLOOR PLAN -- */}
+          {/*
+            * What the highlighter has claimed so far. Full Bid's whole
+            * takeoff on the plan side: a few strokes and their footage.
+            */}
+          {depthTab==="full-bid"&&activeTab==="floor"&&(
+            <div className="border-b border-zinc-900 px-4 py-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-yellow-300">Highlights</p>
+                <span className="font-mono text-[10px] text-zinc-400">
+                  {highlights.reduce((sum,h)=>sum+h.lf,0).toFixed(1)} LF
+                </span>
+              </div>
+              <div className="space-y-1">
+                {highlights.map(h=>{
+                  const selected = (activeHighlight ?? highlights[0]?.id) === h.id;
+                  return (
+                  <div key={h.id}
+                    onClick={()=>setActiveHighlight(h.id)}
+                    className={`cursor-pointer rounded-lg border px-2 py-1.5 transition ${selected?"border-yellow-500/60 bg-yellow-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 flex-shrink-0 rounded-full ${h.lf>0?"bg-yellow-400":"border border-zinc-700"}`} />
+                      <span className="flex-1 truncate font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-300">{h.label}</span>
+                      <span className={`font-mono text-[10px] ${h.lf>0?"text-yellow-300":"text-zinc-600"}`}>
+                        {h.lf>0?`${h.lf}'`:"\u2014"}
+                      </span>
+                      {highlights.length>1&&(
+                        <button onClick={(e)=>{e.stopPropagation();setHighlights(prev=>prev.filter(row=>row.id!==h.id));}}
+                          title="Remove this highlight"
+                          className="text-[10px] text-zinc-600 hover:text-red-400">&times;</button>
+                      )}
+                    </div>
+                    {/*
+                      * Arm the highlighter from the tile itself. A tool button
+                      * buried in the sheet toolbar is a tool nobody finds -
+                      * this is where the work is being done.
+                      */}
+                    <button
+                      onClick={(e)=>{e.stopPropagation();setActiveHighlight(h.id);setHighlightMode(true);setStrokeFrom(null);setStrokeTo(null);}}
+                      className={`mt-1 w-full rounded border px-2 py-1 font-mono text-[9px] font-bold tracking-[0.08em] transition ${
+                        highlightMode&&selected
+                          ? "border-yellow-400 bg-yellow-400/20 text-yellow-300"
+                          : "border-zinc-800 text-zinc-500 hover:border-yellow-400/40 hover:text-yellow-300"
+                      }`}>
+                      {highlightMode&&selected ? "SWIPING \u2014 PRESS AND DRAG" : h.lf>0 ? "RE-SWIPE" : "SWIPE TO MEASURE"}
+                    </button>
+                    {/* Somewhere to say which face this is, in the estimator's
+                        own words - "back alley", "over the canopy". */}
+                    <input value={h.note} placeholder="NOTE"
+                      onChange={e=>setHighlights(prev=>prev.map(row=>row.id===h.id?{...row,note:e.target.value}:row))}
+                      onClick={(e)=>e.stopPropagation()}
+                      className="mt-1 w-full rounded border border-zinc-900 bg-zinc-950 px-1.5 py-1 font-mono text-[9px] uppercase tracking-[0.06em] text-zinc-400 outline-none placeholder:text-zinc-700 focus:border-yellow-500/40"/>
+                  </div>
+                  );
+                })}
+                <button
+                  onClick={()=>{
+                    const id=`hl-${Date.now().toString(36)}`;
+                    setHighlights(prev=>[...prev,{ id, label:`Highlight ${prev.length+1}`, a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"" }]);
+                    setActiveHighlight(id);
+                  }}
+                  className="w-full rounded-lg border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 transition hover:border-yellow-500/40 hover:text-yellow-300">
+                  + Add Highlight
+                </button>
+              </div>
+            </div>
+          )}
+
           {activeTab==="floor"&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
                 {/* Reference point - its own step. It's an anchor shared
                     across levels, not a property of any one outline, so it
                     sits above the level list rather than inside a tile. */}
+                {/*
+                  * A reference point anchors traced levels to each other. Full
+                  * Bid traces nothing and stacks nothing, so it has no use for
+                  * one - and no floor levels or key floor either.
+                  */}
+                {depthTab!=="full-bid"&&(
                 <div data-guide="reference-point" className={`rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 ${currentGuide==="reference-point"?"korban-guide-glow":""}`}>
                   <div className="mb-2 flex items-center justify-between">
                     <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Reference Point</p>
@@ -1939,8 +2326,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </div>
                 </div>
 
+                )}
+
+                {depthTab!=="full-bid"&&(
                 <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Floor Levels</p>
-                {floorLevels.map((level,i)=>{
+                )}
+                {depthTab!=="full-bid"&&floorLevels.map((level,i)=>{
                   const isActive=level.id===activeLevel;
                   const isWorking=isActive&&(level.traceMode||level.tracePoints.length>0)&&!level.stored;
                   return (
@@ -2061,10 +2452,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   );
                 })}
 
+                {depthTab!=="full-bid"&&(
                 <button onClick={()=>setFloorLevels(prev=>[...prev,{id:`lvl-${Date.now()}`,levelName:`Level ${prev.length+1}`,isKeyFloor:false,linealFeet:0,color:LEVEL_COLORS[prev.length%LEVEL_COLORS.length],tracePoints:[],traceClosed:false,traceMode:false,stored:false,refPoint:null}])}
                   className="w-full rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400 transition">
                   + Add Level
                 </button>
+                )}
 
                 {/* Destructive, so it sits away from anything routine and says
                     plainly what goes. */}
@@ -2147,7 +2540,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     their quantities can be toggled in or out of totals. */}
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-2 space-y-2">
                   <div className="flex gap-1 flex-wrap">
-                    <button onClick={()=>{setActiveZone("building");setSelectedElev("North");setSelectedArea(1);setGripMode(false);}}
+                    <button onClick={()=>{setActiveZone("building");setSelectedElev(depthTab==="full-bid"&&highlights[0]?highlights[0].label:"North");setSelectedArea(1);setGripMode(false);}}
                       className={`rounded-lg px-2.5 py-1 text-[9px] font-bold border transition ${activeZone==="building"?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
                       Exterior
                     </button>
@@ -2181,23 +2574,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </label>
                 </div>
 
-                <div className="flex gap-1 flex-wrap">
-                  {ELEVATION_DIRS.map(dir=>{
+                <div className={usingHighlights&&activeZone==="building" ? "space-y-0.5 rounded-lg border border-zinc-900 bg-black p-1" : "flex gap-1 flex-wrap"}>
+                  {/*
+                    * The tiles are the strokes in Full Bid, the compass faces
+                    * otherwise - each stroke carries the footage it claimed.
+                    */}
+                  {(usingHighlights&&activeZone==="building"
+                      ? highlights.map(h=>h.label)
+                      : ELEVATION_DIRS).map(dir=>{
                     // A face counts as "in use" once something's gripped on
                     // it - courtyards often have an open side that never is.
                     const face=activeFaces.find(f=>f.direction===dir);
                     const used=face?.areas.some(a=>a.rect&&a.lf>0);
+                    const stroke=highlights.find(h=>h.label===dir);
                     return (
                     <button key={dir} onClick={()=>{setSelectedElev(dir);setSelectedArea(1);setGripMode(false);}}
-                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":used?"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-orange-500/40":"border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-orange-500/40"}`}>
-                      {dir}{used&&selectedElev!==dir?" \u00b7":""}
+                      className={stroke
+                        ? `flex w-full items-center justify-between rounded px-2 py-1 text-left text-[10px] transition ${selectedElev===dir?"bg-zinc-900 text-zinc-200":"text-zinc-500 hover:text-zinc-300"}`
+                        : `rounded-lg px-2.5 py-1 text-[10px] font-bold border transition ${selectedElev===dir?"border-orange-500 bg-orange-500 text-black":used?"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-orange-500/40":"border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-orange-500/40"}`}>
+                      {stroke
+                        ? <><span className="font-mono uppercase tracking-[0.08em]">{dir}</span><span className={`font-mono ${stroke.lf>0?"text-yellow-300":"text-zinc-600"}`}>{stroke.lf>0?`${stroke.lf}'`:"\u2014"}</span></>
+                        : <>{dir}{used&&selectedElev!==dir?" \u00b7":""}</>}
                     </button>
                     );
                   })}
                 </div>
 
                 {/* Duplicate toggles - North to South, East to West */}
-                {activeZone==="building"&&selectedElev==="North"&&(
+                {activeZone==="building"&&!usingHighlights&&selectedElev==="North"&&(
                   <div className="flex items-center gap-2">
                     <button onClick={()=>{duplicateElevation("North","South");setDupSouth(true);}}
                       className={`rounded-lg border px-2.5 py-1 text-[9px] font-bold transition ${dupSouth?"border-orange-500/40 bg-orange-500/10 text-orange-300":"border-zinc-800 text-zinc-600 hover:border-zinc-600"}`}>
@@ -2214,7 +2618,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </div>
                 )}
 
-                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " - Coverage Areas" : " Elevation"}</p>
+                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " - Coverage Areas" : usingHighlights ? " - height only" : " Elevation"}</p>
 
                 {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
                   const hasData=area.rect&&area.lf>0;
@@ -2223,7 +2627,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     <div key={area.id} onClick={()=>setSelectedArea(area.areaIndex)}
                       className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                       <div className="flex items-center justify-between mb-2">
-                        <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>{depthTab==="korban-bid" ? `Area ${area.areaIndex}` : `${selectedElev} Elevation`}</span>
+                        <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>
+                          {depthTab==="korban-bid" ? `Area ${area.areaIndex}` : usingHighlights ? selectedElev : `${selectedElev} Elevation`}
+                          {usingHighlights&&(()=>{
+                            const stroke=highlights.find(h=>h.label===selectedElev);
+                            return stroke ? <span className="ml-2 font-mono text-[10px] font-normal text-yellow-300">{stroke.lf}&apos; lineal</span> : null;
+                          })()}
+                        </span>
                         {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>}
                       </div>
 
@@ -2254,9 +2664,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         <p className="text-[9px] text-zinc-600 mb-2">{isSelected?"Select Start then drag on drawing":"Click to select area"}</p>
                       )}
 
-                      {/* Level range - optional. Says which floors this
-                          gripped region spans, so Korban can derive where
-                          the run actually starts vertically. */}
+                      {/* Level range - optional, and only where levels exist.
+                          Full Bid traces none, so a highlight has none. */}
+                      {!usingHighlights&&(
                       <div onClick={e=>e.stopPropagation()} className="mb-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
                         <label className="text-[8px] uppercase tracking-wider text-zinc-600 block mb-1">Level Range (optional)</label>
                         <div className="flex items-center gap-1">
@@ -2287,6 +2697,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           );
                         })()}
                       </div>
+                      )}
 
                       {/* Start / Close / Store per area */}
                       <div className="flex gap-1" onClick={e=>e.stopPropagation()}>
@@ -2304,6 +2715,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           {area.stored?"Stored":"Store"}
                         </button>
                       </div>
+
+                      {/* The estimator's own words, at the foot of the tile. */}
+                      {usingHighlights&&(()=>{
+                        const stroke=highlights.find(h=>h.label===selectedElev);
+                        if(!stroke) return null;
+                        return (
+                          <input value={stroke.note} placeholder="NOTE"
+                            onClick={e=>e.stopPropagation()}
+                            onChange={e=>setHighlights(prev=>prev.map(row=>row.id===stroke.id?{...row,note:e.target.value}:row))}
+                            className="mt-2 w-full rounded border border-zinc-800 bg-black px-2 py-1 font-mono text-[9.5px] uppercase tracking-[0.06em] text-zinc-400 outline-none placeholder:text-zinc-700 focus:border-yellow-500/40"/>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -2326,18 +2749,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
                 {/* Summary */}
                 <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                  <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">All Elevations to Set Scaffold</p>
-                  {ELEVATION_DIRS.map(dir=>{
-                    const ed=elevData.find(e=>e.direction===dir);
+                  {/*
+                    * The summary mirrors the tiles: highlights in Full Bid,
+                    * compass faces otherwise. Listing North, East, South and
+                    * West under a set of highlights described a building the
+                    * estimator never measured.
+                    */}
+                  <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">
+                    {usingHighlights ? "All Highlights to Set Scaffold" : "All Elevations to Set Scaffold"}
+                  </p>
+                  {(usingHighlights ? highlights.map(h=>h.label) : ELEVATION_DIRS).map(dir=>{
+                    const ed=activeFaces.find(e=>e.direction===dir);
+                    const stroke=highlights.find(h=>h.label===dir);
                     const filled=ed?.areas.filter(a=>a.rect&&a.lf>0)??[];
-                    const totalLF=filled.reduce((s,a)=>s+a.lf,0);
+                    const totalLF=stroke ? stroke.lf : filled.reduce((s,a)=>s+a.lf,0);
                     const totalLegs=filled.reduce((s,a)=>s+a.legs,0);
                     const avgFT=filled.length?Math.round(filled.reduce((s,a)=>s+a.frameTall,0)/filled.length):0;
                     return (
-                      <div key={dir} className={`py-1 border-b border-zinc-900 last:border-0 ${filled.length?"":"opacity-40"}`}>
+                      <div key={dir} className={`py-1 border-b border-zinc-900 last:border-0 ${filled.length||(stroke?.lf??0)>0?"":"opacity-40"}`}>
                         <div className="flex justify-between text-[9px]">
                           <span className="text-zinc-500 font-bold">{dir}</span>
-                          <span className={`font-mono ${filled.length?"text-orange-300":"text-zinc-700"}`}>{filled.length?`${totalLF.toFixed(0)}LF`:"-"}</span>
+                          <span className={`font-mono ${totalLF>0?"text-orange-300":"text-zinc-700"}`}>{totalLF>0?`${totalLF.toFixed(0)}LF`:"-"}</span>
                         </div>
                         {filled.length>0&&<p className="text-[8px] text-zinc-600">{totalLegs} legs &middot; {avgFT} frames per leg</p>}
                       </div>
@@ -2369,7 +2801,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 )}
 
                 <button
-                  onClick={()=>{ if(!elevStored) storeElevations(); window.location.href="/set-scaffold-v2"; }}
+                  onClick={()=>{
+                    if(!elevStored) storeElevations();
+                    /*
+                     * Hand over at the tier actually worked in.
+                     *
+                     * Opening a deeper tab promotes the job, but dropping back
+                     * to a shallower one never demoted it - so a job once taken
+                     * to Korban Bid still arrived at Set Scaffold asking for
+                     * sections, showing an old one from a different takeoff.
+                     */
+                    try{ setEstimateDepth(depthTab as EstimateDepth); }catch{}
+                    window.location.href="/set-scaffold-v2";
+                  }}
                   className="mt-2 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-xs font-bold text-black transition hover:bg-orange-400"
                 >
                   Complete Takeoff &rarr;
@@ -2417,16 +2861,26 @@ export default function TakeoffWorkspaceAdvancedPage() {
                           onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOffset:parseFloat(e.target.value)||1}:s))}
                           className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
                       </div>
+                      {/*
+                        * Shown, not typed.
+                        *
+                        * The grip measured this wall already, and worker reach
+                        * comes from Backend. A second field invited a number
+                        * that disagreed with the grip, on the same job.
+                        */}
                       <div>
                         <label className="text-[9px] text-zinc-500 block mb-1">Top of Wall Ht.</label>
-                        <input value={activeSec.topOfWallDistance} type="number" step="0.5" min="0"
-                          onChange={e=>setSections(prev=>prev.map(s=>s.id===activeSection?{...s,topOfWallDistance:parseFloat(e.target.value)||0}:s))}
-                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-orange-300 outline-none focus:border-orange-500/50"/>
+                        <div className="w-full rounded-xl border border-zinc-800 bg-black px-2 py-1.5 text-xs font-mono text-zinc-300">
+                          {activeSec.topOfWallDistance > 0
+                            ? `${activeSec.topOfWallDistance.toFixed(1)}'`
+                            : "from grip"}
+                        </div>
                       </div>
                     </div>
                     <p className="text-[8px] leading-relaxed text-zinc-600">
-                      Wall height from grade. The top working deck lands a worker&apos;s reach below it -
-                      set that in Backend &gt; Scaffold Defaults.
+                      Wall height comes from the elevation grip. The top working deck lands a
+                      worker&apos;s reach below it &mdash; {backendSettings?.scaffold?.workerReachHeight ?? 6}&apos;,
+                      set in Backend &gt; Scaffold Defaults, and used everywhere working height is figured.
                     </p>
 
                     {/* Wall outline status */}
@@ -2479,7 +2933,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${wallOutlineMode?"border-blue-500 bg-blue-500/15 text-blue-300":"border-zinc-700 text-zinc-500 hover:border-blue-500/40"}`}>
                         Start
                       </button>
-                      <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,scale.pageUnitsPerFoot??tabScales.floor.pageUnitsPerFoot);}}
+                      <button onClick={()=>{setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallComplete:true}:s));setWallOutlineMode(false);autoPopulateSectionInventory(activeSection,activeSec.wallOutline,tabScales.section.locked?tabScales.section.pageUnitsPerFoot:null);}}
                         disabled={!activeSec.wallOutline||activeSec.wallOutline.length<2||activeSec.wallComplete}
                         className={`flex-1 rounded-lg border px-2 py-2 text-[9px] font-bold transition ${activeSec.wallComplete?"border-emerald-500/40 text-emerald-300":"border-zinc-700 text-zinc-500 hover:border-emerald-500/40"} disabled:opacity-30`}>
                         {activeSec.wallComplete?"Done":"Complete"}

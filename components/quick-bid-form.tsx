@@ -16,7 +16,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { calculateQuantityEngine, partsForConfiguration, planksPerBayForWidth } from "@/lib/projectStore";
+import {
+  calculateQuantityEngine, getActiveElevation, partsForConfiguration,
+  planksPerBayForWidth, saveActiveElevation,
+} from "@/lib/projectStore";
 import { getBackendSettings, getFinishRule, getObstructionFactor } from "@/lib/backendStore";
 import { KorbanGuidance } from "@/components/korban";
 
@@ -576,6 +579,40 @@ export default function QuickBidForm() {
   }, [form, structure]);
 
   const ready = derived.lf > 0 && derived.height > 0;
+
+  /*
+   * A Quick Bid is a bid, so it is written down.
+   *
+   * This form worked everything out and kept none of it - no store field, no
+   * save of any kind - so the moment the page was left the coverage, the
+   * heights and the configuration were gone, and nothing downstream ever saw
+   * them. The Estimate priced Quick Bid jobs off an empty elevation.
+   *
+   * It writes to the same elevation record the other tiers use, so the Estimate
+   * prices it identically. Held back a moment so a job is not saved on every
+   * keystroke.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    const timer = setTimeout(() => {
+      try {
+        const elevation = getActiveElevation();
+        saveActiveElevation({
+          ...elevation,
+          linearFeet: derived.lf,
+          wallHeight: derived.height,
+          scaffoldInput: {
+            ...elevation.scaffoldInput,
+            scaffoldWidth: form.widthFt,
+            standardBayLength: form.bayFt,
+            plankCountPerBay: derived.planksPerJump,
+          },
+          quantityEngine: { ...elevation.quantityEngine, ...derived.q },
+        });
+      } catch { /* nothing to save into yet */ }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [ready, derived, form.widthFt, form.bayFt]);
 
   return (
     <div className="flex flex-1 overflow-hidden">

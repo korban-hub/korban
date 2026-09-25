@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
 import {
+  listDispatchedLoads,
   getActiveElevation,
   getActiveProject,
   getEstimateDepth,
@@ -161,6 +162,16 @@ export default function ProjectPlanDeskPage() {
   // A level only counts as chosen once real takeoff work backs it up.
   const levelChosen = hasScale || hasGrips || tracedLevels > 0;
 
+  /*
+   * What has already left the yard on this job, newest first.
+   *
+   * Worked out plainly rather than in a useMemo: this sits below an early
+   * return, and a hook below an early return runs on some renders and not
+   * others - React counts them and throws. Reading a short list from storage
+   * costs nothing.
+   */
+  const dispatched = project.projectId ? listDispatchedLoads(project.projectId) : [];
+
   const engine = elevation?.quantityEngine;
   const linearFeet = elevation?.linearFeet ?? 0;
 
@@ -269,6 +280,33 @@ export default function ProjectPlanDeskPage() {
                 />
               ))}
 
+              {/*
+                * Field info - filled in once the job is won.
+                *
+                * A bid is addressed to whoever asked for it; a load is
+                * delivered to whoever is standing at the gate. The load list
+                * shows this contact, not the bid one. Always here, usually
+                * empty, because a won job has to be come back to.
+                */}
+              <div className="mt-2 border-t border-zinc-900/70 pt-2">
+                <p className="px-1 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-orange-400/80">
+                  Field info
+                </p>
+                <DetailField
+                  label="On site contact"
+                  placeholder="Who the crew asks for"
+                  value={String(project.onSiteContactName ?? "")}
+                  onCommit={(value) => setField("onSiteContactName", value)}
+                />
+                <DetailField
+                  label="On site phone"
+                  placeholder="(000) 000-0000"
+                  hint="Replaces the bid contact on the load list."
+                  value={String(project.onSiteContactPhone ?? "")}
+                  onCommit={(value) => setField("onSiteContactPhone", value)}
+                />
+              </div>
+
               <div className="grid grid-cols-[132px_1fr] items-center gap-3 border-t border-zinc-900/70 px-1 py-1.5">
                 <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
                   Union status
@@ -298,6 +336,37 @@ export default function ProjectPlanDeskPage() {
                 </div>
               </div>
             </div>
+            {/*
+              * Loads that have gone out on this job.
+              *
+              * A job is not one delivery - there is the build, add ons as it
+              * grows, returns as it comes down. Each is a record of what left
+              * the yard, so each opens as it was sent and cannot be changed.
+              */}
+            {dispatched.length > 0 && (
+              <div className="mt-2.5 rounded border border-zinc-800 bg-black/40 px-3 py-2.5">
+                <p className="pb-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                  Loads dispatched
+                </p>
+                <div className="space-y-0.5">
+                  {dispatched.map((load) => (
+                    <button
+                      key={load.id}
+                      onClick={() => router.push(`/inventory/load-list?load=${load.id}`)}
+                      className="flex w-full items-center justify-between rounded px-1.5 py-1 text-left transition hover:bg-zinc-900"
+                    >
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-300">
+                        {load.loadType}
+                      </span>
+                      <span className="font-mono text-[9.5px] text-zinc-600">
+                        {new Date(load.dispatchedAt).toLocaleDateString()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* The nudge belongs at the bottom of the details, because that's
                 where an estimator finishes and wonders what's next. */}
             <div className="mt-2.5 rounded border border-orange-500/25 bg-orange-500/[0.05] px-3 py-2.5">

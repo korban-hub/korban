@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, computeCourtyardTotals, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem } from "@/lib/backendStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 
@@ -473,9 +473,12 @@ function computeLegs(
 
 // ── Three.js 3D model — full building perimeter ───────────────────────────────
 function ScaffoldModel3D({
-  outline, puf, bayFt, widthFt, frameTall, scaffoldWidthFt, placement = "exterior"
+  outline, segments = [], puf, bayFt, widthFt, frameTall, scaffoldWidthFt, placement = "exterior"
 }: {
-  outline: PlanPoint[]; puf: number; bayFt: number; widthFt: number;
+  outline: PlanPoint[];
+  /** Open runs, for a job whose plan is highlighter strokes rather than a trace. */
+  segments?: { a: PlanPoint; b: PlanPoint }[];
+  puf: number; bayFt: number; widthFt: number;
   frameTall: number; scaffoldWidthFt: number;
   placement?: "exterior" | "interior";
 }) {
@@ -613,7 +616,21 @@ function ScaffoldModel3D({
     const jumps = Math.min(frameTall, 20);
 
     // Auto-scale: normalize outline to reasonable scene size regardless of SVG coordinate range
-    const allX = outline.map(p => p.x), allZ = outline.map(p => p.y);
+    /*
+     * The walls to build.
+     *
+     * A traced plan gives a closed perimeter, so its sides are each point to
+     * the next and round to the start. A highlighted plan gives open runs that
+     * do not join up - walking those as a loop drew a wall back across the
+     * building, so they are taken as they are.
+     */
+    const wallPairs: [PlanPoint, PlanPoint][] = outline.length >= 3
+      ? outline.map((p, i) => [p, outline[(i + 1) % outline.length]] as [PlanPoint, PlanPoint])
+      : segments.map(seg => [seg.a, seg.b] as [PlanPoint, PlanPoint]);
+    if (wallPairs.length === 0) return;
+    const wallPoints = wallPairs.flatMap(pair => pair);
+
+    const allX = wallPoints.map(p => p.x), allZ = wallPoints.map(p => p.y);
     const bldgW = Math.max(...allX) - Math.min(...allX);
     const bldgH = Math.max(...allZ) - Math.min(...allZ);
     const maxDim = Math.max(bldgW, bldgH, 1);
@@ -621,9 +638,9 @@ function ScaffoldModel3D({
     const sceneScale = targetSize / maxDim;
 
     // Convert outline to scene coords centered on centroid
-    const cx = outline.reduce((s, p) => s + p.x, 0) / outline.length;
-    const cy = outline.reduce((s, p) => s + p.y, 0) / outline.length;
-    const pts3d = outline.map(p => ({ x: (p.x - cx) * sceneScale, z: (p.y - cy) * sceneScale }));
+    const cx = wallPoints.reduce((t, p) => t + p.x, 0) / wallPoints.length;
+    const cy = wallPoints.reduce((t, p) => t + p.y, 0) / wallPoints.length;
+    const scaled = (p: PlanPoint) => ({ x: (p.x - cx) * sceneScale, z: (p.y - cy) * sceneScale });
 
     // Ground
     const gSize = 120;
@@ -633,8 +650,9 @@ function ScaffoldModel3D({
     // Build wall and scaffold around perimeter
     const group = new THREE.Group();
 
-    for (let si = 0; si < pts3d.length; si++) {
-      const p1 = pts3d[si], p2 = pts3d[(si + 1) % pts3d.length];
+    for (let si = 0; si < wallPairs.length; si++) {
+      const [rawA, rawB] = wallPairs[si];
+      const p1 = scaled(rawA), p2 = scaled(rawB);
       const dx = p2.x - p1.x, dz = p2.z - p1.z;
       const segLen = Math.sqrt(dx * dx + dz * dz);
       if (segLen < 0.1) continue;
@@ -644,8 +662,18 @@ function ScaffoldModel3D({
       // 90° rotation here doesn't know which side is actually outside the
       // building, and was putting scaffold on the interior whenever a
       // trace happened to wind the "wrong" way.
-      const rawA = outline[si], rawB = outline[(si + 1) % outline.length];
-      const outwardNormal = computeOutwardNormal(rawA, rawB, outline, placement);
+      // A traced perimeter knows which side is outside. Open runs do not, so
+      // they face away from the middle of the job, as they do on the plan.
+      const outwardNormal = outline.length >= 3
+        ? computeOutwardNormal(rawA, rawB, outline, placement)
+        : (() => {
+            const mx = (rawA.x + rawB.x) / 2, my = (rawA.y + rawB.y) / 2;
+            const ex = rawB.x - rawA.x, ey = rawB.y - rawA.y;
+            const elen = Math.hypot(ex, ey) || 1;
+            const right = { x: -ey / elen, y: ex / elen };
+            const away = ((mx - cx) * right.x + (my - cy) * right.y) >= 0 ? 1 : -1;
+            return { x: right.x * away, y: right.y * away };
+          })();
       const nx = outwardNormal.x, nz = outwardNormal.y;
 
       // Wall panel
@@ -825,7 +853,7 @@ function ScaffoldModel3D({
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
-  }, [outline, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, placement]);
+  }, [outline, segments, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, placement]);
 
   useEffect(() => {
     if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
@@ -1288,7 +1316,37 @@ export default function SetScaffoldV2Inner() {
   const scaleOk  = (puf != null && puf > 0) || isAerial;
   const effPuf   = puf ?? 4;
 
-  const rawPoints = useMemo(() => getPrimaryGeometryPoints(elevation), [elevation]);
+  /*
+   * The traced plan, if this job has one.
+   *
+   * A job taken to Korban Bid and then re-bid as Full Bid still carries its old
+   * traced levels, and they were still being drawn - and worse, still growing
+   * their own legs beside the highlighted runs, so the job was counted twice.
+   * Full Bid's plan is its strokes; anything traced before belongs to the tier
+   * it was traced in.
+   */
+  /*
+   * What this tier has, from the one table that says so.
+   *
+   * These used to be depth comparisons scattered through the page, which is how
+   * a Full Bid ended up with a Korban Bid's section advice and a traced outline
+   * it never drew.
+   */
+  /*
+   * The record says which tier it is - not the session.
+   *
+   * estimateDepth is a separate value that can disagree with the elevation in
+   * front of you, and when it did, this page drew a traced outline under a set
+   * of highlighter strokes and offered advice about a section the job no longer
+   * had. The takeoff itself is the only thing that knows what it is.
+   */
+  const tier = TIER_CAPABILITIES[elevation?.activeTier ?? estimateDepth]
+    ?? TIER_CAPABILITIES["korban-bid"];
+  const tracedApplies = tier.overlayFrom === "traced";
+  const rawPoints = useMemo(
+    () => tracedApplies ? getPrimaryGeometryPoints(elevation) : [],
+    [elevation, tracedApplies],
+  );
   /*
    * The traced plan, or nothing.
    *
@@ -1308,6 +1366,7 @@ export default function SetScaffoldV2Inner() {
    * own run - which is the thing that previously had to be drawn by hand.
    */
   const levelOutlines = useMemo(() => {
+    if (!tracedApplies) return [];
     const rows = elevation?.overlayGeometry?.fullOverlayRows ?? [];
     return rows
       .filter(r => (r.points?.length ?? 0) >= 3)
@@ -1319,7 +1378,7 @@ export default function SetScaffoldV2Inner() {
         points: r.points as PlanPoint[],
       }))
       .sort((a, b) => Number(b.isKey) - Number(a.isKey));
-  }, [elevation]);
+  }, [elevation, tracedApplies]);
 
   /**
    * Walls that only exist on a level other than the key one.
@@ -1399,7 +1458,17 @@ export default function SetScaffoldV2Inner() {
 
   // SVG viewbox
   const svgViewBox = useMemo(() => {
-    const pts = outline.filter(isFinitePoint);
+    /*
+     * Frames on the traced outline, or on the runs when there is none.
+     *
+     * Full Bid traces nothing - its plan is a handful of highlighter strokes -
+     * so framing only on an outline left the view sitting nowhere while the
+     * strokes were drawn off screen.
+     */
+    const pts = [
+      ...outline.filter(isFinitePoint),
+      ...drawnRuns.flatMap(run => [run.a, run.b]).filter(isFinitePoint),
+    ];
     if (pts.length < 2) return { x: 0, y: 0, w: 1200, h: 720 };
     const minX = pts.reduce((m, p) => p.x < m ? p.x : m, Infinity);
     const maxX = pts.reduce((m, p) => p.x > m ? p.x : m, -Infinity);
@@ -1407,7 +1476,7 @@ export default function SetScaffoldV2Inner() {
     const maxY = pts.reduce((m, p) => p.y > m ? p.y : m, -Infinity);
     const pad = effPuf * 10;
     return { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
-  }, [outline, effPuf]);
+  }, [outline, drawnRuns, effPuf]);
 
   /**
    * Which side of the traced line the scaffold stands on. Exterior pushes the
@@ -1511,64 +1580,7 @@ export default function SetScaffoldV2Inner() {
     };
   }, [includeCourtyards, courtyardTotals, frameTall, ppb, MATERIAL_RULES]);
 
-  const totals = useMemo(() => {
-    // Quick Bid has no traced perimeter, so quantities come from gripped
-    // elevation areas instead of ticks. Courtyards are already folded in
-    // by computeElevationOnlyTotals, so no separate contribution here.
-    if (isQuickBid) {
-      return {
-        legs: quickTotals.legCount,
-        bays: quickTotals.bayCount,
-        frames: quickTotals.frameCount + manualFrameCount,
-        brackets: manualBracketCount,
-        planks: quickTotals.plankCount,
-        braces: quickTotals.crossBraceCount,
-        guardrails: quickTotals.guardrailCount,
-        couplingPins: quickTotals.couplingPinCount,
-        buildingLegs: quickTotals.legCount,
-        buildingFrames: quickTotals.frameCount + manualFrameCount,
-      };
-    }
-    // Per-bay accumulation from the real per-leg lift counts. Braces,
-    // planks, guardrails and pins all repeat at every lift — counting
-    // them once at ground level understated each by roughly the lift
-    // count. A bay is governed by its SHORTER leg: nothing can attach to
-    // a frame that isn't there.
-    let legs = 0, bays = 0, totalFrames = 0;
-    let braceCount = 0, plankCount = 0, railCount = 0, pinCount = 0;
-    for (const seg of allSegmentLegs) {
-      const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
-      const active = sl
-        .map((_, i) => i)
-        .filter(i => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
-      const lifts = active.map(i => overriddenFC[`${seg.segIndex}-${i}`] ?? getFrameTallForLeg(seg.segIndex, i));
-      legs += lifts.length;
-      if (lifts.length > 1) bays += lifts.length - 1;
-      for (const n of lifts) {
-        totalFrames += n;
-        pinCount += Math.max(0, n - 1) * MATERIAL_RULES.couplingPinsPerFrame;
-      }
-      for (let i = 0; i < lifts.length - 1; i++) {
-        const bayLifts = Math.min(lifts[i], lifts[i + 1]);
-        braceCount += bayLifts * MATERIAL_RULES.crossBracesPerBayPerLift;
-        plankCount += bayLifts * ppb;
-        railCount += MATERIAL_RULES.guardrailTopPerBay + Math.max(0, bayLifts - 1) * MATERIAL_RULES.guardrailIntermediatePerBay;
-      }
-    }
-    return {
-      legs: legs + courtyardContribution.legs,
-      bays: bays + courtyardContribution.bays,
-      frames: totalFrames + manualFrameCount + courtyardContribution.frames,
-      brackets: manualBracketCount,
-      planks: plankCount + courtyardContribution.planks,
-      braces: braceCount + courtyardContribution.braces,
-      guardrails: railCount + courtyardContribution.guardrails,
-      couplingPins: pinCount + courtyardContribution.couplingPins,
-      // Building-only figures, kept so the UI can show what a courtyard adds
-      buildingLegs: legs,
-      buildingFrames: totalFrames + manualFrameCount,
-    };
-  }, [isQuickBid, quickTotals, allSegmentLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution, MATERIAL_RULES]);
+
 
   function handleToggleCourtyards(next: boolean) {
     setIncludeCourtyards(next);
@@ -1627,6 +1639,33 @@ export default function SetScaffoldV2Inner() {
          */
         setElevation(raw);
         setProjectName(p.projectName || "");
+
+        /*
+         * Full Bid's highlighter strokes come in as runs.
+         *
+         * A stroke has two points on the plan and a gripped height - the same
+         * as a run drawn here by hand - so the run engine marches legs along it
+         * and the material follows. That is how a few swipes become real frame
+         * and plank counts instead of a division sum.
+         *
+         * Anything drawn here by hand is left alone.
+         */
+        // Only a tier built on strokes lays runs from them.
+        const strokeTier = (TIER_CAPABILITIES[raw.activeTier] ?? TIER_CAPABILITIES["korban-bid"]).overlayFrom === "highlights";
+        const strokes = strokeTier ? (raw.highlights ?? []) : [];
+        if (strokes.length > 0) {
+          const strokeIds = new Set(strokes.map(h => h.id));
+          setDrawnRuns(prev => [
+            ...strokes.map(h => ({
+              id: h.id,
+              a: { x: h.a.x, y: h.a.y },
+              b: { x: h.b.x, y: h.b.y },
+              heightFt: h.heightFt,
+              flipped: false,
+            })),
+            ...prev.filter(run => !strokeIds.has(run.id)),
+          ]);
+        }
         setElevationSource(getActiveElevationSource());
         setProjectSource(getActiveProjectSource());
         try {
@@ -1657,7 +1696,9 @@ export default function SetScaffoldV2Inner() {
             workerReachHeight,
           });
           const e = writeScaffoldLedger({ ...raw, quantityEngine: freshEngine });
-          const engineChanged = JSON.stringify(freshEngine) !== JSON.stringify(raw.quantityEngine);
+          // Against what actually came out, not the first estimate - the plan
+          // overrides the engine now, so comparing the two always differed.
+          const engineChanged = JSON.stringify(e.quantityEngine) !== JSON.stringify(raw.quantityEngine);
           const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
           if (engineChanged || ledgerChanged) saveActiveElevation(e);
           setElevation(e);
@@ -1787,14 +1828,50 @@ export default function SetScaffoldV2Inner() {
       const len = Math.hypot(dx, dy);
       if (len <= 0) return { id: run.id, legs: [] as LegResult[], lengthFt: 0 };
       const along = { x: dx / len, y: dy / len };
-      // Right of travel, unless flipped. No building to ask, so the draw
-      // direction decides and the estimator corrects it if it is wrong.
-      const side = run.flipped ? -1 : 1;
-      const normal = { x: -along.y * side, y: along.x * side };
+      /*
+       * Which side the legs stand on.
+       *
+       * Strokes round a building have a middle between them, and scaffold goes
+       * on the outside of a building - so the side facing away from that middle
+       * is the right one. A single stroke has no middle to speak of, so it
+       * falls back to the right of travel. Either way the flip control wins,
+       * because only the estimator can see the plan.
+       */
+      const ends = drawnRuns.flatMap(other => [other.a, other.b]);
+      const hub = ends.length >= 4
+        ? { x: ends.reduce((t, p) => t + p.x, 0) / ends.length,
+            y: ends.reduce((t, p) => t + p.y, 0) / ends.length }
+        : null;
+      const mid = { x: (run.a.x + run.b.x) / 2, y: (run.a.y + run.b.y) / 2 };
+      const right = { x: -along.y, y: along.x };
+      const outward = hub
+        ? ((mid.x - hub.x) * right.x + (mid.y - hub.y) * right.y) >= 0 ? 1 : -1
+        : 1;
+      const side = (run.flipped ? -1 : 1) * outward;
+      const normal = { x: right.x * side, y: right.y * side };
+
+      /*
+       * Runs that meet are one scaffold turning a corner.
+       *
+       * Two ends within a rail bay of each other - 8' - are the same scaffold:
+       * that gap already closes with plank and rail and no leg, so the run
+       * arriving floats its leg past the corner and marches from there, exactly
+       * as a traced wall does. Further apart than that and there is no rail to
+       * be had, so each run stands alone and earns an end leg.
+       */
+      const railPx = 8 * effPuf;
+      const meets = (here: PlanPoint) => drawnRuns.some(other =>
+        other.id !== run.id &&
+        (Math.hypot(other.a.x - here.x, other.a.y - here.y) <= railPx ||
+         Math.hypot(other.b.x - here.x, other.b.y - here.y) <= railPx));
+      const startJoined = meets(run.a);
+      const endJoined = meets(run.b);
 
       const positions: number[] = [];
-      let cursor = stopPx;
-      const last = len - stopPx;
+      // Joined at the start: the leg floats past the corner. Free: it stands
+      // at the end of the stroke.
+      let cursor = startJoined ? -stopPx : 0;
+      const last = endJoined ? len - stopPx : len;
       let guard = 0;
       while (cursor <= last + 0.01 && guard++ < 400) {
         positions.push(cursor);
@@ -1802,6 +1879,10 @@ export default function SetScaffoldV2Inner() {
         if (remainingFt <= 8 + 0.05) break;
         const bay = largestBayWithin(Math.min(remainingFt, bayLengthFt));
         cursor += (bay ?? bayLengthFt) * effPuf;
+      }
+      // A free end has nothing to rail to, so it closes with a leg of its own.
+      if (!endJoined && (positions.length === 0 || len - positions[positions.length - 1] > 0.01)) {
+        positions.push(len);
       }
       if (positions.length === 0) positions.push(len / 2);
 
@@ -1876,6 +1957,105 @@ export default function SetScaffoldV2Inner() {
       return { key: `lvl-${wall.levelId}-${index}`, wall, legs, lengthFt: len / effPuf };
     });
   }, [deviatingWalls, scaleOk, effPuf, scaffoldWidthFt, bayLengthFt, outline, placement]);
+
+  /*
+   * Project totals, worked out after every kind of run exists.
+   *
+   * These used to be computed above the drawn and level runs, which made
+   * counting them in impossible - the compiler said so plainly.
+   */
+  const totals = useMemo(() => {
+    // Quick Bid has no traced perimeter, so quantities come from gripped
+    // elevation areas instead of ticks. Courtyards are already folded in
+    // by computeElevationOnlyTotals, so no separate contribution here.
+    if (isQuickBid) {
+      return {
+        legs: quickTotals.legCount,
+        bays: quickTotals.bayCount,
+        frames: quickTotals.frameCount + manualFrameCount,
+        brackets: manualBracketCount,
+        planks: quickTotals.plankCount,
+        braces: quickTotals.crossBraceCount,
+        guardrails: quickTotals.guardrailCount,
+        couplingPins: quickTotals.couplingPinCount,
+        buildingLegs: quickTotals.legCount,
+        buildingFrames: quickTotals.frameCount + manualFrameCount,
+      };
+    }
+    // Per-bay accumulation from the real per-leg lift counts. Braces,
+    // planks, guardrails and pins all repeat at every lift — counting
+    // them once at ground level understated each by roughly the lift
+    // count. A bay is governed by its SHORTER leg: nothing can attach to
+    // a frame that isn't there.
+    let legs = 0, bays = 0, totalFrames = 0;
+    let braceCount = 0, plankCount = 0, railCount = 0, pinCount = 0;
+    for (const seg of allSegmentLegs) {
+      const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+      const active = sl
+        .map((_, i) => i)
+        .filter(i => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
+      const lifts = active.map(i => overriddenFC[`${seg.segIndex}-${i}`] ?? getFrameTallForLeg(seg.segIndex, i));
+      legs += lifts.length;
+      if (lifts.length > 1) bays += lifts.length - 1;
+      for (const n of lifts) {
+        totalFrames += n;
+        pinCount += Math.max(0, n - 1) * MATERIAL_RULES.couplingPinsPerFrame;
+      }
+      for (let i = 0; i < lifts.length - 1; i++) {
+        const bayLifts = Math.min(lifts[i], lifts[i + 1]);
+        braceCount += bayLifts * MATERIAL_RULES.crossBracesPerBayPerLift;
+        plankCount += bayLifts * ppb;
+        railCount += MATERIAL_RULES.guardrailTopPerBay + Math.max(0, bayLifts - 1) * MATERIAL_RULES.guardrailIntermediatePerBay;
+      }
+    }
+    /*
+     * Runs that are not the traced perimeter count too.
+     *
+     * Highlighter strokes, hand-drawn runs and the runs a deviating level
+     * earns all carry legs and material - and this only ever walked the traced
+     * outline, so a Full Bid with no trace at all came out as zeros on every
+     * tile while the drawing showed a scaffold.
+     */
+    const reachFt = getBackendSettings().scaffold.workerReachHeight ?? 6;
+    const jackIn = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+    for (const run of drawnRunLegs) {
+      const source = drawnRuns.find(r => r.id === run.id);
+      const tall = Math.max(1, computeFrameMakeup(Math.max(0, (source?.heightFt ?? 0) - reachFt), jackIn).frameTall);
+      const n = run.legs.length;
+      legs += n;
+      totalFrames += n * tall;
+      pinCount += n * Math.max(0, tall - 1) * MATERIAL_RULES.couplingPinsPerFrame;
+      const runBays = Math.max(0, n - 1);
+      bays += runBays;
+      braceCount += runBays * tall * MATERIAL_RULES.crossBracesPerBayPerLift;
+      plankCount += runBays * tall * ppb;
+      railCount += runBays * (MATERIAL_RULES.guardrailTopPerBay + Math.max(0, tall - 1) * MATERIAL_RULES.guardrailIntermediatePerBay);
+    }
+    for (const run of levelRunLegs) {
+      const n = run.legs.length;
+      legs += n;
+      totalFrames += n * frameTall;
+      const runBays = Math.max(0, n - 1);
+      bays += runBays;
+      braceCount += runBays * frameTall * MATERIAL_RULES.crossBracesPerBayPerLift;
+      plankCount += runBays * frameTall * ppb;
+      railCount += runBays * (MATERIAL_RULES.guardrailTopPerBay + Math.max(0, frameTall - 1) * MATERIAL_RULES.guardrailIntermediatePerBay);
+    }
+
+    return {
+      legs: legs + courtyardContribution.legs,
+      bays: bays + courtyardContribution.bays,
+      frames: totalFrames + manualFrameCount + courtyardContribution.frames,
+      brackets: manualBracketCount,
+      planks: plankCount + courtyardContribution.planks,
+      braces: braceCount + courtyardContribution.braces,
+      guardrails: railCount + courtyardContribution.guardrails,
+      couplingPins: pinCount + courtyardContribution.couplingPins,
+      // Building-only figures, kept so the UI can show what a courtyard adds
+      buildingLegs: legs,
+      buildingFrames: totalFrames + manualFrameCount,
+    };
+  }, [isQuickBid, quickTotals, allSegmentLegs, drawnRunLegs, drawnRuns, levelRunLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution, MATERIAL_RULES]);
 
   /*
    * The ledger has to follow the level runs, not just the configuration.
@@ -2163,7 +2343,14 @@ export default function SetScaffoldV2Inner() {
   function writeScaffoldLedger(el: ProjectElevation): ProjectElevation {
     const si = el.scaffoldInput;
     const qe = el.quantityEngine;
-    if (!qe || qe.legCount <= 0) return writeLedgerEntries(el, "scaffold", []);
+    /*
+     * Nothing laid out means nothing to load.
+     *
+     * This used to ask the stored engine alone, and on a Full Bid the legs are
+     * on the runs - so a job with a drawing full of scaffold returned an empty
+     * ledger and the material list had nothing to show.
+     */
+    if ((!qe || qe.legCount <= 0) && totals.legs <= 0) return writeLedgerEntries(el, "scaffold", []);
 
     /*
      * One bay length, read once, used everywhere below.
@@ -2187,7 +2374,17 @@ export default function SetScaffoldV2Inner() {
      * load list read 34, missing every leg on the deviating level.
      */
     const drawnLegCount = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0);
-    const legs = drawnLegCount > 0 ? drawnLegCount : qe.legCount;
+    /*
+     * The legs on the traced perimeter.
+     *
+     * With nothing traced this fell back to the stored engine's leg count -
+     * which on a Full Bid is the job's own total, already carried by the
+     * highlighted runs. The ledger was billing a perimeter that does not exist
+     * on top of the runs that do, so the load list and the project tiles
+     * described two different scaffolds.
+     */
+    const hasOtherRuns = drawnRunLegs.length > 0 || levelRunLegs.length > 0;
+    const legs = drawnLegCount > 0 ? drawnLegCount : hasOtherRuns ? 0 : qe.legCount;
     /*
      * Bays, declared here with legs - before anything counts from them.
      *
@@ -2199,7 +2396,7 @@ export default function SetScaffoldV2Inner() {
      */
     const bayCount = drawnLegCount > 0
       ? allSegmentLegs.reduce((sum, seg) => sum + Math.max(0, seg.legs.length - 1), 0)
-      : (qe.bayCount ?? 0);
+      : hasOtherRuns ? 0 : (qe.bayCount ?? 0);
     const entries: { partNo: string; qty: number; note?: string }[] = [];
 
     // Frames, by the actual makeup of a leg rather than one tall stack.
@@ -2261,6 +2458,7 @@ export default function SetScaffoldV2Inner() {
      * same totals and on the same load list.
      */
     const drawnLegs = drawnRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
+    let drawnBays = 0;
     if (drawnLegs > 0) {
       const drawnJumps = drawnRuns.reduce((sum, run) => {
         const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
@@ -2268,7 +2466,7 @@ export default function SetScaffoldV2Inner() {
         return sum + Math.max(1, mk.frameTall);
       }, 0) / Math.max(1, drawnRuns.length);
       const jumps = Math.max(1, Math.round(drawnJumps));
-      const drawnBays = Math.max(0, drawnLegs - drawnRuns.length);
+      drawnBays = Math.max(0, drawnLegs - drawnRuns.length);
       entries.push({ partNo: parts.frame, qty: drawnLegs * jumps, note: "drawn runs" });
       entries.push({ partNo: "BP1", qty: drawnLegs, note: "drawn runs" });
       entries.push({ partNo: "AL1S", qty: drawnLegs, note: "drawn runs" });
@@ -2284,9 +2482,10 @@ export default function SetScaffoldV2Inner() {
      * stand on, and the material does not care about that.
      */
     const levelLegs = levelRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
+    let levelBays = 0;
     if (levelLegs > 0) {
       const jumps = Math.max(1, makeup.reduce((sum, piece) => sum + piece.qty, 0));
-      const levelBays = Math.max(0, levelLegs - levelRunLegs.length);
+      levelBays = Math.max(0, levelLegs - levelRunLegs.length);
       entries.push({ partNo: parts.frame, qty: levelLegs * jumps, note: "level runs" });
       entries.push({ partNo: "BP1", qty: levelLegs, note: "level runs" });
       entries.push({ partNo: "AL1S", qty: levelLegs, note: "level runs" });
@@ -2339,7 +2538,83 @@ export default function SetScaffoldV2Inner() {
       else merged.set(entry.partNo, { ...entry });
     });
 
-    return writeLedgerEntries(el, "scaffold", [...merged.values()]);
+    /*
+     * What was actually laid out, written back as the job's quantities.
+     *
+     * The takeoff measures the building; this lays the scaffold on it, and the
+     * two do not produce the same material. Second runs on setbacks, brackets,
+     * hand-drawn runs - all of it was reaching the load list and none of it was
+     * reaching the price, which was still whatever linear feet divided by bay
+     * length had produced.
+     *
+     * Counted off the same lines the yard loads, so the two can never drift.
+     */
+    const rows = [...merged.values()];
+    const countOf = (match: (partNo: string) => boolean) =>
+      rows.reduce((total, row) => total + (match(row.partNo) ? row.qty || 0 : 0), 0);
+
+    /*
+     * The load list is a breakdown of the project data, not a second opinion.
+     *
+     * Both used to be worked out independently - this walked each kind of run
+     * and did its own arithmetic while the tiles counted the legs on screen -
+     * so the two drifted and no amount of fixing one side settled it. The parts
+     * here say WHICH frames and WHICH braces; how many is already known.
+     *
+     * The breakdown is kept and the family is squared to the total, so the
+     * sizes stay honest and the sum cannot disagree with the tiles.
+     */
+    function squareTo(target: number, match: (partNo: string) => boolean) {
+      const family = rows.filter(row => match(row.partNo));
+      if (family.length === 0) return;
+      const have = family.reduce((total, row) => total + (row.qty || 0), 0);
+      const drift = Math.round(target) - have;
+      if (drift === 0) return;
+      // Onto the biggest line in the family - the odd frame or brace lands on
+      // the size there is most of, which is where a yard would put it.
+      const biggest = family.reduce((best, row) => (row.qty || 0) > (best.qty || 0) ? row : best, family[0]);
+      biggest.qty = Math.max(0, (biggest.qty || 0) + drift);
+    }
+    const setTo = (partNo: string, qty: number, note?: string) => {
+      const row = rows.find(r => r.partNo === partNo);
+      if (row) row.qty = Math.max(0, Math.round(qty));
+      else if (qty > 0) rows.push({ partNo, qty: Math.round(qty), note });
+    };
+
+    squareTo(totals.frames, (partNo) => /^(FO|FM)/.test(partNo));
+    squareTo(totals.planks, (partNo) => /^WP/.test(partNo));
+    squareTo(totals.braces, (partNo) => /^B\d/.test(partNo));
+    setTo(parts.guardrail, totals.guardrails);
+    setTo("BP1", totals.legs);
+    setTo("AL1S", totals.legs);
+    setTo("CPS", totals.couplingPins);
+
+    /*
+     * Courtyards are gripped, not traced, so they are nowhere on this plan -
+     * but their coverage is as real as any exterior face and has to be in the
+     * quantities the job is priced from.
+     */
+    const courtyards = courtyardQuantities(el);
+
+    // One count, shared by the tiles, the load list and the price.
+    void countOf;
+    const planQuantities = {
+      legCount: totals.legs,
+      bayCount: totals.bays,
+      frameCount: totals.frames,
+      plankCount: totals.planks,
+      crossBraceCount: totals.braces,
+      guardrailCount: totals.guardrails,
+      basePlateCount: totals.legs,
+      screwJackCount: totals.legs,
+      couplingPinCount: totals.couplingPins,
+    };
+
+    return writeLedgerEntries(
+      { ...el, quantityEngine: { ...qe, ...planQuantities } },
+      "scaffold",
+      rows,
+    );
   }
 
   function handleTogglePlacement(next: "exterior" | "interior") {
@@ -2629,7 +2904,13 @@ export default function SetScaffoldV2Inner() {
               flags.push({ tone: "warn", text: "No scale set. Nothing here is a real dimension yet." });
             }
             if (outline.length < 3) {
-              flags.push({ tone: "warn", text: "No floor plan traced. Nothing laid out on the plan until a level is traced." });
+              // Full Bid's plan IS its strokes, so this only applies where a
+              // trace was expected and never happened.
+              if (drawnRuns.length === 0) {
+                flags.push({ tone: "warn", text: tracedApplies
+                  ? "No floor plan traced. Nothing laid out on the plan until a level is traced."
+                  : "No highlights yet. Swipe the faces in Takeoff and they lay out here." });
+              }
             }
             // Two runs turning into the same notch need room for both.
             const minNotch = (scaffoldWidthFt + 1) * 2;
@@ -2656,7 +2937,9 @@ export default function SetScaffoldV2Inner() {
              * one of them is describing the wrong wall - and the material list
              * is priced off Takeoff's. Say so rather than quietly disagree.
              */
-            if (sectionSummary && liveFrameTall > 0 && sectionSummary.frameTall !== liveFrameTall) {
+            // Sections belong to Korban Bid. A job re-bid at a lower tier was
+            // still being told about a section from a takeoff it no longer has.
+            if (tier.sectionView && sectionSummary && liveFrameTall > 0 && sectionSummary.frameTall !== liveFrameTall) {
               const h = sectionSummary.heightFt;
               flags.push({ tone: "warn", text: `${sectionSummary.label} needs ${sectionSummary.frameTall} frame${sectionSummary.frameTall === 1 ? "" : "s"} per leg - that cut is ${Math.floor(h)}'-${Math.round((h % 1) * 12)}". Takeoff built ${liveFrameTall}. Check the grip on that face.` });
             }
@@ -2797,7 +3080,7 @@ export default function SetScaffoldV2Inner() {
               { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
               { id: "section", label: "Section View", icon: "✂" },
             ] as { id: typeof activeMainTab; label: string; icon: string }[])
-              .filter(tab => tab.id !== "section" || depthAtLeast(estimateDepth, "korban-bid"))
+              .filter(tab => tab.id !== "section" || tier.sectionView)
               .map(tab => {
               const active = activeMainTab === tab.id;
               return (
@@ -2865,7 +3148,7 @@ export default function SetScaffoldV2Inner() {
 
             {/* SVG canvas */}
             <div className="flex-1 relative overflow-hidden bg-black">
-              {mounted && scaleOk && !hasPlan && (
+              {mounted && scaleOk && !hasPlan && drawnRuns.length === 0 && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
                 <div className="rounded-2xl border border-zinc-700 bg-zinc-900/60 p-6 text-center">
                   <p className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-300">No floor plan traced</p>
@@ -3029,8 +3312,74 @@ export default function SetScaffoldV2Inner() {
                 const computed = drawnRunLegs.find(r => r.id === run.id);
                 return (
                   <g key={run.id}>
-                    <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
-                      stroke="#f97316" strokeWidth={1.2} strokeDasharray="4,3" opacity="0.55" />
+                    {/*
+                      * A stroke is a line of building. Solid where it came from
+                      * the highlighter - that is a wall somebody marked - and
+                      * dashed where it was drawn here by hand.
+                      */}
+                    {(() => {
+                      const stroke = (elevation?.highlights ?? []).find(h => h.id === run.id);
+                      const mid = { x: (run.a.x + run.b.x) / 2, y: (run.a.y + run.b.y) / 2 };
+                      const angle = Math.atan2(run.b.y - run.a.y, run.b.x - run.a.x) * 180 / Math.PI;
+                      const flip = angle > 90 || angle < -90;
+                      /*
+                       * The label sits off the line, on the side away from the
+                       * legs - it used to be nudged straight up whatever way
+                       * the line ran, so on a vertical wall it lay across it.
+                       */
+                      const first = computed?.legs[0];
+                      const rdx = run.b.x - run.a.x, rdy = run.b.y - run.a.y;
+                      const rlen = Math.hypot(rdx, rdy) || 1;
+                      const perp = { x: -rdy / rlen, y: rdx / rlen };
+                      const legSide = first
+                        ? Math.sign((first.tickTip.x - first.wallPoint.x) * perp.x + (first.tickTip.y - first.wallPoint.y) * perp.y) || 1
+                        : 1;
+                      const off = effPuf * 2.2 * -legSide;
+                      const at = { x: mid.x + perp.x * off, y: mid.y + perp.y * off };
+                      return (
+                        <>
+                          <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
+                            stroke={stroke ? "#a1a1aa" : "#f97316"} strokeWidth={stroke ? 2 : 1.2}
+                            strokeDasharray={stroke ? undefined : "4,3"} opacity={stroke ? 0.9 : 0.55} />
+                          {stroke && (
+                            <text x={at.x} y={at.y}
+                              textAnchor="middle" fontSize={effPuf * 1.6} fill="#a1a1aa"
+                              fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                              letterSpacing={effPuf * 0.06}
+                              stroke="#000" strokeWidth={effPuf * 0.35} paintOrder="stroke"
+                              transform={`rotate(${flip ? angle + 180 : angle} ${at.x} ${at.y})`}>
+                              {stroke.label.toUpperCase()} &middot; {Math.round(stroke.lf)}&apos;
+                              {stroke.note ? ` \u00b7 ${stroke.note.toUpperCase()}` : ""}
+                            </text>
+                          )}
+                        </>
+                      );
+                    })()}
+                    {/*
+                      * Cross braces between the legs, the same as a traced run.
+                      * A line of ticks with nothing between them does not read
+                      * as scaffold.
+                      */}
+                    {computed?.legs.slice(0, -1).map((leg, i) => {
+                      const next = computed.legs[i + 1];
+                      if (!next) return null;
+                      const rdx = run.b.x - run.a.x, rdy = run.b.y - run.a.y;
+                      const rlen = Math.hypot(rdx, rdy) || 1;
+                      const al = { x: rdx / rlen, y: rdy / rlen };
+                      const nx = leg.tickTip.x - leg.wallPoint.x, ny = leg.tickTip.y - leg.wallPoint.y;
+                      const nlen = Math.hypot(nx, ny) || 1;
+                      const nrm = { x: nx / nlen, y: ny / nlen };
+                      const cx = (leg.wallPoint.x + next.wallPoint.x) / 2;
+                      const cy = (leg.wallPoint.y + next.wallPoint.y) / 2;
+                      const bp = Math.hypot(next.wallPoint.x - leg.wallPoint.x, next.wallPoint.y - leg.wallPoint.y);
+                      const hb = bp * 0.3;
+                      return (
+                        <line key={`dbrace-${i}`}
+                          x1={cx - al.x * hb + nrm.x * nlen * 0.15} y1={cy - al.y * hb + nrm.y * nlen * 0.15}
+                          x2={cx + al.x * hb + nrm.x * nlen * 0.9} y2={cy + al.y * hb + nrm.y * nlen * 0.9}
+                          stroke="#f97316" strokeWidth="0.7" opacity="0.5" />
+                      );
+                    })}
                     {computed?.legs.map((leg, i) => {
                       // A drawn run carries its own height, so its frame count
                       // is its own - not the elevation's.
@@ -3325,22 +3674,23 @@ export default function SetScaffoldV2Inner() {
         <div className="flex flex-col flex-shrink-0 overflow-hidden" style={{ width: "30%" }}>
           {/* Not on the section tab - it has its own drawing, and dropping the
               model lifts the material lists to the top of the column. */}
-          {depthAtLeast(estimateDepth, "korban-bid") && activeMainTab !== "section" && (
+          {tier.model3d && activeMainTab !== "section" && (
           <div className="flex flex-col flex-shrink-0" style={{ height: "55%" }}>
             <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">3D Scaffold Model</p>
             </div>
             <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-              {mounted && !hasPlan && (
+              {mounted && !hasPlan && drawnRuns.length === 0 && (
                 <div className="flex h-full items-center justify-center p-4 text-center">
                   <p className="max-w-[16rem] text-[11px] leading-[1.6] text-zinc-600">
-                    No floor plan traced, so there is no building to model yet.
+                    Nothing laid out yet, so there is no building to model.
                   </p>
                 </div>
               )}
-              {mounted && hasPlan && (
+              {mounted && (hasPlan || drawnRuns.length > 0) && (
                 <ScaffoldModel3D
                   outline={outline}
+                  segments={drawnRuns.map(run => ({ a: run.a, b: run.b }))}
                   puf={effPuf}
                   bayFt={bayLengthFt}
                   widthFt={scaffoldWidthFt}

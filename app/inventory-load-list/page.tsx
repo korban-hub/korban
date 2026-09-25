@@ -15,8 +15,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
-import { getActiveElevation, getActiveProject, readLedger } from "@/lib/projectStore";
-import { getBackendSettings, type StockItem } from "@/lib/backendStore";
+import {
+  dispatchLoad, getActiveElevation, getActiveProject, getDispatchedLoad, readLedger,
+  type DispatchedLoad,
+} from "@/lib/projectStore";
+import { getBackendSettings, getLogistics, type StockItem } from "@/lib/backendStore";
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
@@ -54,11 +57,20 @@ const EMPTY_HEADER: LoadHeader = {
 };
 
 /** Yard-entered counts, keyed by stock id. Ordered comes from the takeoff. */
-type Counts = Record<string, { ship?: number; recd?: number }>;
+/*
+ * What a person writes on the sheet.
+ *
+ * Ordered joined Shipped and Received once a job stopped being one delivery.
+ * The takeoff says what the whole job needs - that is Full Qty, and it is not
+ * typed. What went on a truck is written by whoever loaded it.
+ */
+type Counts = Record<string, { ord?: number; ship?: number; recd?: number }>;
 
 export default function LoadListPage() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
+  /** Set when viewing a load that has already gone out. Read only. */
+  const [locked, setLocked] = useState<DispatchedLoad | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const [project, setProject] = useState({
@@ -85,6 +97,33 @@ export default function LoadListPage() {
         Object.fromEntries(readLedger(elevation).map((row) => [row.partNo, row.qty]))
       );
       setStock(getBackendSettings().material.stock);
+
+      /*
+       * Opened from the Plan Desk tile with ?load=... - a load that has already
+       * gone out. Its own numbers, exactly as they left, and nothing editable.
+       */
+      const loadId = new URLSearchParams(window.location.search).get("load");
+      if (loadId) {
+        const sent = getDispatchedLoad(active.projectId, loadId);
+        if (sent) {
+          setLocked(sent);
+          setHeader({ ...EMPTY_HEADER, kind: sent.loadType as LoadKind, truckNo: sent.truckNo, completedBy: sent.completedBy });
+          setLedger(Object.fromEntries(sent.rows.map(r => [r.partNo, r.fullQty])));
+          // The boxes are keyed by catalogue id, the record by part number.
+          const byPart = new Map(
+            getBackendSettings().material.stock
+              .filter(item => item.partNo)
+              .map(item => [item.partNo, item.id]),
+          );
+          setCounts(Object.fromEntries(
+            sent.rows
+              .filter(r => byPart.has(r.partNo))
+              .map(r => [byPart.get(r.partNo) as string,
+                         { ord: r.ordered, ship: r.shipped, recd: r.received }]),
+          ));
+          return;
+        }
+      }
 
       const raw = window.localStorage.getItem(`${LOAD_KEY}:${active.projectId}`);
       if (raw) {
@@ -125,7 +164,35 @@ export default function LoadListPage() {
     persist(next, counts);
   }
 
-  function setCount(id: string, field: "ship" | "recd", value: number) {
+  /*
+   * A dispatched load is a record of what went out.
+   *
+   * The sheet on screen follows the takeoff and can be changed all day. The
+   * moment it is dispatched it stops moving - what left the yard on a Tuesday
+   * did not change because the takeoff did in April.
+   */
+  function dispatch() {
+    const project = getActiveProject();
+    const rows = stock
+      .filter(item => item.partNo && (fullQty(item) > 0 || (counts[item.id]?.ord ?? 0) > 0))
+      .map(item => ({
+        partNo: item.partNo,
+        fullQty: fullQty(item),
+        ordered: counts[item.id]?.ord ?? 0,
+        shipped: counts[item.id]?.ship ?? 0,
+        received: counts[item.id]?.recd ?? 0,
+      }));
+    const record = dispatchLoad(project.projectId, {
+      loadType: header.kind,
+      truckNo: header.truckNo,
+      completedBy: header.completedBy,
+      rows,
+    });
+    setLocked(record);
+  }
+
+  function setCount(id: string, field: "ord" | "ship" | "recd", value: number) {
+    if (locked) return;   // a dispatched sheet is a record, not a form
     const next = { ...counts, [id]: { ...counts[id], [field]: value } };
     setCounts(next);
     persist(header, next);
@@ -136,7 +203,7 @@ export default function LoadListPage() {
    * scaffold width, which was right until a job mixed widths and then
    * silently wrong. Set Scaffold knows; this page reads.
    */
-  const ordered = useCallback(
+  const fullQty = useCallback(
     (item: StockItem) => (item.partNo ? ledger[item.partNo] ?? 0 : 0),
     [ledger]
   );
@@ -146,12 +213,25 @@ export default function LoadListPage() {
     [stock]
   );
 
+  /*
+   * This load, not the job.
+   *
+   * A job goes out in several loads, so the top of a sheet is about what is on
+   * this truck: what was ordered for it, what shipped, what it weighs and how
+   * many trips it takes. The whole job is in the Full Qty column, line by line.
+   */
   const totals = useMemo(() => {
-    const ord = stock.reduce((sum, item) => sum + ordered(item), 0);
+    const ord = stock.reduce((sum, item) => sum + (counts[item.id]?.ord ?? 0), 0);
     const ship = stock.reduce((sum, item) => sum + (counts[item.id]?.ship ?? 0), 0);
-    const weight = stock.reduce((sum, item) => sum + ordered(item) * item.weightLbs, 0);
-    return { ord, ship, weight };
-  }, [stock, counts, ordered]);
+    const weight = stock.reduce((sum, item) => sum + (counts[item.id]?.ord ?? 0) * item.weightLbs, 0);
+    // Planks fill a truck. Same rate the estimate prices travel from, so the
+    // yard and the price never disagree about how many trips a job takes.
+    const planks = stock.reduce(
+      (sum, item) => sum + (item.partNo?.startsWith("WP") ? (counts[item.id]?.ord ?? 0) : 0), 0);
+    const loads = getLogistics(planks).truckLoads;
+    const full = stock.reduce((sum, item) => sum + fullQty(item), 0);
+    return { ord, ship, weight, loads, full };
+  }, [stock, counts, fullQty]);
 
   if (!mounted) {
     return (
@@ -176,13 +256,25 @@ export default function LoadListPage() {
         actions={
           <>
             <div className="flex gap-2">
-              <Stat label="Ordered" value={totals.ord.toLocaleString()} accent />
+              {/* The job, then this load. */}
+              <Stat label="Full job" value={totals.full > 0 ? totals.full.toLocaleString() : "-"} />
+              <Stat label="Ordered" value={totals.ord > 0 ? totals.ord.toLocaleString() : "-"} accent />
               <Stat label="Shipped" value={totals.ship > 0 ? totals.ship.toLocaleString() : "-"} />
               <Stat
                 label="Weight"
                 value={totals.weight > 0 ? `${Math.round(totals.weight).toLocaleString()} lb` : "-"}
               />
+              <Stat label="Truck loads" value={totals.loads > 0 ? String(totals.loads) : "-"} />
             </div>
+            {locked ? (
+              <span className="rounded-lg border border-zinc-700 px-2.5 py-1.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+                Dispatched {new Date(locked.dispatchedAt).toLocaleDateString()}
+              </span>
+            ) : (
+              <KorbanButton variant="ghost" onClick={dispatch} disabled={totals.ord <= 0}>
+                + Dispatch
+              </KorbanButton>
+            )}
             <KorbanButton variant="ghost" onClick={() => window.print()}>
               Print / PDF
             </KorbanButton>
@@ -283,8 +375,8 @@ export default function LoadListPage() {
                 key={index}
                 className="relative rounded-lg border border-zinc-800 bg-korban-base p-2.5"
               >
-                <div className="grid grid-cols-[60px_1fr_36px_38px_38px] gap-1.5 px-1 pb-1.5">
-                  {["Part", "Description", "Ord", "Ship", "Rec"].map((heading) => (
+                <div className="grid grid-cols-[54px_1fr_40px_36px_36px_36px] gap-1.5 px-1 pb-1.5">
+                  {["Part", "Description", "Full", "Ord", "Ship", "Rec"].map((heading) => (
                     <span
                       key={heading}
                       className="font-mono text-[8.5px] uppercase tracking-[0.1em] text-zinc-600"
@@ -296,12 +388,12 @@ export default function LoadListPage() {
 
                 <div className="rounded border border-zinc-900 bg-black p-1.5">
                   {items.map((item) => {
-                    const ord = ordered(item);
+                    const ord = fullQty(item);
                     const active = ord > 0;
                     return (
                       <div
                         key={item.id}
-                        className={`grid grid-cols-[60px_1fr_36px_38px_38px] items-center gap-1.5 border-b border-zinc-900/60 px-1 py-[3px] last:border-0 ${
+                        className={`grid grid-cols-[54px_1fr_40px_36px_36px_36px] items-center gap-1.5 border-b border-zinc-900/60 px-1 py-[3px] last:border-0 ${
                           active ? "bg-orange-500/[0.07]" : ""
                         }`}
                       >
@@ -320,13 +412,23 @@ export default function LoadListPage() {
                         >
                           {item.description}
                         </span>
+                        {/*
+                          * What the whole job needs. Locked, faint, and tinted
+                          * so it reads as the yardstick the other three are
+                          * measured against rather than something to fill in.
+                          */}
                         <span
-                          className={`korban-ordered text-right font-mono text-[10px] ${
-                            active ? "font-bold text-orange-300" : "text-zinc-800"
+                          title="Full job quantity - from the takeoff"
+                          className={`korban-ordered rounded border border-zinc-900/70 bg-zinc-900/40 px-1 py-[2px] text-right font-mono text-[10px] ${
+                            active ? "text-orange-300/60" : "text-zinc-800"
                           }`}
                         >
                           {ord > 0 ? ord.toLocaleString() : ""}
                         </span>
+                        <CountCell
+                          value={counts[item.id]?.ord}
+                          onChange={(v) => setCount(item.id, "ord", v)}
+                        />
                         <CountCell
                           value={counts[item.id]?.ship}
                           onChange={(v) => setCount(item.id, "ship", v)}

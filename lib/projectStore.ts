@@ -140,6 +140,31 @@ export type StoredElevationHeight = {
  * some of them (three walls and an open side is common), so which faces
  * exist is up to the estimator rather than fixed at four.
  */
+/**
+ * One swipe of the highlighter across a floor plan.
+ *
+ * Full Bid's answer to tracing an outline point by point. The estimator runs a
+ * stroke along a face the way a project manager marks up a set of plans - and
+ * like a highlighter, it owns everything inside its length: setbacks, pop-outs,
+ * every in and out. It is not a description of the wall, it is a claim on the
+ * run.
+ *
+ * Height comes from the elevation grip for that stroke, not from the plan.
+ */
+export type StoredHighlight = {
+  id: string;
+  label: string;
+  /** Where the stroke started and ended, in the floor sheet's page units. */
+  a: StoredPoint;
+  b: StoredPoint;
+  /** Its length, measured at the floor plan's scale. */
+  lf: number;
+  /** Set on the Elevations tab - typed, or gripped top to bottom. */
+  heightFt: number;
+  /** The estimator's own words - "back alley", "over the canopy". */
+  note: string;
+};
+
 export type StoredCourtyardFace = {
   face: string;
   totalLF: number;
@@ -252,6 +277,51 @@ export type TakeoffOverlayGeometry = {
   scale: unknown;
 };
 
+/**
+ * Everything one bid tier measured.
+ *
+ * The three tiers are three ways of measuring the same building, and they do
+ * not mix: a Korban Bid's traced outline has no business appearing under a
+ * Full Bid's highlighter strokes, and a stale section belongs to the takeoff it
+ * came from. Kept apart, a tier can only ever draw and count its own work.
+ *
+ * What stays shared is what is not a measurement - the plan sheets, the locked
+ * scales, the scaffold configuration and the job header. Re-uploading a plan
+ * set to try another tier would be a punishment, not a feature.
+ */
+export type TierSnapshot = {
+  linearFeet: number;
+  wallHeight: number;
+  overlayGeometry: TakeoffOverlayGeometry | null;
+  quantityEngine: QuantityEngineOutput;
+  sectionView: ProjectElevation["sectionView"];
+  sectionViews: SectionViewRecord[];
+  elevationBreakdown: StoredElevationBreakdownRow[];
+  partLedger: LedgerEntry[];
+  courtyards: StoredCourtyard[];
+  highlights: StoredHighlight[];
+  includeCourtyards: boolean;
+  /**
+   * What the other tiers measured, kept so switching back finds the work where
+   * it was left. The tier on screen lives in the fields above.
+   */
+  tierSnapshots: Partial<Record<EstimateDepth, TierSnapshot>>;
+  /** Which tier the fields above belong to. */
+  activeTier: EstimateDepth;
+};
+
+/** What each tier offers, in one place rather than scattered through the pages. */
+export const TIER_CAPABILITIES: Record<EstimateDepth, {
+  overlayFrom: "none" | "highlights" | "traced";
+  materialList: boolean;
+  model3d: boolean;
+  sectionView: boolean;
+}> = {
+  "quick-bid":  { overlayFrom: "none",       materialList: false, model3d: false, sectionView: false },
+  "full-bid":   { overlayFrom: "highlights", materialList: true,  model3d: false, sectionView: false },
+  "korban-bid": { overlayFrom: "traced",     materialList: true,  model3d: true,  sectionView: true  },
+};
+
 export type ProjectElevation = {
   elevationId: string;
   elevationName: string;
@@ -318,6 +388,8 @@ export type ProjectElevation = {
    * be toggled in or out of project totals.
    */
   courtyards: StoredCourtyard[];
+  /** Full Bid's highlighter strokes. Empty on a traced job. */
+  highlights: StoredHighlight[];
   /** Whether courtyard quantities roll into project totals. */
   includeCourtyards: boolean;
 };
@@ -364,6 +436,15 @@ export type ProjectRecord = {
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  /**
+   * Who is on site once the job is won.
+   *
+   * A bid is addressed to whoever asked for it; a load is delivered to whoever
+   * is standing at the gate. They are rarely the same person, so the load list
+   * shows this one instead of the bid contact.
+   */
+  onSiteContactName: string;
+  onSiteContactPhone: string;
   /** When the bid is due. Printed as the proposal date. */
   bidDueDate: string;
   /** Union or non-union for this job. Defaults from Backend, overridable here. */
@@ -967,7 +1048,10 @@ function createEmptyElevation(): ProjectElevation {
     elevationBreakdown: [],
     partLedger: [],
     courtyards: [],
+    highlights: [],
     includeCourtyards: true,
+    tierSnapshots: {},
+    activeTier: "korban-bid",
   };
 }
 
@@ -1007,7 +1091,10 @@ function createDemoElevation(): ProjectElevation {
     elevationBreakdown: [],
     partLedger: [],
     courtyards: [],
+    highlights: [],
     includeCourtyards: true,
+    tierSnapshots: {},
+    activeTier: "korban-bid",
   };
 }
 
@@ -1035,6 +1122,8 @@ export function createEmptyProject(
     contactName: "",
     contactEmail: "",
     contactPhone: "",
+    onSiteContactName: "",
+    onSiteContactPhone: "",
     bidDueDate: "",
     unionStatus: "",
     bidStatus: "Draft",
@@ -1097,7 +1186,20 @@ function normalizeScaffoldInput(value: unknown): ScaffoldInput {
 }
 
 function normalizeElevation(value: unknown): ProjectElevation {
-  const fallback = createDemoElevation();
+  /*
+   * A job with no coverage has no coverage.
+   *
+   * This used to fall back to the Mare Island demo elevation, so any elevation
+   * that had not been measured yet read back as 540 lineal feet of wall at
+   * 44'-4" - on a brand new job, on every tier that had not been worked in, and
+   * on anything cleared and started over. The quantity engine then built
+   * material for a building nobody had traced, the ledger billed a perimeter
+   * that did not exist, and the tiles and the load list disagreed because one
+   * counted the drawing and the other counted the phantom.
+   *
+   * Nothing measured now means nothing measured.
+   */
+  const fallback = createEmptyElevation();
   const record = isRecord(value) ? value : {};
   const scaffoldInput = normalizeScaffoldInput(record.scaffoldInput);
   const normalizedLinearFeet = firstValidNumber(
@@ -1172,6 +1274,34 @@ function normalizeElevation(value: unknown): ProjectElevation {
     // Default to including courtyards in totals — they're real scaffold
     // on the job; the toggle exists to break them out, not hide them.
     includeCourtyards: record.includeCourtyards === false ? false : true,
+    /*
+     * Which tier this record belongs to.
+     *
+     * Jobs made before the tiers were kept apart hold whatever was measured,
+     * in whatever order - a traced outline and a set of highlighter strokes in
+     * the same record. Those are two takeoffs, not one, so an untagged record
+     * is read by what is in it: strokes mean Full Bid, a trace means Korban
+     * Bid. Guessing wrong here is what put one tier's work under another's.
+     */
+    activeTier: (["quick-bid","full-bid","korban-bid"] as const).includes(record.activeTier as EstimateDepth)
+      ? (record.activeTier as EstimateDepth)
+      : asArray<unknown>(record.highlights).length > 0 ? "full-bid" : "korban-bid",
+    tierSnapshots: isRecord(record.tierSnapshots) ? (record.tierSnapshots as Partial<Record<EstimateDepth, TierSnapshot>>) : {},
+    highlights: asArray<unknown>(record.highlights).map((row, index) => {
+      const v = isRecord(row) ? row : {};
+      const point = (key: string) => {
+        const p = isRecord(v[key]) ? (v[key] as Record<string, unknown>) : {};
+        return { x: asNumber(p.x, 0), y: asNumber(p.y, 0) };
+      };
+      return {
+        id: asString(v.id, `hl-${index + 1}`),
+        label: asString(v.label, `Highlight ${index + 1}`),
+        a: point("a"), b: point("b"),
+        lf: asNumber(v.lf, 0),
+        heightFt: asNumber(v.heightFt, 0),
+        note: asString(v.note, ""),
+      };
+    }),
   };
 }
 
@@ -1206,6 +1336,8 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     contactName: asString(record.contactName, fallback.contactName),
     contactEmail: asString(record.contactEmail, fallback.contactEmail),
     contactPhone: asString(record.contactPhone, fallback.contactPhone),
+    onSiteContactName: asString(record.onSiteContactName),
+    onSiteContactPhone: asString(record.onSiteContactPhone),
     bidDueDate: asString(record.bidDueDate, fallback.bidDueDate),
     unionStatus: asString(record.unionStatus, fallback.unionStatus),
     bidStatus: (BID_STATUSES as readonly string[]).includes(record.bidStatus as string)
@@ -1952,7 +2084,7 @@ export function getActiveElevation(): ProjectElevation {
   if (first) { lastElevationSource = "first-available"; return first; }
 
   lastElevationSource = "fallback";
-  return createDemoElevation();
+  return createEmptyElevation();
 }
 
 export function saveActiveElevation(elevation: ProjectElevation) {
@@ -2220,6 +2352,169 @@ export function computeCourtyardTotals(elevation: ProjectElevation | null) {
     faceCount,
     courtyardCount: courtyards.length,
   };
+}
+
+/**
+ * What the courtyards on a job come to, as real quantities.
+ *
+ * A courtyard is gripped like any other face and its coverage is every bit as
+ * real - but it was captured, totalled on screen, and then never priced. The
+ * Estimate had no idea it existed, so a building with a light well was bid
+ * short by the whole of it.
+ *
+ * Each gripped area is run through the same engine as an exterior face, at its
+ * own height, so a courtyard is measured the way the rest of the job is.
+ * Honours the estimator's "include in project totals" choice.
+ */
+/** Lifts out everything the tier on screen has measured. */
+/**
+ * A load that has left the yard.
+ *
+ * A job is not one delivery. There is the build, then add ons as it grows,
+ * returns as it comes down, and whatever is still standing in between. Each
+ * one goes out as its own sheet, and once dispatched it is a record of what
+ * actually went - so it is locked. The takeoff can move afterwards; what left
+ * on a Tuesday did not.
+ */
+export type DispatchedLoad = {
+  id: string;
+  loadType: string;
+  dispatchedAt: string;
+  truckNo: string;
+  completedBy: string;
+  /** What the job needed in total when this went out, and what this load carried. */
+  rows: { partNo: string; fullQty: number; ordered: number; shipped: number; received: number }[];
+};
+
+const DISPATCH_KEY = "korbanDispatchedLoads_v1";
+
+function readDispatchStore(): Record<string, DispatchedLoad[]> {
+  if (!canUseStorage()) return {};
+  try {
+    const raw = window.localStorage.getItem(DISPATCH_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return isRecord(parsed) ? (parsed as Record<string, DispatchedLoad[]>) : {};
+  } catch { return {}; }
+}
+
+/** Every load dispatched on a job, newest first. */
+export function listDispatchedLoads(projectId: string): DispatchedLoad[] {
+  const all = readDispatchStore()[projectId] ?? [];
+  return [...all].sort((a, b) => (b.dispatchedAt ?? "").localeCompare(a.dispatchedAt ?? ""));
+}
+
+export function getDispatchedLoad(projectId: string, loadId: string): DispatchedLoad | null {
+  return listDispatchedLoads(projectId).find((row) => row.id === loadId) ?? null;
+}
+
+/** Files a load. What goes in here does not change afterwards. */
+export function dispatchLoad(projectId: string, load: Omit<DispatchedLoad, "id" | "dispatchedAt">): DispatchedLoad {
+  const record: DispatchedLoad = {
+    ...load,
+    id: `load-${Date.now().toString(36)}`,
+    dispatchedAt: nowIso(),
+  };
+  if (!canUseStorage()) return record;
+  try {
+    const all = readDispatchStore();
+    all[projectId] = [...(all[projectId] ?? []), record];
+    window.localStorage.setItem(DISPATCH_KEY, JSON.stringify(all));
+  } catch { /* storage unavailable - the sheet still prints */ }
+  return record;
+}
+
+export function captureTier(elevation: ProjectElevation): TierSnapshot {
+  return {
+    linearFeet: elevation.linearFeet,
+    wallHeight: elevation.wallHeight,
+    overlayGeometry: elevation.overlayGeometry,
+    quantityEngine: elevation.quantityEngine,
+    sectionView: elevation.sectionView,
+    sectionViews: elevation.sectionViews,
+    elevationBreakdown: elevation.elevationBreakdown,
+    partLedger: elevation.partLedger,
+    courtyards: elevation.courtyards,
+    highlights: elevation.highlights,
+    includeCourtyards: elevation.includeCourtyards,
+  };
+}
+
+/** A tier that has never been worked in: measured nothing, so it shows nothing. */
+export function blankTier(): TierSnapshot {
+  const fresh = createEmptyElevation();
+  return captureTier(fresh);
+}
+
+/**
+ * Moves the elevation to another tier.
+ *
+ * What is on screen is put away under the tier it belongs to, and whatever that
+ * other tier last measured is brought out - or a clean start if it has never
+ * been worked in. Nothing is destroyed either way, so an estimator can try a
+ * job three ways and compare them at Review.
+ */
+export function switchElevationTier(elevation: ProjectElevation, next: EstimateDepth): ProjectElevation {
+  const current = elevation.activeTier ?? "korban-bid";
+  if (current === next) return elevation;
+  const outgoing = captureTier(elevation);
+  /*
+   * A tier only keeps what it can measure.
+   *
+   * Records made before the split hold both, and putting that away whole meant
+   * Korban Bid kept a set of strokes it never drew and Full Bid kept a trace it
+   * never made. Each tier is put away holding only its own kind of work.
+   */
+  const cleaned: TierSnapshot = current === "korban-bid"
+    ? { ...outgoing, highlights: [] }
+    : { ...outgoing, overlayGeometry: null, sectionViews: [], sectionView: blankTier().sectionView };
+  const snapshots = { ...(elevation.tierSnapshots ?? {}), [current]: cleaned };
+  const incoming = snapshots[next] ?? blankTier();
+  return { ...elevation, ...incoming, tierSnapshots: snapshots, activeTier: next };
+}
+
+export function courtyardQuantities(elevation: ProjectElevation | null) {
+  const zero = {
+    linearFeet: 0, legCount: 0, bayCount: 0, frameCount: 0, plankCount: 0,
+    crossBraceCount: 0, guardrailCount: 0, basePlateCount: 0, screwJackCount: 0,
+    couplingPinCount: 0, frameTall: 0,
+  };
+  if (!elevation || elevation.includeCourtyards === false) return zero;
+
+  const input = elevation.scaffoldInput;
+  const totals = { ...zero };
+  (elevation.courtyards ?? []).forEach((courtyard) => {
+    courtyard.faces.forEach((face) => {
+      (face.areas ?? []).forEach((raw) => {
+        const area = raw as { lf?: number; heightFt?: number };
+        const lf = asNumber(area.lf, 0);
+        const height = asNumber(area.heightFt, 0);
+        if (lf <= 0 || height <= 0) return;
+        const engine = calculateQuantityEngine({
+          linearFeet: lf,
+          wallHeight: height,
+          standardBayLength: input.standardBayLength,
+          scaffoldWidth: input.scaffoldWidth,
+          frameHeight: input.frameHeight,
+          plankCountPerBay: input.plankCountPerBay,
+          bracePattern: input.bracePattern,
+          wallOffset: input.wallOffset,
+        });
+        totals.linearFeet += lf;
+        totals.legCount += engine.legCount;
+        totals.bayCount += engine.bayCount;
+        totals.frameCount += engine.frameCount;
+        totals.plankCount += engine.plankCount;
+        totals.crossBraceCount += engine.crossBraceCount;
+        totals.guardrailCount += engine.guardrailCount;
+        totals.basePlateCount += engine.basePlateCount;
+        totals.screwJackCount += engine.screwJackCount;
+        totals.couplingPinCount += engine.couplingPinCount ?? 0;
+        totals.frameTall = Math.max(totals.frameTall, engine.frameTall);
+      });
+    });
+  });
+  totals.linearFeet = parseFloat(totals.linearFeet.toFixed(1));
+  return totals;
 }
 
 export function saveSectionView(updates: Partial<ProjectElevation["sectionView"]>) {

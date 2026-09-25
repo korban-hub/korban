@@ -435,12 +435,17 @@ function JobTile({
         >
           margins
         </button>
+        {/*
+          * Readable. This was a dim x at the end of the row - discreet enough
+          * that the only way to delete a job looked like it did not exist.
+          */}
         <button
           onClick={onRemove}
-          className="font-mono text-[11px] text-zinc-700 transition hover:text-red-400"
+          title="Delete this job, its takeoff and its estimate"
+          className="rounded border border-zinc-800 bg-black px-1.5 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-red-500/50 hover:text-red-400"
           aria-label={`Delete ${project.projectName}`}
         >
-          &times;
+          delete
         </button>
       </div>
     </div>
