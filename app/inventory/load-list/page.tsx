@@ -1,274 +1,678 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { KorbanHeader, KorbanPanel, type KorbanMenuLink } from "@/components/korban";
-import { getActiveElevation, getActiveProject, type ProjectElevation } from "@/lib/projectStore";
+/**
+ * Material Load List - the sheet that goes to the yard.
+ *
+ * Modelled on the paper form crews already use: job header across the top,
+ * the full catalog in three columns, and Ordered / Shipped / Received against
+ * every line. The takeoff fills Ordered; the yard fills the rest.
+ *
+ * Keeping the layout the crew recognises matters more than making it pretty.
+ * A loader should be able to work from this screen, or a printout of it,
+ * without learning anything new.
+ */
 
-type InventoryRow = { partNo: string; description: string; };
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
+import {
+  dispatchLoad, getActiveElevation, getActiveProject, getDispatchedLoad, readLedger,
+  type DispatchedLoad,
+} from "@/lib/projectStore";
+import { getBackendSettings, getLogistics, type StockItem } from "@/lib/backendStore";
 
-const catalogGroups: InventoryRow[][] = [
-  [
-    { partNo: "FO7CP",  description: "7' Pedestrian Canopy" },
-    { partNo: "FO6L3",  description: "6' 4\" H - 3' W Frame" },
-    { partNo: "FO5L3",  description: "5' H - 3' W Frame" },
-    { partNo: "FM33",   description: "3' H - 3' W Frame" },
-    { partNo: "FO6L42", description: "6' 4\" H - 42\" W Frame" },
-    { partNo: "FO5L42", description: "5' H - 42\" W Frame" },
-    { partNo: "FM342",  description: "3' H - 42\" W Frame" },
-    { partNo: "FO6L",   description: "6' 4\" H - 5' W Frame" },
-    { partNo: "FM5",    description: "5' Mason Frame" },
-    { partNo: "FM3",    description: "3' Mason Frame" },
-    { partNo: "FO6L2",  description: "6' 4\" H X 2' W Frame" },
-    { partNo: "FO5L2",  description: "5' H X 2' W Frame" },
-    { partNo: "FM32",   description: "3' H X 2' W Frame" },
-    { partNo: "AL1",    description: "Screw Jack W/No Base" },
-    { partNo: "AL1S",   description: "Screw Jack W/Base Plate" },
-    { partNo: "BP1",    description: "Fixed Base Plate" },
-    { partNo: "BP2",    description: "Swivel Base Plate" },
-    { partNo: "BP3",    description: "Curved Base Plate" },
-    { partNo: "SJS",    description: "Swivel Jacks" },
-    { partNo: "P12",    description: "12' Putlogs" },
-    { partNo: "P16",    description: "16' Putlogs" },
-    { partNo: "P22",    description: "22' Putlogs" },
-    { partNo: "PH2",    description: "Putlogs Hangers" },
-    { partNo: "SP3",    description: "3' Spreader Bar" },
-    { partNo: "SP42",   description: "42\" Spreader Bar" },
-    { partNo: "SP5",    description: "5' Spreader Bar" },
-  ],
-  [
-    { partNo: "B42",   description: "4X2 Cross Brace" },
-    { partNo: "B52",   description: "5X2 Cross Brace" },
-    { partNo: "B62",   description: "6X2 Cross Brace" },
-    { partNo: "B72",   description: "7X2 Cross Brace" },
-    { partNo: "B82",   description: "8X2 Cross Brace" },
-    { partNo: "B102",  description: "10X2 Cross Brace" },
-    { partNo: "B44",   description: "4X4 Cross Brace" },
-    { partNo: "B54",   description: "5X4 Cross Brace" },
-    { partNo: "B64",   description: "6X4 Cross Brace" },
-    { partNo: "B74",   description: "7X4 Cross Brace" },
-    { partNo: "B84",   description: "8X4 Cross Brace" },
-    { partNo: "B104",  description: "10X4 Cross Brace" },
-    { partNo: "GR42",  description: "42\" Guard Rail" },
-    { partNo: "GR3",   description: "3' Guard Rail" },
-    { partNo: "GR4",   description: "4' Guard Rail" },
-    { partNo: "GR5",   description: "5' Guard Rail" },
-    { partNo: "GR6",   description: "6' Guard Rail" },
-    { partNo: "GR7",   description: "7' Guard Rail" },
-    { partNo: "GR8",   description: "8' Guard Rail" },
-    { partNo: "GR10",  description: "10' Guard Rail" },
-    { partNo: "GHB3",  description: "3' Gooser Brace" },
-    { partNo: "GHB5",  description: "5' Gooser Brace" },
-    { partNo: "GHB7",  description: "7' Gooser Brace" },
-    { partNo: "GHB10", description: "10' Gooser Brace" },
-    { partNo: "BR12L", description: "12\" Side Bracket" },
-    { partNo: "BR20L", description: "20\" Side Bracket" },
-    { partNo: "BR24L", description: "24\" Side Bracket" },
-    { partNo: "BR30S", description: "30\" Side Bracket" },
-    { partNo: "BR20E", description: "20\" End Bracket" },
-    { partNo: "BR30E", description: "30\" End Bracket" },
-  ],
-  [
-    { partNo: "CGRP",   description: "Male Corner Guard" },
-    { partNo: "ST4SG",  description: "4' Tube" },
-    { partNo: "ST6SG",  description: "6' Tube" },
-    { partNo: "ST8SG",  description: "8' Tube" },
-    { partNo: "ST10SG", description: "10' Tube" },
-    { partNo: "ST13SG", description: "13' Tube" },
-    { partNo: "CRA19",  description: "Right Angle Clamp" },
-    { partNo: "CSA19",  description: "Swivel Clamp" },
-    { partNo: "SAU3",   description: "3' Steel Ladder" },
-    { partNo: "SAU6",   description: "6' Steel Ladder" },
-    { partNo: "SAUB",   description: "Ladder Bracket" },
-    { partNo: "K18",    description: "18\" Kickers" },
-    { partNo: "K12",    description: "12\" Kickers" },
-    { partNo: "CPS",    description: "Coupling Pin" },
-    { partNo: "PTP",    description: "Pig Tail Pin" },
-    { partNo: "SU6",    description: "6' 4\" Stair Unit" },
-    { partNo: "SU6OR",  description: "Outside Rail" },
-    { partNo: "SU6IR",  description: "Inner Rail" },
-    { partNo: "SU6IER", description: "Inner End Rail" },
-    { partNo: "WP5",    description: "5' Wood Plank" },
-    { partNo: "WP6",    description: "6' Wood Plank" },
-    { partNo: "WP7",    description: "7' Wood Plank" },
-    { partNo: "WP8",    description: "8' Wood Plank" },
-    { partNo: "WP9",    description: "9' Wood Plank" },
-    { partNo: "WP10",   description: "10' Wood Plank" },
-    { partNo: "WP12",   description: "12' Wood Plank" },
-    { partNo: "SB7",    description: "7' Hatch Board" },
-    { partNo: "SB10",   description: "10' Hatch Board" },
-    { partNo: "FP10",   description: "10' Filler Plank" },
-    { partNo: "AT12",   description: "1/2\" All Thread" },
-    { partNo: "N12",    description: "1/2\" Nuts" },
-    { partNo: "RH12",   description: "1/2\" Redheads" },
-  ],
+const menuLinks: KorbanMenuLink[] = [
+  { href: "/dashboard", label: "Bid Room" },
+  { href: "/project-plan-desk", label: "Project Plan Desk" },
+  { href: "/set-scaffold-v2", label: "Set Scaffold" },
+  { href: "/estimate-review", label: "Estimate Review" },
+  { href: "/inventory", label: "Company Inventory" },
 ];
 
-const QUANTITY_ENGINE_PART_MAP: Record<string, keyof ProjectElevation["quantityEngine"]> = {
-  FO6L:  "frameCount",
-  WP8:   "plankCount",
-  B82:   "crossBraceCount",
-  GR8:   "guardrailCount",
-  BP1:   "basePlateCount",
-  AL1:   "screwJackCount",
+type LoadKind = "New Build" | "Add On" | "Return" | "Net Rental";
+const LOAD_KINDS: LoadKind[] = ["New Build", "Add On", "Return", "Net Rental"];
+
+const LOAD_KEY = "korban.loadlist.v1";
+
+type LoadHeader = {
+  truckNo: string;
+  kind: LoadKind;
+  dateOrdered: string;
+  dateShipped: string;
+  dateReturned: string;
+  completedBy: string;
+  loaders: string;
+  notes: string;
 };
 
-const inventoryMenuLinks: KorbanMenuLink[] = [
-  { href: "/project-plan-desk", label: "Project Plan Desk" },
-  { href: "/inventory",         label: "Master Inventory" },
-  { href: "/estimate-review",   label: "Estimate Review" },
-  { href: "/backend",           label: "Backend" },
-];
+const EMPTY_HEADER: LoadHeader = {
+  truckNo: "",
+  kind: "New Build",
+  dateOrdered: "",
+  dateShipped: "",
+  dateReturned: "",
+  completedBy: "",
+  loaders: "",
+  notes: "",
+};
 
-function normalizePart(partNo: string) { return partNo.trim().toUpperCase(); }
+/** Yard-entered counts, keyed by stock id. Ordered comes from the takeoff. */
+/*
+ * What a person writes on the sheet.
+ *
+ * Ordered joined Shipped and Received once a job stopped being one delivery.
+ * The takeoff says what the whole job needs - that is Full Qty, and it is not
+ * typed. What went on a truck is written by whoever loaded it.
+ */
+type Counts = Record<string, { ord?: number; ship?: number; recd?: number }>;
 
-export default function InventoryLoadListPage() {
-  const [elevation, setElevation] = useState<ProjectElevation | null>(null);
-  const [projectName, setProjectName] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [projectAddress, setProjectAddress] = useState("");
+export default function LoadListPage() {
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  /** Set when viewing a load that has already gone out. Read only. */
+  const [locked, setLocked] = useState<DispatchedLoad | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
-  useEffect(() => {
-    function loadLiveData() {
-      const project = getActiveProject();
-      const activeElevation = getActiveElevation();
-      setProjectName(project.projectName || "Untitled Project");
-      setProjectId(project.projectId || "—");
-      setProjectAddress(project.projectAddress || "—");
-      setElevation(activeElevation);
+  const [project, setProject] = useState({
+    name: "", jobNo: "", address: "", customer: "", contact: "",
+  });
+  const [stock, setStock] = useState<StockItem[]>([]);
+  /** What Set Scaffold wrote. Part numbers, not categories. */
+  const [ledger, setLedger] = useState<Record<string, number>>({});
+  const [header, setHeader] = useState<LoadHeader>(EMPTY_HEADER);
+  const [counts, setCounts] = useState<Counts>({});
+
+  const load = useCallback(() => {
+    try {
+      const active = getActiveProject();
+      const elevation = getActiveElevation();
+      setProject({
+        name: active.projectName,
+        jobNo: active.proposalNumber || active.projectId,
+        address: active.projectAddress,
+        customer: active.customer,
+        contact: active.contactName,
+      });
+      setLedger(
+        Object.fromEntries(readLedger(elevation).map((row) => [row.partNo, row.qty]))
+      );
+      setStock(getBackendSettings().material.stock);
+
+      /*
+       * Opened from the Plan Desk tile with ?load=... - a load that has already
+       * gone out. Its own numbers, exactly as they left, and nothing editable.
+       */
+      const loadId = new URLSearchParams(window.location.search).get("load");
+      if (loadId) {
+        const sent = getDispatchedLoad(active.projectId, loadId);
+        if (sent) {
+          setLocked(sent);
+          setHeader({ ...EMPTY_HEADER, kind: sent.loadType as LoadKind, truckNo: sent.truckNo, completedBy: sent.completedBy });
+          setLedger(Object.fromEntries(sent.rows.map(r => [r.partNo, r.fullQty])));
+          // The boxes are keyed by catalogue id, the record by part number.
+          const byPart = new Map(
+            getBackendSettings().material.stock
+              .filter(item => item.partNo)
+              .map(item => [item.partNo, item.id]),
+          );
+          setCounts(Object.fromEntries(
+            sent.rows
+              .filter(r => byPart.has(r.partNo))
+              .map(r => [byPart.get(r.partNo) as string,
+                         { ord: r.ordered, ship: r.shipped, recd: r.received }]),
+          ));
+          return;
+        }
+      }
+
+      const raw = window.localStorage.getItem(`${LOAD_KEY}:${active.projectId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { header?: LoadHeader; counts?: Counts };
+        setHeader({ ...EMPTY_HEADER, ...(parsed.header ?? {}) });
+        setCounts(parsed.counts ?? {});
+      } else {
+        setHeader(EMPTY_HEADER);
+        setCounts({});
+      }
+    } catch {
+      // Storage unavailable - the sheet still renders, it just won't persist.
     }
-    loadLiveData();
-    window.addEventListener("focus", loadLiveData);
-    window.addEventListener("pageshow", loadLiveData);
-    return () => {
-      window.removeEventListener("focus", loadLiveData);
-      window.removeEventListener("pageshow", loadLiveData);
-    };
+    setMounted(true);
   }, []);
 
-  const quantityEngine = elevation?.quantityEngine;
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
 
-  const qtyMap = useMemo(() => {
-    const map = new Map<string, number>();
-    if (!quantityEngine) return map;
-    Object.entries(QUANTITY_ENGINE_PART_MAP).forEach(([partNo, field]) => {
-      const value = quantityEngine[field];
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        map.set(normalizePart(partNo), value);
-      }
+  function persist(nextHeader: LoadHeader, nextCounts: Counts) {
+    try {
+      const id = getActiveProject().projectId;
+      window.localStorage.setItem(
+        `${LOAD_KEY}:${id}`,
+        JSON.stringify({ header: nextHeader, counts: nextCounts })
+      );
+    } catch {
+      // Not being able to persist a load sheet is not worth an error.
+    }
+  }
+
+  function setField(patch: Partial<LoadHeader>) {
+    const next = { ...header, ...patch };
+    setHeader(next);
+    persist(next, counts);
+  }
+
+  /*
+   * A dispatched load is a record of what went out.
+   *
+   * The sheet on screen follows the takeoff and can be changed all day. The
+   * moment it is dispatched it stops moving - what left the yard on a Tuesday
+   * did not change because the takeoff did in April.
+   */
+  function dispatch() {
+    const project = getActiveProject();
+    const rows = stock
+      .filter(item => item.partNo && (fullQty(item) > 0 || (counts[item.id]?.ord ?? 0) > 0))
+      .map(item => ({
+        partNo: item.partNo,
+        fullQty: fullQty(item),
+        ordered: counts[item.id]?.ord ?? 0,
+        shipped: counts[item.id]?.ship ?? 0,
+        received: counts[item.id]?.recd ?? 0,
+      }));
+    const record = dispatchLoad(project.projectId, {
+      loadType: header.kind,
+      truckNo: header.truckNo,
+      completedBy: header.completedBy,
+      rows,
     });
-    return map;
-  }, [quantityEngine]);
+    setLocked(record);
+  }
 
-  const totalQtyRequired = useMemo(() => Array.from(qtyMap.values()).reduce((s, q) => s + q, 0), [qtyMap]);
-  const totalPlankCount = quantityEngine?.plankCount ?? 0;
-  const truckLoads = useMemo(() => totalPlankCount ? Math.ceil(totalPlankCount / 150) : 0, [totalPlankCount]);
-  const hasLiveData = Boolean(elevation?.linearFeet && elevation.linearFeet > 0);
+  function setCount(id: string, field: "ord" | "ship" | "recd", value: number) {
+    if (locked) return;   // a dispatched sheet is a record, not a form
+    const next = { ...counts, [id]: { ...counts[id], [field]: value } };
+    setCounts(next);
+    persist(header, next);
+  }
+
+  /**
+   * Straight from the ledger. This page used to infer a frame size from
+   * scaffold width, which was right until a job mixed widths and then
+   * silently wrong. Set Scaffold knows; this page reads.
+   */
+  const fullQty = useCallback(
+    (item: StockItem) => (item.partNo ? ledger[item.partNo] ?? 0 : 0),
+    [ledger]
+  );
+
+  const columns = useMemo(
+    () => [1, 2, 3].map((column) => stock.filter((item) => item.column === column)),
+    [stock]
+  );
+
+  /*
+   * This load, not the job.
+   *
+   * A job goes out in several loads, so the top of a sheet is about what is on
+   * this truck: what was ordered for it, what shipped, what it weighs and how
+   * many trips it takes. The whole job is in the Full Qty column, line by line.
+   */
+  const totals = useMemo(() => {
+    const ord = stock.reduce((sum, item) => sum + (counts[item.id]?.ord ?? 0), 0);
+    const ship = stock.reduce((sum, item) => sum + (counts[item.id]?.ship ?? 0), 0);
+    const weight = stock.reduce((sum, item) => sum + (counts[item.id]?.ord ?? 0) * item.weightLbs, 0);
+    // Planks fill a truck. Same rate the estimate prices travel from, so the
+    // yard and the price never disagree about how many trips a job takes.
+    const planks = stock.reduce(
+      (sum, item) => sum + (item.partNo?.startsWith("WP") ? (counts[item.id]?.ord ?? 0) : 0), 0);
+    const loads = getLogistics(planks).truckLoads;
+    const full = stock.reduce((sum, item) => sum + fullQty(item), 0);
+    return { ord, ship, weight, loads, full };
+  }, [stock, counts, fullQty]);
+
+  if (!mounted) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-korban-base">
+        <p className="font-mono text-[11px] text-zinc-600">Opening load list...</p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-[#080604] text-white">
+    <main className="min-h-screen bg-korban-base text-white">
+      <KorbanMotionStyles />
+
       <KorbanHeader
-        title="Inventory Load List"
-        subtitle={`${projectName} · ${projectId}`}
-        menuLinks={inventoryMenuLinks}
+        title="Material Load List"
+        subtitle={project.name || "No project loaded"}
+        menuLinks={menuLinks}
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen((open) => !open)}
         actionsAlwaysVisible
+        actionsClassName="gap-2.5"
         actions={
           <>
-            <a href="/inventory"
-              className="rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-bold text-zinc-300 hover:border-orange-500/30 hover:text-orange-300">
-              Master Inventory
-            </a>
-            <a href="/project-plan-desk"
-              className="rounded-xl border border-orange-500/25 bg-orange-500/10 px-5 py-3 text-sm font-bold text-orange-300 hover:bg-orange-500/20">
-              Back to Plan Desk
-            </a>
-            <button className="rounded-xl bg-orange-500 px-5 py-3 text-sm font-bold text-black hover:bg-orange-400">
-              Export Load List
-            </button>
+            <div className="flex gap-2">
+              {/* The job, then this load. */}
+              <Stat label="Full job" value={totals.full > 0 ? totals.full.toLocaleString() : "-"} />
+              <Stat label="Ordered" value={totals.ord > 0 ? totals.ord.toLocaleString() : "-"} accent />
+              <Stat label="Shipped" value={totals.ship > 0 ? totals.ship.toLocaleString() : "-"} />
+              <Stat
+                label="Weight"
+                value={totals.weight > 0 ? `${Math.round(totals.weight).toLocaleString()} lb` : "-"}
+              />
+              <Stat label="Truck loads" value={totals.loads > 0 ? String(totals.loads) : "-"} />
+            </div>
+            {locked ? (
+              <span className="rounded-lg border border-zinc-700 px-2.5 py-1.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+                Dispatched {new Date(locked.dispatchedAt).toLocaleDateString()}
+              </span>
+            ) : (
+              <KorbanButton variant="ghost" onClick={dispatch} disabled={totals.ord <= 0}>
+                + Dispatch
+              </KorbanButton>
+            )}
+            <KorbanButton variant="ghost" onClick={() => window.print()}>
+              Print / PDF
+            </KorbanButton>
+            <KorbanButton variant="primary" onClick={() => router.push("/project-plan-desk")}>
+              Plan Desk
+            </KorbanButton>
           </>
         }
       />
 
-      <section className="p-6">
-        {!hasLiveData && (
-          <div className="mb-5 rounded-2xl border border-dashed border-zinc-800 bg-black/40 p-4 text-center">
-            <p className="text-xs text-zinc-500">
-              No live takeoff data yet. Run a takeoff in Takeoff Workspace to populate quantities.
-            </p>
-          </div>
-        )}
+      <div id="korban-loadsheet" className="relative mx-auto w-full max-w-[1600px] px-4 py-4">
+        <div
+          aria-hidden
+          className="korban-no-print pointer-events-none absolute inset-0 opacity-[0.022]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right,#fff 1px,transparent 1px),linear-gradient(to bottom,#fff 1px,transparent 1px)",
+            backgroundSize: "26px 26px",
+          }}
+        />
 
-        {/* Project header strip */}
-        <div className="mb-5 rounded-2xl border border-orange-500/15 bg-orange-500/5 px-5 py-3 flex items-center gap-6 flex-wrap">
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Project</p>
-            <p className="font-bold text-zinc-200 text-sm mt-0.5">{projectName}</p>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Job No.</p>
-            <p className="font-mono text-orange-300 text-sm mt-0.5">{projectId}</p>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Address</p>
-            <p className="text-zinc-400 text-sm mt-0.5">{projectAddress}</p>
-          </div>
-          <div className="ml-auto flex gap-4">
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Qty Required</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{totalQtyRequired.toLocaleString()}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Truck Loads</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{truckLoads}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">LF</p>
-              <p className="font-mono font-bold text-orange-300 text-lg mt-0.5">{(elevation?.linearFeet ?? 0).toLocaleString()}</p>
-            </div>
-          </div>
-        </div>
+        <div className="relative space-y-3">
+          {/* ---- Job header, as it prints ------------------------------- */}
+          <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+            <span aria-hidden className="pointer-events-none absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-orange-500" />
+            <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-orange-500" />
 
-        <KorbanPanel
-          title="Load List"
-          subtitle="Quantities driven by live takeoff — project specific"
-        >
-          <div className="grid gap-4 xl:grid-cols-3">
-            {catalogGroups.map((group, index) => (
-              <InventoryColumn key={index} rows={group} qtyMap={qtyMap} />
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+              <div className="grid gap-0.5">
+                <ReadRow label="Customer" value={project.customer} />
+                <ReadRow label="Jobsite" value={project.address} />
+                <div className="grid grid-cols-2 gap-3">
+                  <ReadRow label="Job number" value={project.jobNo} mono />
+                  <ReadRow label="Contact" value={project.contact} />
+                </div>
+                <EditRow
+                  label="Truck no."
+                  value={header.truckNo}
+                  placeholder="Which truck"
+                  onChange={(v) => setField({ truckNo: v })}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <div>
+                  <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+                    Load type
+                  </span>
+                  <div className="flex flex-wrap gap-1">
+                    {LOAD_KINDS.map((kind) => (
+                      <button
+                        key={kind}
+                        onClick={() => setField({ kind })}
+                        className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium transition ${
+                          header.kind === kind
+                            ? "border-orange-400/50 bg-orange-400/10 text-orange-200"
+                            : "border-zinc-800 bg-korban-raised text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                        }`}
+                      >
+                        {kind}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-1.5">
+                  <DateRow
+                    label="Ordered"
+                    value={header.dateOrdered}
+                    onChange={(v) => setField({ dateOrdered: v })}
+                  />
+                  <DateRow
+                    label="Shipped"
+                    value={header.dateShipped}
+                    onChange={(v) => setField({ dateShipped: v })}
+                  />
+                  <DateRow
+                    label="Returned"
+                    value={header.dateReturned}
+                    onChange={(v) => setField({ dateReturned: v })}
+                  />
+                </div>
+
+                <EditRow
+                  label="Completed by"
+                  value={header.completedBy}
+                  placeholder="Who signed it off"
+                  onChange={(v) => setField({ completedBy: v })}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* ---- The list, three columns as it prints ------------------- */}
+          <div className="grid gap-3 xl:grid-cols-3">
+            {columns.map((items, index) => (
+              <section
+                key={index}
+                className="relative rounded-lg border border-zinc-800 bg-korban-base p-2.5"
+              >
+                <div className="grid grid-cols-[54px_1fr_40px_36px_36px_36px] gap-1.5 px-1 pb-1.5">
+                  {["Part", "Description", "Full", "Ord", "Ship", "Rec"].map((heading) => (
+                    <span
+                      key={heading}
+                      className="font-mono text-[8.5px] uppercase tracking-[0.1em] text-zinc-600"
+                    >
+                      {heading}
+                    </span>
+                  ))}
+                </div>
+
+                <div className="rounded border border-zinc-900 bg-black p-1.5">
+                  {items.map((item) => {
+                    const ord = fullQty(item);
+                    const active = ord > 0;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`grid grid-cols-[54px_1fr_40px_36px_36px_36px] items-center gap-1.5 border-b border-zinc-900/60 px-1 py-[3px] last:border-0 ${
+                          active ? "bg-orange-500/[0.07]" : ""
+                        }`}
+                      >
+                        <span
+                          className={`font-mono text-[9.5px] font-bold ${
+                            item.partNo ? "text-orange-400" : "text-zinc-800"
+                          }`}
+                        >
+                          {item.partNo || "-"}
+                        </span>
+                        <span
+                          className={`truncate text-[9.5px] uppercase ${
+                            active ? "text-orange-100" : "text-zinc-500"
+                          }`}
+                          title={item.description}
+                        >
+                          {item.description}
+                        </span>
+                        {/*
+                          * What the whole job needs. Locked, faint, and tinted
+                          * so it reads as the yardstick the other three are
+                          * measured against rather than something to fill in.
+                          */}
+                        <span
+                          title="Full job quantity - from the takeoff"
+                          className={`korban-ordered rounded border border-zinc-900/70 bg-zinc-900/40 px-1 py-[2px] text-right font-mono text-[10px] ${
+                            active ? "text-orange-300/60" : "text-zinc-800"
+                          }`}
+                        >
+                          {ord > 0 ? ord.toLocaleString() : ""}
+                        </span>
+                        <CountCell
+                          value={counts[item.id]?.ord}
+                          onChange={(v) => setCount(item.id, "ord", v)}
+                        />
+                        <CountCell
+                          value={counts[item.id]?.ship}
+                          onChange={(v) => setCount(item.id, "ship", v)}
+                        />
+                        <CountCell
+                          value={counts[item.id]?.recd}
+                          onChange={(v) => setCount(item.id, "recd", v)}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             ))}
           </div>
-        </KorbanPanel>
-      </section>
+
+          {/* ---- Notes and loaders, as it prints ------------------------ */}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+              <h2 className="pb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                Notes
+              </h2>
+              <textarea
+                value={header.notes}
+                onChange={(event) => setField({ notes: event.target.value })}
+                placeholder="Anything the yard needs to know about this load"
+                className="min-h-20 w-full resize-none rounded border border-zinc-900 bg-black p-2.5 text-[11px] leading-[1.6] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+              />
+            </section>
+
+            <section className="relative rounded-lg border border-zinc-800 bg-korban-base p-3">
+              <h2 className="pb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                Loaders
+              </h2>
+              <textarea
+                value={header.loaders}
+                onChange={(event) => setField({ loaders: event.target.value })}
+                placeholder="Print names"
+                className="min-h-20 w-full resize-none rounded border border-zinc-900 bg-black p-2.5 text-[11px] leading-[1.6] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+              />
+            </section>
+          </div>
+
+          {totals.ord === 0 && (
+            <p className="font-mono text-[10px] leading-[1.6] text-zinc-700">
+              Nothing ordered yet. Parts fill in once Set Scaffold has a configuration -
+              this sheet never estimates ahead of the measurement.
+            </p>
+          )}
+        </div>
+      </div>
     </main>
   );
 }
 
-function InventoryColumn({ rows, qtyMap }: { rows: InventoryRow[]; qtyMap: Map<string, number> }) {
+// -----------------------------------------------------------------------------
+// Pieces
+// -----------------------------------------------------------------------------
+
+function KorbanMotionStyles() {
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black">
-      <table className="w-full text-left text-[11px]">
-        <thead className="bg-zinc-950 text-zinc-500">
-          <tr>
-            <th className="w-[76px] border-b border-zinc-800 px-2 py-2 font-semibold">Part No.</th>
-            <th className="border-b border-zinc-800 px-2 py-2 font-semibold">Description</th>
-            <th className="w-[64px] border-b border-zinc-800 px-2 py-2 text-right font-semibold text-orange-300">Qty</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const qty = qtyMap.get(normalizePart(row.partNo)) || 0;
-            const active = qty > 0;
-            return (
-              <tr key={`${row.partNo}`} className={active ? "bg-orange-500/10 text-orange-100" : "text-zinc-400"}>
-                <td className="border-b border-zinc-900 px-2 py-2 font-mono text-[10px] text-orange-400">{row.partNo}</td>
-                <td className="border-b border-zinc-900 px-2 py-2 uppercase tracking-[0.02em]">{row.description}</td>
-                <td className={`border-b border-zinc-900 px-2 py-2 text-right font-mono ${active ? "font-bold text-orange-300" : "text-zinc-700"}`}>
-                  {qty > 0 ? qty.toLocaleString() : "—"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <style>{`
+      @keyframes korban-scan {
+        0% { transform: translateX(-40%); opacity: 0.5; }
+        85% { opacity: 0.5; }
+        100% { transform: translateX(320%); opacity: 0; }
+      }
+      .korban-scan { animation: korban-scan 3.4s linear 2 forwards; }
+      @media (prefers-reduced-motion: reduce) {
+        .korban-scan { animation: none; opacity: 0; }
+      }
+
+      /*
+       * Printing. This sheet exists to leave the building - a loader works
+       * from it on a clipboard. Portrait, three columns across, white ground
+       * and black type - the way the paper form always was. Ship and Rec boxes
+       * come out empty so they can be filled in by hand.
+       */
+      @media print {
+        @page { size: letter portrait; margin: 0.35in; }
+
+        body { background: #fff !important; color: #000 !important; }
+        .korban-no-print { display: none !important; }
+
+        #korban-loadsheet, #korban-loadsheet * {
+          background: transparent !important;
+          color: #000 !important;
+          border-color: #999 !important;
+          box-shadow: none !important;
+        }
+        #korban-loadsheet {
+          position: absolute !important;
+          left: 0; top: 0;
+          width: 100% !important;
+          padding: 0 !important;
+          font-size: 8px;
+        }
+        /* The three columns are the whole point of the form - keep them. */
+        #korban-loadsheet .xl\\:grid-cols-3 {
+          display: grid !important;
+          grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+          gap: 0.12in !important;
+        }
+        /* A quantity the takeoff produced still needs to stand out on paper. */
+        .korban-ordered { font-weight: 700 !important; }
+        /* Empty boxes for the yard to write in. */
+        #korban-loadsheet input, #korban-loadsheet textarea {
+          border: 1px solid #999 !important;
+          min-height: 1.1em;
+        }
+      }
+    `}</style>
+  );
+}
+
+/** A quantity the yard fills in. Blank until someone counts it. */
+function CountCell({ value, onChange }: { value?: number; onChange: (v: number) => void }) {
+  return (
+    <input
+      value={value ?? ""}
+      onChange={(event) => onChange(Number(event.target.value || 0))}
+      type="number"
+      className="w-full min-w-0 rounded border border-zinc-900 bg-korban-raised px-1 py-[1px] text-right font-mono text-[10px] font-bold text-zinc-300 outline-none focus:border-orange-500/40"
+    />
+  );
+}
+
+/**
+ * Month, day and year as three boxes. A single field invites every format
+ * under the sun; three boxes only accept one, and the sheet has to read the
+ * same to whoever picks it up in the yard.
+ */
+function DateRow({
+  label, value, onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [month = "", day = "", year = ""] = (value || "").split("/");
+
+  function set(part: "m" | "d" | "y", next: string) {
+    const clean = next.replace(/[^0-9]/g, "");
+    const parts = [month, day, year];
+    parts[part === "m" ? 0 : part === "d" ? 1 : 2] = clean;
+    // An entirely empty date stays empty rather than becoming "//".
+    onChange(parts.every((entry) => entry === "") ? "" : parts.join("/"));
+  }
+
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <span className="flex items-center gap-1">
+        <DateBox value={month} placeholder="MM" max={2} onChange={(v) => set("m", v)} />
+        <span className="font-mono text-[11px] text-zinc-700">/</span>
+        <DateBox value={day} placeholder="DD" max={2} onChange={(v) => set("d", v)} />
+        <span className="font-mono text-[11px] text-zinc-700">/</span>
+        <DateBox value={year} placeholder="YYYY" max={4} wide onChange={(v) => set("y", v)} />
+      </span>
+    </div>
+  );
+}
+
+function DateBox({
+  value, placeholder, max, wide, onChange,
+}: {
+  value: string;
+  placeholder: string;
+  max: number;
+  wide?: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(event) => onChange(event.target.value.slice(0, max))}
+      placeholder={placeholder}
+      inputMode="numeric"
+      className={`rounded border border-zinc-900 bg-korban-raised px-1.5 py-1 text-center font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40 ${
+        wide ? "w-14" : "w-10"
+      }`}
+    />
+  );
+}
+
+function ReadRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3 border-b border-zinc-900/60 py-1 last:border-0">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <span className={`truncate text-[11.5px] ${mono ? "font-mono text-orange-300" : "text-zinc-300"}`}>
+        {value || <span className="text-zinc-700">Not set</span>}
+      </span>
+    </div>
+  );
+}
+
+function EditRow({
+  label, value, placeholder, stacked, onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  stacked?: boolean;
+  onChange: (value: string) => void;
+}) {
+  if (stacked) {
+    return (
+      <div>
+        <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+          {label}
+        </span>
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded border border-zinc-900 bg-korban-raised px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3 border-b border-zinc-900/60 py-1 last:border-0">
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded border border-transparent bg-transparent px-2 py-1 text-[11.5px] text-zinc-200 outline-none transition placeholder:text-zinc-700 focus:border-orange-500/40 focus:bg-korban-raised"
+      />
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-korban-raised px-3 py-1.5 text-right">
+      <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
+      <p
+        className={`font-mono text-[14px] font-bold leading-tight ${
+          accent ? "text-orange-400" : "text-zinc-200"
+        }`}
+      >
+        {value}
+      </p>
     </div>
   );
 }

@@ -390,6 +390,16 @@ export type ProjectElevation = {
   courtyards: StoredCourtyard[];
   /** Full Bid's highlighter strokes. Empty on a traced job. */
   highlights: StoredHighlight[];
+  /**
+   * Walls where the scaffold sits interior - legs inside the wall line.
+   *
+   * Every wall is exterior unless it is named here. Scaffold goes outside a
+   * building until it does not: a light well, a stair core, a wall worked from
+   * within. This used to be one switch for the whole job, which is no use when
+   * a job has both, so each wall says it for itself by its index on the
+   * traced outline.
+   */
+  interiorWalls: number[];
   /** Whether courtyard quantities roll into project totals. */
   includeCourtyards: boolean;
 };
@@ -1049,6 +1059,7 @@ function createEmptyElevation(): ProjectElevation {
     partLedger: [],
     courtyards: [],
     highlights: [],
+    interiorWalls: [],
     includeCourtyards: true,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1092,6 +1103,7 @@ function createDemoElevation(): ProjectElevation {
     partLedger: [],
     courtyards: [],
     highlights: [],
+    interiorWalls: [],
     includeCourtyards: true,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1283,6 +1295,9 @@ function normalizeElevation(value: unknown): ProjectElevation {
      * is read by what is in it: strokes mean Full Bid, a trace means Korban
      * Bid. Guessing wrong here is what put one tier's work under another's.
      */
+    interiorWalls: asArray<unknown>(record.interiorWalls ?? record.flippedWalls)
+      .map((n) => Math.round(asNumber(n, -1)))
+      .filter((n) => n >= 0),
     activeTier: (["quick-bid","full-bid","korban-bid"] as const).includes(record.activeTier as EstimateDepth)
       ? (record.activeTier as EstimateDepth)
       : asArray<unknown>(record.highlights).length > 0 ? "full-bid" : "korban-bid",
@@ -2436,6 +2451,7 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     courtyards: elevation.courtyards,
     highlights: elevation.highlights,
     includeCourtyards: elevation.includeCourtyards,
+    interiorWalls: elevation.interiorWalls,
   };
 }
 
@@ -2453,6 +2469,26 @@ export function blankTier(): TierSnapshot {
  * been worked in. Nothing is destroyed either way, so an estimator can try a
  * job three ways and compare them at Review.
  */
+/**
+ * Clears everything measured on a job, in every tier, and keeps the rest.
+ *
+ * The plans stay loaded and the scales stay locked - those are work too, and
+ * re-uploading a plan set to run a job again would be a punishment. What goes
+ * is what was measured: traces, strokes, grips, courtyards, sections, the
+ * layout and the ledger.
+ *
+ * Written for demos, where the next person has to see what the last one saw.
+ */
+export function clearElevationTakeoff(elevation: ProjectElevation): ProjectElevation {
+  const empty = blankTier();
+  return {
+    ...elevation,
+    ...empty,
+    interiorWalls: [],
+    tierSnapshots: {},
+  };
+}
+
 export function switchElevationTier(elevation: ProjectElevation, next: EstimateDepth): ProjectElevation {
   const current = elevation.activeTier ?? "korban-bid";
   if (current === next) return elevation;

@@ -229,6 +229,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
   /** Point-to-point measuring. Independent of everything else on the sheet. */
   const [measureMode,    setMeasureMode]    = useState(false);
+  /** True whenever a tool is waiting for a click on the sheet. */
   const [measureFrom,    setMeasureFrom]    = useState<Pt|null>(null);
   const [measureTo,      setMeasureTo]      = useState<Pt|null>(null);
   const [measurements,   setMeasurements]   = useState<{ a: Pt; b: Pt; ft: number }[]>([]);
@@ -1401,6 +1402,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * - two voices, side by side, in different colours so an observation never
    * reads as an instruction.
    */
+  const drawingArmed =
+    highlightMode ||
+    measureMode ||
+    gripMode ||
+    refPickLevelId !== null ||
+    Boolean(scale.pickingPoint) ||
+    floorLevels.some(level => level.traceMode) ||
+    wallOutlineMode;
+
   const korbanReadsIt = (() => {
     if (depthTab !== "korban-bid" || readsItHidden) return null;
     const flags: KorbanGuidanceFlag[] = [];
@@ -1445,7 +1455,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     return (
       <KorbanGuidance
         flags={flags}
-        title="Korban reads it"
+        title="Korban thinks..."
         requireAck
         accent="amber"
         className="w-full sm:w-[300px]"
@@ -1961,7 +1971,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
           {/* PDF Canvas */}
           <div ref={viewerRef}
             className="relative flex-1 overflow-auto bg-zinc-950 p-6"
-            style={highlightMode ? { cursor: "crosshair", userSelect: "none" } : undefined}
+            /*
+             * Crosshairs whenever Korban is waiting for a mark.
+             *
+             * Swipe, trace, grip, reference point, measure, scale pick - they
+             * all want a click on the drawing, and only the highlighter said
+             * so. There has to be a difference between "draw here" and "you
+             * are just moving the mouse".
+             */
+            style={drawingArmed ? { cursor: "crosshair", userSelect: "none" } : undefined}
             onDragStart={(e)=>{ if (highlightMode) e.preventDefault(); }}
             onMouseDown={handleViewerMouseDown}
             onMouseMove={(e)=>{handleHighlightMove(e);handleViewerMouseMove(e);}}
@@ -2036,12 +2054,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
                         const at={ x: mx + (-dy/len)*off, y: my + (dx/len)*off };
                         let ang=Math.atan2(dy,dx)*180/Math.PI;
                         if (ang>90||ang<-90) ang+=180;
+                        // Orange, no outline, lighter weight - it sits on a
+                        // white sheet and does not need shouting.
                         return (
                           <text x={at.x} y={at.y}
-                            textAnchor="middle" fontSize={12/viewerZoom} fill="#fbbf24"
+                            textAnchor="middle" fontSize={12/viewerZoom} fill="#f97316"
                             fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                            fontWeight="bold" letterSpacing={0.8/viewerZoom}
-                            stroke="#000" strokeWidth={3/viewerZoom} paintOrder="stroke"
+                            fontWeight="500" letterSpacing={0.6/viewerZoom}
                             transform={`rotate(${ang} ${at.x} ${at.y})`}>
                             {h.label.toUpperCase()} &middot; {h.lf}&apos;
                             {h.note ? ` \u00b7 ${h.note.toUpperCase()}` : ""}

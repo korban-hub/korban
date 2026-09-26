@@ -429,7 +429,7 @@ function LevelPanel({
                 <path d="M22 4 L40 38 L4 38 Z" fill="#F97316" />
               </svg>
               <span className="font-mono text-[8px] font-bold uppercase tracking-[0.18em] text-orange-400">
-                Korban reads it
+                Korban thinks...
               </span>
             </div>
             <p className="text-[11.5px] leading-[1.55] text-zinc-300">{report.covered}</p>

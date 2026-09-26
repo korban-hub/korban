@@ -22,7 +22,7 @@ type LegResult = {
 const menuLinks: KorbanMenuLink[] = [
   { href: "/project-plan-desk", label: "Project Plan Desk" },
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
-  { href: "/korban-review", label: "Korban Review" },
+  { href: "/korban-review", label: "Review" },
   { href: "/estimate-review", label: "Estimate" },
 ];
 
@@ -63,11 +63,19 @@ function pointInPolygon(pt: PlanPoint, poly: PlanPoint[]): boolean {
  * label and corner offset follows from this one function rather than each
  * caller deciding for itself.
  */
+/**
+ * Square to the wall, facing the way the scaffold sits.
+ *
+ * Exterior puts the legs outside the wall line, interior pulls them in - a
+ * light well, a stair core, a wall worked from within. This used to be one
+ * setting for the whole job, which is no use on a job that has both, so it is
+ * asked per wall.
+ */
 function computeOutwardNormal(
   a: PlanPoint,
   b: PlanPoint,
   poly: PlanPoint[],
-  placement: "exterior" | "interior" = "exterior",
+  sits: "exterior" | "interior" = "exterior",
 ): PlanPoint {
   const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy);
   if (!len) return { x: 0, y: -1 };
@@ -78,7 +86,7 @@ function computeOutwardNormal(
   const outward = pointInPolygon({ x: mx + candidate.x * td, y: my + candidate.y * td }, poly)
     ? opp
     : candidate;
-  if (placement === "exterior") return outward;
+  if (sits === "exterior") return outward;
   return { x: -outward.x, y: -outward.y };
 }
 function getPrimaryGeometryPoints(elev: ProjectElevation | null): PlanPoint[] {
@@ -340,7 +348,8 @@ function runLineFor(outline: PlanPoint[], recesses: Recess[]): PlanPoint[] {
 
 function computeLegs(
   outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
-  placement: "exterior" | "interior" = "exterior",
+  /** Walls where the scaffold sits interior. Everything else is exterior. */
+  interiorWalls: number[] = [],
 ): SegmentLegs[] {
   const raw = outline;
   /*
@@ -386,7 +395,7 @@ function computeLegs(
     const along = { x: dx / segLen, y: dy / segLen };
     // Square at the wall in front of it - every leg on this wall, including
     // the float, which keeps the direction of the wall it belongs to.
-    const normal = computeOutwardNormal(start, end, shape, placement);
+    const normal = computeOutwardNormal(start, end, shape, interiorWalls.includes(i) ? "interior" : "exterior");
 
     function legAt(dist: number, isStart = false, isEnd = false): LegResult {
       const base = { x: start.x + along.x * dist, y: start.y + along.y * dist };
@@ -473,14 +482,15 @@ function computeLegs(
 
 // ── Three.js 3D model — full building perimeter ───────────────────────────────
 function ScaffoldModel3D({
-  outline, segments = [], puf, bayFt, widthFt, frameTall, scaffoldWidthFt, placement = "exterior"
+  outline, segments = [], puf, bayFt, widthFt, frameTall, scaffoldWidthFt, interiorWalls = []
 }: {
   outline: PlanPoint[];
   /** Open runs, for a job whose plan is highlighter strokes rather than a trace. */
   segments?: { a: PlanPoint; b: PlanPoint }[];
   puf: number; bayFt: number; widthFt: number;
   frameTall: number; scaffoldWidthFt: number;
-  placement?: "exterior" | "interior";
+  /** Walls where the scaffold sits interior, by index on the outline. */
+  interiorWalls?: number[];
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLImageElement>(null);
@@ -665,7 +675,7 @@ function ScaffoldModel3D({
       // A traced perimeter knows which side is outside. Open runs do not, so
       // they face away from the middle of the job, as they do on the plan.
       const outwardNormal = outline.length >= 3
-        ? computeOutwardNormal(rawA, rawB, outline, placement)
+        ? computeOutwardNormal(rawA, rawB, outline, interiorWalls.includes(si) ? "interior" : "exterior")
         : (() => {
             const mx = (rawA.x + rawB.x) / 2, my = (rawA.y + rawB.y) / 2;
             const ex = rawB.x - rawA.x, ey = rawB.y - rawA.y;
@@ -853,7 +863,7 @@ function ScaffoldModel3D({
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
-  }, [outline, segments, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, placement]);
+  }, [outline, segments, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, interiorWalls]);
 
   useEffect(() => {
     if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
@@ -1267,7 +1277,7 @@ export default function SetScaffoldV2Inner() {
   const [runEnd,         setRunEnd]         = useState<PlanPoint|null>(null);
   const [pendingRun,     setPendingRun]     = useState<{ a: PlanPoint; b: PlanPoint }|null>(null);
   const [pendingHeight,  setPendingHeight]  = useState("");
-  const [drawnRuns,      setDrawnRuns]      = useState<{ id: string; a: PlanPoint; b: PlanPoint; heightFt: number; flipped: boolean }[]>([]);
+  const [drawnRuns,      setDrawnRuns]      = useState<{ id: string; a: PlanPoint; b: PlanPoint; heightFt: number; sitsInterior: boolean }[]>([]);
   /** Off, a run goes exactly where it is drawn. On, it lines up. */
   const [snapAngle,      setSnapAngle]      = useState(true);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
@@ -1483,16 +1493,32 @@ export default function SetScaffoldV2Inner() {
    * legs outward, interior pulls them in - a tank shell, an atrium or a lift
    * shaft is the same trace read the other way round.
    */
-  const placement: "exterior" | "interior" =
-    ((elevation?.sectionView as unknown as Record<string, string>)?.placement === "interior")
-      ? "interior"
-      : "exterior";
+  /*
+   * Which walls have their legs on the other side.
+   *
+   * Every wall says where its scaffold sits. A whole-job switch was
+   * no use on a job that has an outside face and a light well, and no use at
+   * all once a plan was a set of separate runs.
+   */
+  const interiorWalls = elevation?.interiorWalls ?? [];
+  /** Moves one wall between exterior and interior. */
+  function toggleWallSits(segIndex: number) {
+    if (!elevation) return;
+    const next = {
+      ...elevation,
+      interiorWalls: interiorWalls.includes(segIndex)
+        ? interiorWalls.filter((n) => n !== segIndex)
+        : [...interiorWalls, segIndex],
+    };
+    setElevation(next);
+    saveActiveElevation(next);
+  }
 
   // Segment legs with no-orphan rule
   const allSegmentLegs = useMemo(() => {
     if (!scaleOk || !outline.length || effPuf <= 0 || bayLengthFt <= 0) return [];
-    return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf, placement);
-  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, placement]);
+    return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf, interiorWalls);
+  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, interiorWalls]);
 
   // Per-leg frame tall — single source of truth is `frameTall`, the same
   // value driving the 3D model and Frame Config Options (derived from
@@ -1661,7 +1687,7 @@ export default function SetScaffoldV2Inner() {
               a: { x: h.a.x, y: h.a.y },
               b: { x: h.b.x, y: h.b.y },
               heightFt: h.heightFt,
-              flipped: false,
+              sitsInterior: false,
             })),
             ...prev.filter(run => !strokeIds.has(run.id)),
           ]);
@@ -1814,7 +1840,7 @@ export default function SetScaffoldV2Inner() {
    * Same rules as a wall - first leg on the invisible stop, march at bay
    * length, rail across anything eight feet or under. The difference is that
    * a drawn run has no building to take its side from, so the side comes from
-   * the direction it was drawn and can be flipped.
+   * the direction it was drawn, and says where its scaffold sits.
    */
   const drawnRunLegs = useMemo(() => {
     if (!scaleOk || effPuf <= 0 || bayLengthFt <= 0) return [];
@@ -1847,7 +1873,7 @@ export default function SetScaffoldV2Inner() {
       const outward = hub
         ? ((mid.x - hub.x) * right.x + (mid.y - hub.y) * right.y) >= 0 ? 1 : -1
         : 1;
-      const side = (run.flipped ? -1 : 1) * outward;
+      const side = (run.sitsInterior ? -1 : 1) * outward;
       const normal = { x: right.x * side, y: right.y * side };
 
       /*
@@ -1927,7 +1953,7 @@ export default function SetScaffoldV2Inner() {
        * the answer backwards on one of them, and the ticks point into the
        * building instead of away from the wall they serve.
        */
-      const normal = computeOutwardNormal(wall.a, wall.b, wall.levelPoints, placement);
+      const normal = computeOutwardNormal(wall.a, wall.b, wall.levelPoints, interiorWalls.includes(wall.segIndex) ? "interior" : "exterior");
 
       const positions: number[] = [-floatPx];
       let cursor = -floatPx;
@@ -1956,7 +1982,7 @@ export default function SetScaffoldV2Inner() {
 
       return { key: `lvl-${wall.levelId}-${index}`, wall, legs, lengthFt: len / effPuf };
     });
-  }, [deviatingWalls, scaleOk, effPuf, scaffoldWidthFt, bayLengthFt, outline, placement]);
+  }, [deviatingWalls, scaleOk, effPuf, scaffoldWidthFt, bayLengthFt, outline, interiorWalls]);
 
   /*
    * Project totals, worked out after every kind of run exists.
@@ -2062,10 +2088,22 @@ export default function SetScaffoldV2Inner() {
    * Changing a width rewrites it already; tracing another floor has to as well,
    * or the load list quietly describes a building with one fewer run on it.
    */
+  /*
+   * What the ledger watches.
+   *
+   * The drawn runs were missing from this, and on a Full Bid every leg is a
+   * drawn run - so the signature never changed, the ledger was written once on
+   * mount before the strokes had even become runs, and never again. The panel
+   * here looked right only because changing the width forced a rewrite; the
+   * load list read what storage held, which was the ledger from before the
+   * scaffold existed.
+   */
   const ledgerSignature = [
     levelRunLegs.map(r => `${r.key}:${r.legs.length}`).join("|"),
+    drawnRunLegs.map(r => `${r.id}:${r.legs.length}`).join("|"),
+    drawnRuns.map(r => `${r.id}:${r.heightFt}`).join("|"),
     allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0),
-    scaffoldWidthFt, bayLengthFt, elevation?.wallHeight ?? 0, placement,
+    scaffoldWidthFt, bayLengthFt, elevation?.wallHeight ?? 0, interiorWalls.join(","),
   ].join("~");
 
   useEffect(() => {
@@ -2617,12 +2655,6 @@ export default function SetScaffoldV2Inner() {
     );
   }
 
-  function handleTogglePlacement(next: "exterior" | "interior") {
-    saveSectionView({ placement: next } as never);
-    setElevation(cur =>
-      cur ? { ...cur, sectionView: { ...cur.sectionView, placement: next } as never } : cur
-    );
-  }
 
   function handleToggleScaffoldSide(side: "left" | "right") {
     saveSectionView({ scaffoldSide: side });
@@ -2762,7 +2794,7 @@ export default function SetScaffoldV2Inner() {
             <KorbanHeaderMeta label="Job No." value={sheetInfo.jobNumber || "-"} />
             <KorbanButton as="a" href="/takeoff-workspace-advanced" variant="ghost">← Takeoff</KorbanButton>
             <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
-            <KorbanButton as="a" href="/korban-review" variant="primary">Korban Review →</KorbanButton>
+            <KorbanButton as="a" href="/korban-review" variant="primary">Review →</KorbanButton>
           </>
         }
       />
@@ -2873,30 +2905,11 @@ export default function SetScaffoldV2Inner() {
           change how everything below them should be read. */}
       {!isQuickBid && (
         <div className="flex flex-wrap items-start gap-3 border-b border-zinc-900 bg-[#0b0b0b] px-6 py-2">
-          {/* Placement is a plan decision - it has no meaning on a section. */}
-          {activeMainTab === "overlay" && (
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
-              Scaffold sits
-            </span>
-            {(["exterior", "interior"] as const).map((side) => (
-              <button
-                key={side}
-                onClick={() => handleTogglePlacement(side)}
-                className={`rounded border px-2.5 py-1 font-mono text-[10px] font-medium capitalize transition ${
-                  placement === side
-                    ? "border-orange-400/50 bg-orange-400/10 text-orange-200"
-                    : "border-zinc-800 bg-black text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
-                }`}
-              >
-                {side}
-              </button>
-            ))}
-            <span className="font-mono text-[9px] text-zinc-700">
-              {placement === "interior" ? "legs inside the wall line" : "legs outside the wall line"}
-            </span>
-          </div>
-          )}
+          {/*
+            * Exterior / Interior used to live here as one switch for the whole
+            * job. A job can have both - an outside face and a light well - so
+            * each wall carries its own flip instead, on the run itself.
+            */}
 
           {(() => {
             const flags: KorbanGuidanceFlag[] = [];
@@ -2958,14 +2971,14 @@ export default function SetScaffoldV2Inner() {
             } else if (levelOutlines.length > 1) {
               flags.push({ tone: "note", text: `${levelOutlines.length} levels, all within 3' of the key line. One run covers it, brackets pick up the rest.` });
             }
-            if (placement === "interior") {
-              flags.push({ tone: "note", text: "Legs set inside the wall line. Check your inside corners for clearance." });
+            if (interiorWalls.length > 0) {
+              flags.push({ tone: "note", text: `${interiorWalls.length} wall${interiorWalls.length === 1 ? "" : "s"} set interior - legs inside the wall line. Check those corners for clearance.` });
             }
             if (scaleOk && outline.length >= 3 && (elevation?.wallHeight ?? 0) <= 0) {
               flags.push({ tone: "warn", text: "No wall height. Stack falls back to one jump - grip an elevation in Takeoff." });
             }
             if (flags.length === 0) return null;
-            return <KorbanGuidance flags={flags} title="Korban reads it" className="max-w-xl" requireAck />;
+            return <KorbanGuidance flags={flags} title="Korban thinks..." className="max-w-xl" requireAck />;
           })()}
         </div>
       )}
@@ -3202,7 +3215,7 @@ export default function SetScaffoldV2Inner() {
                         if (h <= 0) return;
                         setDrawnRuns(prev => [...prev, {
                           id: `run-${Date.now().toString(36)}`,
-                          a: pendingRun.a, b: pendingRun.b, heightFt: h, flipped: false,
+                          a: pendingRun.a, b: pendingRun.b, heightFt: h, sitsInterior: false,
                         }]);
                         setPendingRun(null); setPendingHeight("");
                       }}
@@ -3215,7 +3228,41 @@ export default function SetScaffoldV2Inner() {
               </div>
             )}
 
-            {/* Drawn runs, listed so they can be flipped or removed. */}
+            {/*
+              * The traced walls, each with its own flip.
+              *
+              * Scaffold goes outside a building until it does not - a light
+              * well, a stair core, a wall worked from within. One switch for
+              * the whole job could not say that, so every wall says it itself.
+              */}
+            {allSegmentLegs.length > 0 && (
+              <div className="absolute bottom-2 right-2 z-40 max-h-[45%] w-[176px] overflow-y-auto rounded-lg border border-zinc-800 bg-black/90 p-2">
+                <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-zinc-600">
+                  Scaffold sits
+                </p>
+                {allSegmentLegs.filter(seg => seg.legs.length > 0).map(seg => {
+                  const interior = interiorWalls.includes(seg.segIndex);
+                  const lengthFt = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) / Math.max(effPuf, 0.0001);
+                  return (
+                    <button
+                      key={seg.segIndex}
+                      onClick={() => toggleWallSits(seg.segIndex)}
+                      title="Exterior puts the legs outside the wall line, interior pulls them in"
+                      className="flex w-full items-center gap-2 border-t border-zinc-900 py-1 text-left first:border-0 hover:bg-zinc-900/60"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-zinc-400">
+                        Wall {seg.segIndex + 1} &middot; {Math.round(lengthFt)}&apos;
+                      </span>
+                      <span className={`font-mono text-[9px] ${interior ? "text-orange-300" : "text-zinc-600"}`}>
+                        {interior ? "interior" : "exterior"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Drawn runs, listed so each can be set exterior or interior, or removed. */}
             {drawnRuns.length > 0 && (
               <div className="absolute bottom-2 left-2 z-40 max-w-[220px] rounded-lg border border-zinc-800 bg-black/90 p-2">
                 <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-zinc-600">
@@ -3226,12 +3273,13 @@ export default function SetScaffoldV2Inner() {
                     <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-zinc-400">
                       {Math.round(drawnRunLegs.find(r => r.id === run.id)?.lengthFt ?? 0)}&apos; x {run.heightFt}&apos;
                     </span>
+                    {/* Same words as a traced wall: where the scaffold sits. */}
                     <button
-                      onClick={() => setDrawnRuns(prev => prev.map(r => r.id === run.id ? { ...r, flipped: !r.flipped } : r))}
-                      title="Put the legs on the other side"
-                      className="font-mono text-[9px] text-zinc-600 hover:text-orange-300"
+                      onClick={() => setDrawnRuns(prev => prev.map(r => r.id === run.id ? { ...r, sitsInterior: !r.sitsInterior } : r))}
+                      title="Exterior puts the legs outside the wall line, interior pulls them in"
+                      className={`font-mono text-[9px] ${run.sitsInterior ? "text-orange-300" : "text-zinc-600"} hover:text-orange-300`}
                     >
-                      flip
+                      {run.sitsInterior ? "interior" : "exterior"}
                     </button>
                     <button
                       onClick={() => setDrawnRuns(prev => prev.filter(r => r.id !== run.id))}
@@ -3342,15 +3390,26 @@ export default function SetScaffoldV2Inner() {
                             stroke={stroke ? "#a1a1aa" : "#f97316"} strokeWidth={stroke ? 2 : 1.2}
                             strokeDasharray={stroke ? undefined : "4,3"} opacity={stroke ? 0.9 : 0.55} />
                           {stroke && (
-                            <text x={at.x} y={at.y}
-                              textAnchor="middle" fontSize={effPuf * 1.6} fill="#a1a1aa"
-                              fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                              letterSpacing={effPuf * 0.06}
-                              stroke="#000" strokeWidth={effPuf * 0.35} paintOrder="stroke"
-                              transform={`rotate(${flip ? angle + 180 : angle} ${at.x} ${at.y})`}>
-                              {stroke.label.toUpperCase()} &middot; {Math.round(stroke.lf)}&apos;
-                              {stroke.note ? ` \u00b7 ${stroke.note.toUpperCase()}` : ""}
-                            </text>
+                            <g transform={`rotate(${flip ? angle + 180 : angle} ${at.x} ${at.y})`}>
+                              <text x={at.x} y={at.y}
+                                textAnchor="middle" fontSize={effPuf * 1.6} fill="#a1a1aa"
+                                fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                                letterSpacing={effPuf * 0.06}
+                                stroke="#000" strokeWidth={effPuf * 0.35} paintOrder="stroke">
+                                {stroke.label.toUpperCase()} &middot; {Math.round(stroke.lf)}&apos;
+                              </text>
+                              {/* Whatever the estimator called it, on its own line
+                                  under the name rather than run on after it. */}
+                              {stroke.note && (
+                                <text x={at.x} y={at.y + effPuf * 1.8}
+                                  textAnchor="middle" fontSize={effPuf * 1.25} fill="#71717a"
+                                  fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                                  letterSpacing={effPuf * 0.05}
+                                  stroke="#000" strokeWidth={effPuf * 0.3} paintOrder="stroke">
+                                  {stroke.note.toUpperCase()}
+                                </text>
+                              )}
+                            </g>
                           )}
                         </>
                       );
@@ -3696,7 +3755,7 @@ export default function SetScaffoldV2Inner() {
                   widthFt={scaffoldWidthFt}
                   frameTall={liveFrameTall}
                   scaffoldWidthFt={scaffoldWidthFt}
-                  placement={placement}
+                  interiorWalls={interiorWalls}
                 />
               )}
             </div>

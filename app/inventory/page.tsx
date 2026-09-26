@@ -20,7 +20,7 @@ import { getBackendSettings, type StockItem } from "@/lib/backendStore";
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
-  { href: "/inventory-load-list", label: "Project Load List" },
+  { href: "/inventory/load-list", label: "Project Load List" },
   { href: "/projects", label: "Bid Log" },
   { href: "/backend", label: "Backend" },
 ];

@@ -17,6 +17,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
 import {
+  clearElevationTakeoff,
+  saveActiveElevation,
   listDispatchedLoads,
   getActiveElevation,
   getActiveProject,
@@ -36,7 +38,7 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
   { href: "/margin-review", label: "Margin Review" },
   { href: "/set-scaffold-v2", label: "Set Scaffold" },
-  { href: "/korban-review", label: "Korban Review" },
+  { href: "/korban-review", label: "Review" },
   { href: "/estimate-review", label: "Estimate" },
   { href: "/backend", label: "Backend" },
 ];
@@ -336,6 +338,32 @@ export default function ProjectPlanDeskPage() {
                 </div>
               </div>
             </div>
+            {/*
+              * Start the takeoff again without losing the job.
+              *
+              * The plans stay loaded and the scales stay locked; everything
+              * measured goes. Written for demos, where the next person has to
+              * see what the last one saw.
+              */}
+            <div className="mt-2.5 flex items-center justify-between rounded border border-zinc-900 bg-black/30 px-3 py-2">
+              <span className="font-mono text-[9.5px] text-zinc-600">
+                Clear the takeoff &mdash; plans and scales stay
+              </span>
+              <button
+                onClick={() => {
+                  const sure = window.confirm(
+                    "Clear everything measured on this job? Traces, highlights, grips, sections and the layout go. The plans and scales stay."
+                  );
+                  if (!sure) return;
+                  saveActiveElevation(clearElevationTakeoff(getActiveElevation()));
+                  window.location.reload();
+                }}
+                className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-red-500/50 hover:text-red-400"
+              >
+                reset
+              </button>
+            </div>
+
             {/*
               * Loads that have gone out on this job.
               *

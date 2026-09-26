@@ -947,15 +947,220 @@ const closingSlide: Slide = {
  * Deck composition by depth. Every tier gets the numbers and the price; the
  * deeper tiers earn the drawings, because only they produced the geometry.
  */
+/**
+ * The whole bid on one page.
+ *
+ * A deck made the customer wait for the number. Everything that mattered was
+ * there, but broken across eight screens, so nobody could take the job in at a
+ * glance or point at two figures at once. This is the same content arranged as
+ * a single summary: the job, what it covers, how long it takes, what it is
+ * built from, and what it costs - with the scaffold turning beside it.
+ *
+ * The parts arrive in order rather than all at once, so an estimator can talk
+ * over it, but nothing ever leaves the screen.
+ */
+function RotatingScaffold({ data, spin }: { data: BidPresentationData; spin: number }) {
+  /*
+   * Drawn rather than modelled.
+   *
+   * A real 3D canvas composites blank white on some machines - the reason the
+   * model in Set Scaffold needs an image behind it - and a proposal is the last
+   * place to risk that. An isometric drawing spun about its centre reads as a
+   * building, prints, and cannot fail.
+   */
+  const shape = data.outline.length >= 3 ? data.outline : [
+    { x: 0, y: 0 }, { x: 120, y: 0 }, { x: 120, y: 78 }, { x: 0, y: 78 },
+  ];
+  const xs = shape.map(p => p.x), ys = shape.map(p => p.y);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) || 1;
+  const scale = 78 / span;
+
+  const rad = (spin * Math.PI) / 180;
+  const jumps = Math.max(1, Math.min(data.framesPerLeg || 1, 14));
+  const lift = 11;
+
+  // Plan points turned about the centre, then laid over into isometric.
+  const project = (p: { x: number; y: number }, height: number) => {
+    const dx = (p.x - cx) * scale, dy = (p.y - cy) * scale;
+    const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+    const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+    return { x: rx, y: ry * 0.42 - height };
+  };
+
+  const decks = Array.from({ length: jumps + 1 }, (_, i) => i * lift);
+
+  return (
+    <svg viewBox="-110 -150 220 230" className="h-full w-full">
+      {decks.map((h, i) => (
+        <polygon
+          key={h}
+          points={shape.map(p => { const q = project(p, h); return `${q.x},${q.y}`; }).join(" ")}
+          fill="none"
+          stroke={i === 0 ? "#52525b" : "#f97316"}
+          strokeWidth={i === 0 ? 1.1 : 0.7}
+          opacity={i === 0 ? 0.9 : 0.28 + (i / decks.length) * 0.5}
+        />
+      ))}
+      {shape.map((p, i) => {
+        const foot = project(p, 0);
+        const head = project(p, jumps * lift);
+        return (
+          <line key={`leg-${i}`} x1={foot.x} y1={foot.y} x2={head.x} y2={head.y}
+            stroke="#f97316" strokeWidth="0.9" opacity="0.65" />
+        );
+      })}
+    </svg>
+  );
+}
+
+function OnePage({ data }: { data: BidPresentationData }) {
+  const [spin, setSpin] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const turn = () => { setSpin(s => (s + 0.25) % 360); raf = requestAnimationFrame(turn); };
+    raf = requestAnimationFrame(turn);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  /*
+   * The page brings itself in.
+   *
+   * The player only ever moves a slide from its opening state to its settled
+   * one, which is all a slide needed when there were eight of them. A summary
+   * has to arrive in parts so it can be talked over, so it keeps its own time.
+   */
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setStep(n => (n >= 5 ? n : n + 1)), 650);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Each block arrives in turn. Nothing leaves.
+  const inAt = (n: number) => step >= n;
+  const block = (n: number) =>
+    `transition-all duration-700 ${inAt(n) ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"}`;
+
+  const money = (v: number) => `$${Math.round(v).toLocaleString()}`;
+
+  return (
+    <div className="flex h-full w-full flex-col gap-3 p-8">
+      <div className={`flex items-end justify-between border-b border-zinc-800 pb-3 ${block(0)}`}>
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-orange-400">
+            {data.company}
+          </p>
+          <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">{data.projectName}</h1>
+          <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
+            {data.projectAddress}{data.customer ? ` \u00b7 ${data.customer}` : ""}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-600">Proposal</p>
+          <p className="font-mono text-[13px] text-zinc-300">{data.proposalNumber || "-"}</p>
+          <p className="mt-1 font-mono text-[10px] text-zinc-600">{data.bidDate}</p>
+        </div>
+      </div>
+
+      <div className="grid flex-1 grid-cols-[1.15fr_1fr] gap-4">
+        <div className="flex flex-col gap-3">
+          <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(1)}`}>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Scope</p>
+            <div className="mt-2 grid grid-cols-3 gap-3">
+              <Figure label="Coverage" value={`${Math.round(data.linearFeet).toLocaleString()} LF`} />
+              <Figure label="Wall height" value={`${data.wallHeight.toFixed(1)}'`} />
+              <Figure label="Frames per leg" value={String(data.framesPerLeg)} />
+            </div>
+            {data.elevationsCovered.length > 0 && (
+              <p className="mt-3 font-mono text-[10.5px] leading-relaxed text-zinc-500">
+                {data.elevationsCovered.join(" \u00b7 ")}
+              </p>
+            )}
+          </div>
+
+          <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(2)}`}>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Built from</p>
+            <div className="mt-2 grid grid-cols-4 gap-y-2.5 gap-x-3">
+              <Figure label="Frames" value={data.frames.toLocaleString()} small />
+              <Figure label="Planks" value={data.planks.toLocaleString()} small />
+              <Figure label="Braces" value={data.crossBraces.toLocaleString()} small />
+              <Figure label="Guardrail" value={data.guardrails.toLocaleString()} small />
+              <Figure label="Legs" value={data.legs.toLocaleString()} small />
+              <Figure label="Bays" value={data.bays.toLocaleString()} small />
+              <Figure label="Base plates" value={data.basePlates.toLocaleString()} small />
+              <Figure label="Screw jacks" value={data.screwJacks.toLocaleString()} small />
+            </div>
+            <p className="mt-3 font-mono text-[10px] text-zinc-600">
+              {data.scaffoldWidth}&apos; wide &middot; {data.bayLength}&apos; bays &middot; {data.planksPerDeck} planks per deck
+            </p>
+          </div>
+
+          <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(3)}`}>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Schedule</p>
+            <div className="mt-2 grid grid-cols-4 gap-3">
+              <Figure label="Erect" value={`${data.erectDays}d`} small />
+              <Figure label="Dismantle" value={`${data.dismantleDays}d`} small />
+              <Figure label="Crew" value={String(data.crewSize)} small />
+              <Figure label="On rent" value={`${data.rentalDays}d`} small />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <div className={`flex-1 rounded-xl border border-zinc-800 bg-black/40 p-2 ${block(1)}`}>
+            <RotatingScaffold data={data} spin={spin} />
+          </div>
+
+          <div className={`rounded-xl border border-orange-500/40 bg-orange-500/[0.07] p-4 ${block(4)}`}>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-orange-300/80">
+              Investment
+            </p>
+            <p className="mt-1 text-4xl font-bold tracking-tight text-white">{money(data.finalBid)}</p>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Figure label={`${data.trade} rental`} value={money(data.rentalRevenue)} small />
+              <Figure label="Labor" value={money(data.laborRevenue)} small />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className={`flex items-center justify-between border-t border-zinc-800 pt-2.5 ${block(5)}`}>
+        <p className="font-mono text-[10px] text-zinc-600">
+          {formatEstimator(data.estimator)}{data.companyPhone ? ` \u00b7 ${data.companyPhone}` : ""}
+          {data.companyEmail ? ` \u00b7 ${data.companyEmail}` : ""}
+        </p>
+        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-700">{data.company}</p>
+      </div>
+    </div>
+  );
+}
+
+function Figure({ label, value, small }: { label: string; value: string; small?: boolean }) {
+  return (
+    <div>
+      <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</p>
+      <p className={`mt-0.5 font-bold text-white ${small ? "text-[15px]" : "text-[22px]"}`}>{value}</p>
+    </div>
+  );
+}
+
+const onePageSlide: Slide = {
+  id: "one-page",
+  seconds: 26,
+  render: (data) => <OnePage data={data} />,
+};
+
 function buildDeck(data: BidPresentationData): Slide[] {
-  const deck: Slide[] = [coverSlide, scopeSlide, scheduleSlide];
-
-  if (data.depth !== "quick-bid") deck.push(layoutSlide);
-  if (data.elevations.length > 1) deck.push(elevationSlide);
-  if (data.depth === "korban-bid") deck.push(assemblySlide);
-
-  deck.push(investmentSlide, closingSlide);
-  return deck;
+  /*
+   * One page, not eight.
+   *
+   * The deck made a customer sit through the job to reach the number. The same
+   * content on a single summary can be read at a glance and pointed at, which
+   * is what actually happens in a bid meeting.
+   */
+  void data;
+  return [onePageSlide];
 }
 
 // ----------------------------------------------------------------------
