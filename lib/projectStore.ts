@@ -2324,17 +2324,36 @@ export function buildPhaseReport(elevation: ProjectElevation | null, depth: Esti
   }
 
   if (depth === "full-bid") {
+    /*
+     * Full Bid measures with the highlighter, not by tracing.
+     *
+     * This branch used to ask for traced levels and talk about plan geometry -
+     * a Korban Bid's vocabulary - so a job with its faces swiped was told it
+     * had done nothing. A stroke is a run: it knows its own length and height,
+     * and it deliberately absorbs whatever the wall does inside it.
+     */
+    const strokes = elevation?.highlights ?? [];
+    const swiped = strokes.filter((h) => (h.lf ?? 0) > 0);
+    const lf = swiped.reduce((sum, h) => sum + (h.lf ?? 0), 0);
+    const missing = swiped.filter((h) => (h.heightFt ?? 0) <= 0).length;
+
     return {
       headline: "Full Bid",
-      covered: tracedLevels > 0
-        ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced against ${t.areaCount} gripped area${t.areaCount === 1 ? "" : "s"}, ${t.linearFeet.toLocaleString()} LF. Plan geometry is in, so corners and leg positions are real rather than assumed.`
-        : `Elevations are gripped but no floor plan is traced yet, so this is still running on elevation data alone. Trace at least one level to get the plan geometry a full bid needs.`,
-      gaps: [
-        "Section conditions aren't drawn, so wall steps and setbacks aren't visually verified.",
-        "No 3D check on the layout — worth having before a hard bid.",
-        levelCount > 1 ? "Multi-level step-backs are detected from the outlines but not yet reviewed against sections." : "Only one level is traced, so nothing's known about how the building changes with height.",
-      ],
-      nextStep: "Korban Bid adds section views, the 3D model, and my own review of the trouble spots.",
+      covered: swiped.length > 0
+        ? `${swiped.length} run${swiped.length === 1 ? "" : "s"} highlighted, ${Math.round(lf).toLocaleString()} LF${
+            missing > 0
+              ? `. ${missing} still ${missing === 1 ? "needs a height" : "need heights"} - grip ${missing === 1 ? "it" : "them"} on the Elevations tab.`
+              : `, every one with a height. Each run is laid out and counted on its own.`
+          }`
+        : `Nothing highlighted yet. Swipe along each face that needs coverage and this fills in.`,
+      gaps: swiped.length > 0 ? [
+        "A stroke covers everything inside its length, so setbacks and pop-outs are absorbed rather than measured.",
+        "Runs are joined where their ends meet, so corners are read from the strokes rather than from a traced plan.",
+        "No section drawn, so nothing is verified against the real wall profile.",
+      ] : [],
+      nextStep: swiped.length > 0
+        ? "Korban Bid traces the plan itself, adds section views and the 3D model, and picks up what a stroke passes over."
+        : "",
     };
   }
 
@@ -2481,12 +2500,38 @@ export function blankTier(): TierSnapshot {
  */
 export function clearElevationTakeoff(elevation: ProjectElevation): ProjectElevation {
   const empty = blankTier();
+  /*
+   * The locked scale is not a measurement.
+   *
+   * It lives inside overlayGeometry with the traced work, so clearing that
+   * wholesale threw the scale away too - and the next person had to set it
+   * again before they could draw anything, on plans that were still loaded.
+   */
+  const scale = elevation.overlayGeometry?.scale ?? null;
   return {
     ...elevation,
     ...empty,
+    overlayGeometry: scale
+      ? { ...(empty.overlayGeometry ?? {} as NonNullable<ProjectElevation["overlayGeometry"]>), scale }
+      : empty.overlayGeometry,
+    scale: elevation.scale,
     interiorWalls: [],
     tierSnapshots: {},
   };
+}
+
+/**
+ * What one tier measured, whether or not it is the tier on screen.
+ *
+ * The tier being worked in lives in the elevation's own fields; the others are
+ * put away in snapshots. Anything comparing the three - Review, most obviously
+ * - has to read them this way, or it reads the same takeoff three times and
+ * reports the other two as empty.
+ */
+export function readTier(elevation: ProjectElevation | null, tier: EstimateDepth): TierSnapshot {
+  if (!elevation) return blankTier();
+  if ((elevation.activeTier ?? "korban-bid") === tier) return captureTier(elevation);
+  return elevation.tierSnapshots?.[tier] ?? blankTier();
 }
 
 export function switchElevationTier(elevation: ProjectElevation, next: EstimateDepth): ProjectElevation {

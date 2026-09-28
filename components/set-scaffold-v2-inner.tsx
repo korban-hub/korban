@@ -1711,27 +1711,19 @@ export default function SetScaffoldV2Inner() {
         }
 
         /*
-         * Then the rebuild, on its own. A failure here costs the fresh ledger,
-         * not the whole page - and it is reported, not swallowed.
+         * The load reads. It does not write the ledger.
+         *
+         * It used to rebuild the ledger here too - and this same function is
+         * registered as the window focus handler, so the copy that ran on
+         * focus was the one made on the first render, when the runs on the
+         * plan were still empty. Focusing the window wrote an empty ledger
+         * over a good one; a refresh brought it back, and the next focus wiped
+         * it again. That was the material list fading in and out.
+         *
+         * One writer now: the effect below, which watches the runs and
+         * rewrites whenever the layout actually changes.
          */
-        try {
-          const freshEngine = calculateQuantityEngine({
-            linearFeet: raw.linearFeet,
-            wallHeight: raw.wallHeight,
-            ...raw.scaffoldInput,
-            workerReachHeight,
-          });
-          const e = writeScaffoldLedger({ ...raw, quantityEngine: freshEngine });
-          // Against what actually came out, not the first estimate - the plan
-          // overrides the engine now, so comparing the two always differed.
-          const engineChanged = JSON.stringify(e.quantityEngine) !== JSON.stringify(raw.quantityEngine);
-          const ledgerChanged = (e.partLedger ?? []).length !== (raw.partLedger ?? []).length;
-          if (engineChanged || ledgerChanged) saveActiveElevation(e);
-          setElevation(e);
-          setLoadError(null);
-        } catch (err) {
-          setLoadError(`Ledger rebuild: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        setLoadError(null);
       } catch (err) {
         setLoadError(`Load: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -2120,7 +2112,24 @@ export default function SetScaffoldV2Inner() {
      */
     const before = JSON.stringify((elevation.partLedger ?? []).map(r => [r.partNo, r.qty, r.source]).sort());
     const after = JSON.stringify((next.partLedger ?? []).map(r => [r.partNo, r.qty, r.source]).sort());
-    if (before !== after) { setElevation(next); saveActiveElevation(next); }
+    /*
+     * Never replace a real load list with nothing.
+     *
+     * A render where the runs have not arrived yet computes an empty ledger,
+     * and saving that wipes a good one. Clearing a job is done deliberately by
+     * the reset, not by a half-built render.
+     */
+    const wouldEmpty = (next.partLedger ?? []).length === 0 && (elevation.partLedger ?? []).length > 0;
+    /*
+     * The quantities are saved too, not only the parts.
+     *
+     * This compared the ledger alone, and the ledger can come out identical
+     * while the counts behind it have moved - so the job's quantities never
+     * reached storage, and every page that reads them later, Review most
+     * of all, showed nothing.
+     */
+    const engineMoved = JSON.stringify(next.quantityEngine) !== JSON.stringify(elevation.quantityEngine);
+    if ((before !== after || engineMoved) && !wouldEmpty) { setElevation(next); saveActiveElevation(next); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ledgerSignature, mounted]);
 
@@ -2707,25 +2716,80 @@ export default function SetScaffoldV2Inner() {
                   <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.16em] text-zinc-600">
                     Built from
                   </p>
-                  {([
-                    ...(loadError ? [["Error", loadError] as [string, string]] : []),
-                    ["Job", projectSource === "substituted"
-                      ? "recovered - was missing"
-                      : projectName || "no project"],
-                    ["Elevation", elevationSource === "fallback"
-                      ? "blank - not saved"
-                      : elevation?.elevationName || "unnamed"],
-                    ["Sections", String(elevation?.sectionViews?.length ?? 0)],
-                    ["Wall height", (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "not set"],
-                    ["Coverage", (elevation?.linearFeet ?? 0) > 0 ? `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` : "not set"],
-                    ["Levels traced", String(levelOutlines.length || 0)],
-                    ["Scale", scaleOk ? "set" : "not set"],
-                    ["Frames per leg", liveFrameTall > 0 ? String(liveFrameTall) : "-"],
-                  ] as [string, string][]).map(([label, value]) => (
+                  {(() => {
+                    /*
+                     * What this job was built from, in the language of the tier
+                     * that built it.
+                     *
+                     * This used to read an elevation's name, its sections and
+                     * its traced levels on every job - ideas a Full Bid does
+                     * not have - and took coverage and wall height from figures
+                     * that only appear after Store Elevations. So a job with
+                     * two highlighter strokes on screen reported "not set"
+                     * twice and one frame per leg, which is the floor value and
+                     * reads like a real answer.
+                     *
+                     * Coverage is known the moment a stroke is swiped, and the
+                     * heights are on the strokes themselves. Read them there.
+                     */
+                    const strokes = elevation?.highlights ?? [];
+                    const strokeLf = strokes.reduce((sum, h) => sum + (h.lf || 0), 0);
+                    const withHeight = strokes.filter(h => (h.heightFt || 0) > 0);
+                    const missing = strokes.length - withHeight.length;
+                    const strokeHeight = withHeight.length > 0
+                      ? withHeight.reduce((sum, h) => sum + h.heightFt * (h.lf || 1), 0) /
+                        Math.max(withHeight.reduce((sum, h) => sum + (h.lf || 1), 0), 0.0001)
+                      : 0;
+
+                    const usesStrokes = tier.overlayFrom === "highlights";
+                    const coverageFt = usesStrokes && strokeLf > 0 ? strokeLf : (elevation?.linearFeet ?? 0);
+                    const heightFt = usesStrokes && strokeHeight > 0 ? strokeHeight : (elevation?.wallHeight ?? 0);
+
+                    const tierName = elevation?.activeTier === "full-bid" ? "Full Bid"
+                      : elevation?.activeTier === "quick-bid" ? "Quick Bid" : "Korban Bid";
+
+                    const rows: [string, string][] = [
+                      ...(loadError ? [["Error", loadError] as [string, string]] : []),
+                      ["Job", projectSource === "substituted"
+                        ? "recovered - was missing"
+                        : projectName || "no project"],
+                      ["Tier", tierName],
+                    ];
+
+                    if (usesStrokes) {
+                      rows.push(["Highlights", strokes.length > 0 ? String(strokes.length) : "none yet"]);
+                    } else {
+                      rows.push(
+                        ["Elevation", elevationSource === "fallback"
+                          ? "blank - not saved"
+                          : elevation?.elevationName || "unnamed"],
+                        ["Levels traced", String(levelOutlines.length || 0)],
+                      );
+                      if (tier.sectionView) rows.push(["Sections", String(elevation?.sectionViews?.length ?? 0)]);
+                    }
+
+                    rows.push(
+                      ["Coverage", coverageFt > 0 ? `${Math.round(coverageFt).toLocaleString()} LF` : "not set"],
+                      // Says which heights are missing rather than reporting none.
+                      ["Wall height", heightFt > 0
+                        ? `${heightFt.toFixed(1)}'${missing > 0 ? ` - ${missing} without` : ""}`
+                        : usesStrokes && strokes.length > 0 ? "no heights yet" : "not set"],
+                      ["Scale", scaleOk ? "set" : "not set"],
+                      // From the height shown above, not from a stored figure
+                      // that only appears after Store Elevations - otherwise a
+                      // job with real heights on its strokes still read 1.
+                      ["Frames per leg", heightFt > 0
+                        ? String(Math.max(1, computeFrameMakeup(
+                            Math.max(0, heightFt - workerReachHeight), screwJackMaxExtensionIn).frameTall))
+                        : "-"],
+                    );
+                    return rows;
+                  })().map(([label, value]) => (
                     <div key={label} className="flex items-baseline justify-between gap-2 border-b border-zinc-900 py-0.5 last:border-0">
                       <span className="text-[9.5px] text-zinc-500">{label}</span>
                       <span className={`font-mono text-[10px] font-bold ${
-                        (["not set", "no project", "blank - not saved", "recovered - was missing"].includes(value) || label === "Error")
+                        (["not set", "no project", "blank - not saved", "recovered - was missing", "no heights yet", "none yet", "-"].includes(value)
+                          || value.includes(" without") || label === "Error")
                           ? "text-red-400" : "text-zinc-300"
                       }`}>
                         {value}

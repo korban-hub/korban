@@ -409,6 +409,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
       // Traced sections come back the same as everything else does.
       const storedSections = elev.sectionViews ?? [];
+      /*
+       * The heights come back onto the tiles.
+       *
+       * The tiles were rebuilt empty on every return, so a gripped height was
+       * on the stroke but not on screen - and looked lost.
+       */
+      if ((elev.highlights ?? []).length > 0) {
+        setHighlightElev(elev.highlights.map(h => ({
+          direction: h.label,
+          areas: [{ ...newElevArea(1, h.label), lf: h.lf, heightFt: h.heightFt }],
+        })));
+      }
+
       if (storedSections.length > 0) {
         setSections(storedSections.map(row => ({
           id: row.id,
@@ -991,6 +1004,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
       ...ed,
       areas:ed.areas.map(a=>a.areaIndex===selectedArea?{ ...a, rect:{x,y,w,h}, ...calc }:a),
     }:ed));
+    /*
+     * The height goes onto the highlight itself, now.
+     *
+     * It used to live only on the elevation tile until Store Elevations copied
+     * it across - so a grip that was never followed by a store left the stroke
+     * with no height, and every page reading the strokes showed nothing. The
+     * stroke is what the rest of the app reads; write it where it is read.
+     */
+    if (stroke && calc.heightFt > 0) {
+      setHighlights(prev=>prev.map(h=>h.id===stroke.id?{ ...h, heightFt: calc.heightFt }:h));
+    }
     setGripStart(null); setGripCurrent(null); setGripMode(false);
   }
 

@@ -159,6 +159,19 @@ export function loadEstimateState(): EstimateState {
 }
 
 /** Merge-write. Only the keys passed in are changed. */
+/**
+ * Forgets the priced figures for a job.
+ *
+ * The estimate lives apart from the takeoff, which is right - it survives
+ * moving between tiers. But clearing a job's takeoff and leaving its price
+ * behind left Plan Desk showing revenue and hours for work that no longer
+ * existed, with "Priced" still ticked.
+ */
+export function clearEstimateState() {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* nothing to clear */ }
+}
+
 export function saveEstimateState(patch: Partial<EstimateState>) {
   if (typeof window === "undefined") return;
   try {

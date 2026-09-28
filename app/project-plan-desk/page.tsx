@@ -31,7 +31,7 @@ import {
   type ProjectRecord,
 } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
-import { loadEstimateState, type EstimateDerived } from "@/lib/estimateState";
+import { clearEstimateState, loadEstimateState, type EstimateDerived } from "@/lib/estimateState";
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
@@ -158,7 +158,22 @@ export default function ProjectPlanDeskPage() {
     (row) => row.points.length >= 3
   ).length;
   const hasScale = Boolean(elevation?.scale);
-  const hasGrips = elevationTotals.areaCount > 0;
+  /*
+   * A Full Bid measures with the highlighter.
+   *
+   * These all asked a Korban Bid's questions - are there gripped areas, are
+   * there traced levels - so a job with every face swiped and gripped showed
+   * nothing done. A stroke with a height is a gripped face; a set of strokes is
+   * the plan geometry.
+   */
+  const strokes = elevation?.highlights ?? [];
+  const swiped = strokes.filter((h) => (h.lf ?? 0) > 0);
+  const strokeLinearFeet = swiped.reduce((sum, h) => sum + (h.lf ?? 0), 0);
+  const strokesWithHeight = swiped.filter((h) => (h.heightFt ?? 0) > 0).length;
+
+  const hasGrips = elevationTotals.areaCount > 0 || strokesWithHeight > 0;
+  /** Plan geometry - traced on a Korban Bid, highlighted on a Full Bid. */
+  const hasPlanGeometry = tracedLevels > 0 || swiped.length > 0;
   const hasSection = (elevation?.sectionView?.wallOutline?.length ?? 0) >= 2;
   const hasPricing = Boolean(derived && derived.rentalsRevenue > 0);
   // A level only counts as chosen once real takeoff work backs it up.
@@ -356,6 +371,8 @@ export default function ProjectPlanDeskPage() {
                   );
                   if (!sure) return;
                   saveActiveElevation(clearElevationTakeoff(getActiveElevation()));
+                  // The price came from work that no longer exists.
+                  clearEstimateState();
                   window.location.reload();
                 }}
                 className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-red-500/50 hover:text-red-400"
@@ -441,19 +458,23 @@ export default function ProjectPlanDeskPage() {
                   done={hasGrips}
                   label="Elevations gripped"
                   detail={
-                    hasGrips
+                    elevationTotals.areaCount > 0
                       ? `${elevationTotals.areaCount} area${elevationTotals.areaCount === 1 ? "" : "s"} - ${elevationTotals.linearFeet.toLocaleString()} LF`
-                      : "No coverage recorded"
+                      : strokesWithHeight > 0
+                        ? `${strokesWithHeight} of ${swiped.length} run${swiped.length === 1 ? "" : "s"} with a height`
+                        : "No coverage recorded"
                   }
                   onGo={() => router.push("/takeoff-workspace-advanced")}
                 />
                 <Stage
-                  done={tracedLevels > 0}
-                  label="Floor plan traced"
+                  done={hasPlanGeometry}
+                  label={swiped.length > 0 ? "Coverage highlighted" : "Floor plan traced"}
                   detail={
                     tracedLevels > 0
                       ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced`
-                      : "Full Bid and above"
+                      : swiped.length > 0
+                        ? `${swiped.length} run${swiped.length === 1 ? "" : "s"} - ${Math.round(strokeLinearFeet).toLocaleString()} LF`
+                        : "Full Bid and above"
                   }
                   optional={depth === "quick-bid"}
                   onGo={() => router.push("/takeoff-workspace-advanced")}
@@ -480,7 +501,7 @@ export default function ProjectPlanDeskPage() {
 
             {/* ---- What it currently totals ------------------------------ */}
             <Panel title="Current quantities" scan={false}>
-              {!hasScale && !hasGrips && tracedLevels === 0 ? (
+              {!hasScale && !hasGrips && !hasPlanGeometry ? (
                 <p className="px-1 py-3 text-[11px] leading-[1.6] text-zinc-600">
                   Nothing measured yet. Quantities appear here as the takeoff
                   progresses - they are never estimated ahead of the work.
@@ -492,7 +513,7 @@ export default function ProjectPlanDeskPage() {
                       Coverage
                     </span>
                     <span className="font-mono text-[26px] font-bold leading-none text-orange-400">
-                      <Rolling value={linearFeet || elevationTotals.linearFeet} />
+                      <Rolling value={linearFeet || elevationTotals.linearFeet || strokeLinearFeet} />
                       <span className="ml-1.5 text-[11px] font-normal text-zinc-600">LF</span>
                     </span>
                   </div>
@@ -525,21 +546,26 @@ export default function ProjectPlanDeskPage() {
               <div className="grid grid-cols-3 gap-2">
                 <ViewBay
                   label="Plan overlay"
-                  ready={tracedLevels > 0}
-                  note={tracedLevels > 0 ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"}` : "Full Bid and above"}
-                  onOpen={() => setOpenView({ label: "Plan overlay", ready: tracedLevels > 0 })}
+                  ready={hasPlanGeometry}
+                  note={tracedLevels > 0
+                    ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"}`
+                    : swiped.length > 0 ? `${swiped.length} highlighted run${swiped.length === 1 ? "" : "s"}` : "Full Bid and above"}
+                  onOpen={() => setOpenView({ label: "Plan overlay", ready: hasPlanGeometry })}
+                  onMake={() => router.push("/takeoff-workspace-advanced")}
                 />
                 <ViewBay
                   label="3D model"
                   ready={hasGrips && tracedLevels > 0}
-                  note={hasGrips && tracedLevels > 0 ? "Ready to view" : "Needs a traced plan"}
+                  note={hasGrips && tracedLevels > 0 ? "Ready to view" : "Korban Bid only"}
                   onOpen={() => setOpenView({ label: "3D model", ready: hasGrips && tracedLevels > 0 })}
+                  onMake={() => router.push("/set-scaffold-v2")}
                 />
                 <ViewBay
                   label="Section view"
                   ready={hasSection}
                   note={hasSection ? "Wall profile captured" : "Korban Bid only"}
                   onOpen={() => setOpenView({ label: "Section view", ready: hasSection })}
+                  onMake={() => router.push("/set-scaffold-v2")}
                 />
               </div>
             </Panel>
@@ -653,6 +679,7 @@ function Panel({
           aria-hidden
           className="korban-scan pointer-events-none absolute -top-px left-0 h-px w-[36%]"
           style={{ background: "linear-gradient(90deg,transparent,#F97316,transparent)" }}
+
         />
       )}
       <div className="flex items-center justify-between gap-3 pb-2">
@@ -781,21 +808,30 @@ function Stage({
  * taking shape rather than a page with things missing.
  */
 function ViewBay({
-  label, ready, note, onOpen,
+  label, ready, note, onOpen, onMake,
 }: {
   label: string;
   ready: boolean;
   note: string;
   onOpen: () => void;
+  /** Where the work that makes this view is done. */
+  onMake: () => void;
 }) {
+  /*
+   * A view that is not ready still does something.
+   *
+   * These were disabled until the work behind them existed, so the one moment
+   * you knew what was missing was the moment you could not act on it. Not
+   * ready now means "take me to where I make it".
+   */
   return (
     <button
-      onClick={ready ? onOpen : undefined}
-      disabled={!ready}
+      onClick={ready ? onOpen : onMake}
+      title={ready ? `Open ${label}` : `Go and make ${label.toLowerCase()}`}
       className={`group flex aspect-[4/3] flex-col items-center justify-center gap-1.5 rounded border transition ${
         ready
           ? "border-orange-500/30 bg-orange-500/[0.04] hover:border-orange-500/60 hover:bg-orange-500/[0.08]"
-          : "cursor-default border-dashed border-zinc-800 bg-transparent"
+          : "border-dashed border-zinc-800 bg-transparent hover:border-zinc-600"
       }`}
     >
       <span

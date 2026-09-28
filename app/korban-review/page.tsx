@@ -2,12 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { KorbanButton, KorbanHeader, KorbanHeaderMeta } from "@/components/korban";
 import {
   buildPhaseReport, computeCourtyardTotals, computeElevationOnlyTotals,
-  getActiveElevation, getActiveProject, getEstimateDepth,
+  calculateQuantityEngine, getActiveElevation, getActiveProject, getEstimateDepth, readTier,
   type EstimateDepth, type ProjectElevation,
 } from "@/lib/projectStore";
-import { getBackendSettings } from "@/lib/backendStore";
 
 /**
  * Korban Review - three readings of the same job, side by side.
@@ -31,14 +31,22 @@ type LevelMeta = {
   id: EstimateDepth;
   name: string;
   blurb: string;
-  accuracy: string;
+  /** What this tier is for, and how closely it looks. */
+  serves: string;
+  detail: string;
   source: string;
 };
 
 const LEVELS: LevelMeta[] = [
-  { id: "quick-bid",  name: "Quick Bid",  blurb: "Elevation coverage only",   accuracy: "+/-15-25%", source: "Gripped elevation areas" },
-  { id: "full-bid",   name: "Full Bid",   blurb: "Plan geometry and layout",  accuracy: "+/-8-12%",  source: "Traced perimeter" },
-  { id: "korban-bid", name: "Korban Bid", blurb: "Sections, 3D and my review", accuracy: "+/-3-6%",   source: "Perimeter and sections" },
+  /*
+   * What each tier is for, rather than a percentage.
+   *
+   * The accuracy bands read like a promise nobody made - an estimator knows
+   * what a budget number is worth without being given a range for it.
+   */
+  { id: "quick-bid",  name: "Quick Bid",  blurb: "Elevation coverage only",    serves: "Budget Number",  detail: "Low Detail",         source: "Gripped elevation areas" },
+  { id: "full-bid",   name: "Full Bid",   blurb: "Highlighted runs and grips", serves: "Most Bids",         detail: "Good Coverage",      source: "Highlighted runs" },
+  { id: "korban-bid", name: "Korban Bid", blurb: "Sections, 3D and my review", serves: "Hard Bids",         detail: "Detailed & Precise", source: "Traced plan and sections" },
 ];
 
 const LEVEL_RANK: Record<EstimateDepth, number> = {
@@ -99,7 +107,6 @@ export default function KorbanReviewPage() {
   const [projectName, setProjectName] = useState("");
   const [proposalNumber, setProposalNumber] = useState("");
   const [depth, setDepth] = useState<EstimateDepth>("quick-bid");
-  const [company, setCompany] = useState({ name: "", logo: "" });
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -108,52 +115,95 @@ export default function KorbanReviewPage() {
       const project = getActiveProject();
       setElevation(activeElevation);
       setProjectName(project.projectName || "Untitled project");
-      setProposalNumber(project.projectId || "");
+      // The number typed in Plan Desk, as everywhere else - the project id is
+      // only a fallback for a job that has not been given one.
+      setProposalNumber(project.proposalNumber || project.projectId || "");
       setDepth(getEstimateDepth());
-      const backend = getBackendSettings();
-      setCompany({ name: backend.company.companyName, logo: backend.company.companyLogoUrl });
     } catch {
       // Storage unavailable - the page still renders, everything reads empty.
     }
     setMounted(true);
   }, []);
 
-  const elevationTotals = useMemo(() => computeElevationOnlyTotals(elevation), [elevation]);
-  const courtyards = useMemo(() => computeCourtyardTotals(elevation), [elevation]);
 
-  const tracedLevels = (elevation?.overlayGeometry?.fullOverlayRows ?? [])
-    .filter((row) => row.points.length >= 3).length;
-  const hasSections = (elevation?.sectionView?.wallOutline?.length ?? 0) >= 2;
+  /*
+   * Each tier read from its own work.
+   *
+   * This used to read the one elevation three times and ask a Korban Bid's
+   * question of all three - "are there traced levels?" - which a Full Bid can
+   * never answer yes to, because it measures with the highlighter. So Full Bid
+   * showed nothing on every job, however much had been done in it.
+   */
+  const tiers = useMemo(() => ({
+    "quick-bid": readTier(elevation, "quick-bid"),
+    "full-bid": readTier(elevation, "full-bid"),
+    "korban-bid": readTier(elevation, "korban-bid"),
+  }), [elevation]);
 
-  /** A depth is reached when the work it depends on actually exists. */
+  /** A tier is reached when the work it is built on actually exists in it. */
   function reached(id: EstimateDepth): boolean {
-    if (id === "quick-bid") return elevationTotals.areaCount > 0;
-    if (id === "full-bid") return elevationTotals.areaCount > 0 && tracedLevels > 0;
-    return elevationTotals.areaCount > 0 && tracedLevels > 0 && hasSections;
+    const snap = tiers[id];
+    if (id === "quick-bid") return (snap.linearFeet ?? 0) > 0;
+    if (id === "full-bid") return (snap.highlights ?? []).some((h) => (h.lf ?? 0) > 0);
+    return (snap.overlayGeometry?.fullOverlayRows ?? []).filter((row) => row.points.length >= 3).length > 0;
   }
 
   /**
-   * Counts for a tier, from that tier's own source. Quick Bid can only know
-   * what the grips measured; the deeper tiers read the quantity engine, which
-   * is populated from traced geometry. They genuinely differ, and should.
+   * Counts for a tier, from that tier's own measurements. A Quick Bid knows
+   * only what was typed; Full Bid knows its strokes; Korban Bid knows its
+   * traced plan. They genuinely differ, and should.
    */
   function countsFor(id: EstimateDepth) {
-    if (id === "quick-bid") {
-      return {
-        linearFeet: elevationTotals.linearFeet,
-        frames: elevationTotals.frameCount,
-        planks: elevationTotals.plankCount,
-        bays: elevationTotals.bayCount,
-        legs: elevationTotals.legCount,
-      };
-    }
-    const engine = elevation?.quantityEngine;
-    return {
-      linearFeet: elevation?.linearFeet ?? 0,
+    const snap = tiers[id];
+    const engine = snap.quantityEngine;
+    const strokes = snap.highlights ?? [];
+    const strokeLf = strokes.reduce((sum, h) => sum + (h.lf ?? 0), 0);
+
+    /*
+     * The stored counts, or the strokes themselves.
+     *
+     * A tier's quantities are written when its layout is worked out in Set
+     * Scaffold, and until that has happened there is nothing stored to read -
+     * so a Full Bid with its faces swiped and gripped showed dashes. Each run
+     * is a length at a height, which is all the engine needs, so Review can
+     * work it out from the strokes rather than report nothing.
+     *
+     * The stored figures win when they exist, because those came from the real
+     * layout - corners joined, runs counted as drawn.
+     */
+    const stored = {
       frames: engine?.frameCount ?? 0,
       planks: engine?.plankCount ?? 0,
       bays: engine?.bayCount ?? 0,
       legs: engine?.legCount ?? 0,
+    };
+    const laidOut = stored.frames > 0 || stored.legs > 0;
+
+    if (id === "full-bid" && !laidOut && strokes.length > 0) {
+      const fromStrokes = { frames: 0, planks: 0, bays: 0, legs: 0 };
+      for (const run of strokes) {
+        if ((run.lf ?? 0) <= 0 || (run.heightFt ?? 0) <= 0) continue;
+        const e = calculateQuantityEngine({
+          linearFeet: run.lf,
+          wallHeight: run.heightFt,
+          standardBayLength: elevation?.scaffoldInput.standardBayLength ?? 10,
+          scaffoldWidth: elevation?.scaffoldInput.scaffoldWidth ?? 3,
+          frameHeight: elevation?.scaffoldInput.frameHeight ?? 6.333,
+          plankCountPerBay: elevation?.scaffoldInput.plankCountPerBay ?? 3,
+          bracePattern: elevation?.scaffoldInput.bracePattern ?? "Every Bay",
+          wallOffset: elevation?.scaffoldInput.wallOffset ?? 1,
+        });
+        fromStrokes.frames += e.frameCount;
+        fromStrokes.planks += e.plankCount;
+        fromStrokes.bays += e.bayCount;
+        fromStrokes.legs += e.legCount;
+      }
+      return { linearFeet: strokeLf, ...fromStrokes };
+    }
+
+    return {
+      linearFeet: id === "full-bid" && strokeLf > 0 ? strokeLf : (snap.linearFeet ?? 0),
+      ...stored,
     };
   }
 
@@ -169,63 +219,27 @@ export default function KorbanReviewPage() {
     <main className="min-h-screen bg-korban-base text-white">
       <KorbanMotionStyles />
 
-      {/* Header - two ways back, one way forward */}
-      <header className="sticky top-0 z-20 border-b border-zinc-900 bg-korban-base/95 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 px-5 py-3">
-          <button onClick={() => router.push("/dashboard")} className="flex shrink-0 items-center gap-2.5">
-            {/* Company logo when one is set in Backend, the KORBAN mark otherwise. */}
-            {company.logo ? (
-              <img
-                src={company.logo}
-                alt={company.name || "Company"}
-                className="h-7 w-auto max-w-[120px] object-contain"
-              />
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 44 44" aria-hidden>
-                <defs>
-                  <linearGradient id="kRev" x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#FDBA74" />
-                    <stop offset="100%" stopColor="#F97316" />
-                  </linearGradient>
-                </defs>
-                <path d="M22 4 L40 38 L4 38 Z" fill="url(#kRev)" />
-                <path d="M22 4 L40 38 L22 38 Z" fill="#000" opacity="0.18" />
-              </svg>
-            )}
-            <span
-              className="uppercase text-[#F97316]"
-              style={{ fontFamily: "var(--font-title), sans-serif", fontSize: "20px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}
-            >
-              {company.name || "Korban"}
-            </span>
-          </button>
-
-          <div className="min-w-0">
-            <p className="truncate font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-300">
-              Review
-            </p>
-            <p className="truncate font-mono text-[10px] text-zinc-600">
-              {projectName}
-              {proposalNumber && <span className="ml-2 text-zinc-700">{proposalNumber}</span>}
-            </p>
-          </div>
-
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="rounded-lg border border-zinc-800 bg-korban-raised px-3 py-2 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
-            >
-              Bid Room
-            </button>
-            <button
-              onClick={() => router.push("/estimate-review")}
-              className="rounded-lg bg-orange-500 px-4 py-2 font-mono text-[10px] font-bold text-black transition hover:bg-orange-400"
-            >
-              Estimate
-            </button>
-          </div>
-        </div>
-      </header>
+      {/*
+        * The same header as every other page.
+        *
+        * This one was hand-built, so it carried a different mark, a different
+        * title treatment and its own buttons - the one page in the flow that
+        * did not look like the rest of it.
+        */}
+      <KorbanHeader
+        title="Review"
+        subtitle="The same job read three ways"
+        actionsAlwaysVisible
+        actions={
+          <>
+            <KorbanHeaderMeta label="Project" value={projectName} />
+            <KorbanHeaderMeta label="Job No." value={proposalNumber || "-"} />
+            <KorbanButton as="a" href="/set-scaffold-v2" variant="ghost">&larr; Set Scaffold</KorbanButton>
+            <KorbanButton as="a" href="/dashboard" variant="ghost">Bid Room</KorbanButton>
+            <KorbanButton as="a" href="/estimate-review" variant="primary">Estimate &rarr;</KorbanButton>
+          </>
+        }
+      />
 
       {/* Workspace */}
       <div className="relative mx-auto w-full max-w-[1500px] px-5 py-5">
@@ -262,20 +276,26 @@ export default function KorbanReviewPage() {
 
           {/* Three tiers, side by side, so they can actually be compared */}
           <div className="mt-5 grid items-start gap-3 lg:grid-cols-3">
-            {LEVELS.map((meta) => (
+            {LEVELS.map((meta) => {
+              // Each panel is shown that tier's own takeoff, not the one that
+              // happens to be loaded.
+              const asTier = elevation ? { ...elevation, ...tiers[meta.id] } : elevation;
+              const tierCourtyards = computeCourtyardTotals(asTier);
+              return (
               <LevelPanel
                 key={meta.id}
                 meta={meta}
                 counts={countsFor(meta.id)}
-                report={buildPhaseReport(elevation, meta.id, elevationTotals)}
+                report={buildPhaseReport(asTier, meta.id, computeElevationOnlyTotals(asTier))}
                 reached={reached(meta.id)}
                 isCurrent={meta.id === depth}
                 isBelowCurrent={LEVEL_RANK[meta.id] < LEVEL_RANK[depth]}
-                courtyardCount={courtyards.courtyardCount}
-                courtyardLinearFeet={courtyards.linearFeet}
+                courtyardCount={tierCourtyards.courtyardCount}
+                courtyardLinearFeet={tierCourtyards.linearFeet}
                 onGo={() => router.push("/takeoff-workspace-advanced")}
               />
-            ))}
+              );
+            })}
           </div>
 
           <p className="mt-6 font-mono text-[10px] leading-5 tracking-[0.06em] text-zinc-700">
@@ -313,6 +333,7 @@ function LevelPanel({
   courtyardLinearFeet: number;
   onGo: () => void;
 }) {
+  const router = useRouter();
   return (
     <section
       className={`relative rounded-lg border p-3 transition ${
@@ -365,8 +386,8 @@ function LevelPanel({
           <p className="mt-1 text-[10.5px] text-zinc-500">{meta.blurb}</p>
         </div>
         <div className="shrink-0 text-right">
-          <p className="font-mono text-[12px] font-bold text-zinc-300">{meta.accuracy}</p>
-          <p className="font-mono text-[8px] uppercase tracking-[0.14em] text-zinc-700">accuracy</p>
+          <p className="font-mono text-[11px] font-bold text-zinc-200">{meta.serves}</p>
+          <p className="font-mono text-[8.5px] text-amber-200/60">{meta.detail}</p>
         </div>
       </div>
 
@@ -455,6 +476,28 @@ function LevelPanel({
                 {report.nextStep}
               </p>
             )}
+
+            {/*
+              * Somewhere to go.
+              *
+              * Korban said what was missing and then left you looking at it -
+              * the one thing you want at that moment is the page where you can
+              * fix it.
+              */}
+            <div className="mt-2.5 flex gap-1.5">
+              <button
+                onClick={onGo}
+                className="rounded border border-zinc-700 px-2 py-1 font-mono text-[9.5px] text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
+              >
+                Takeoff
+              </button>
+              <button
+                onClick={() => router.push("/set-scaffold-v2")}
+                className="rounded border border-zinc-700 px-2 py-1 font-mono text-[9.5px] text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
+              >
+                Set Scaffold
+              </button>
+            </div>
           </div>
         </div>
       )}
