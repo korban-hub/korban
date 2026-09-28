@@ -1068,9 +1068,9 @@ function OnePage({ data }: { data: BidPresentationData }) {
           <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(1)}`}>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Scope</p>
             <div className="mt-2 grid grid-cols-3 gap-3">
-              <Figure label="Coverage" value={`${Math.round(data.linearFeet).toLocaleString()} LF`} />
-              <Figure label="Wall height" value={`${data.wallHeight.toFixed(1)}'`} />
-              <Figure label="Frames per leg" value={String(data.framesPerLeg)} />
+              <SummaryFigure label="Coverage" value={`${Math.round(data.linearFeet).toLocaleString()} LF`} />
+              <SummaryFigure label="Wall height" value={`${data.wallHeight.toFixed(1)}'`} />
+              <SummaryFigure label="Frames per leg" value={String(data.framesPerLeg)} />
             </div>
             {data.elevationsCovered.length > 0 && (
               <p className="mt-3 font-mono text-[10.5px] leading-relaxed text-zinc-500">
@@ -1082,14 +1082,14 @@ function OnePage({ data }: { data: BidPresentationData }) {
           <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(2)}`}>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Built from</p>
             <div className="mt-2 grid grid-cols-4 gap-y-2.5 gap-x-3">
-              <Figure label="Frames" value={data.frames.toLocaleString()} small />
-              <Figure label="Planks" value={data.planks.toLocaleString()} small />
-              <Figure label="Braces" value={data.crossBraces.toLocaleString()} small />
-              <Figure label="Guardrail" value={data.guardrails.toLocaleString()} small />
-              <Figure label="Legs" value={data.legs.toLocaleString()} small />
-              <Figure label="Bays" value={data.bays.toLocaleString()} small />
-              <Figure label="Base plates" value={data.basePlates.toLocaleString()} small />
-              <Figure label="Screw jacks" value={data.screwJacks.toLocaleString()} small />
+              <SummaryFigure label="Frames" value={data.frames.toLocaleString()} small />
+              <SummaryFigure label="Planks" value={data.planks.toLocaleString()} small />
+              <SummaryFigure label="Braces" value={data.crossBraces.toLocaleString()} small />
+              <SummaryFigure label="Guardrail" value={data.guardrails.toLocaleString()} small />
+              <SummaryFigure label="Legs" value={data.legs.toLocaleString()} small />
+              <SummaryFigure label="Bays" value={data.bays.toLocaleString()} small />
+              <SummaryFigure label="Base plates" value={data.basePlates.toLocaleString()} small />
+              <SummaryFigure label="Screw jacks" value={data.screwJacks.toLocaleString()} small />
             </div>
             <p className="mt-3 font-mono text-[10px] text-zinc-600">
               {data.scaffoldWidth}&apos; wide &middot; {data.bayLength}&apos; bays &middot; {data.planksPerDeck} planks per deck
@@ -1099,10 +1099,10 @@ function OnePage({ data }: { data: BidPresentationData }) {
           <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(3)}`}>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Schedule</p>
             <div className="mt-2 grid grid-cols-4 gap-3">
-              <Figure label="Erect" value={`${data.erectDays}d`} small />
-              <Figure label="Dismantle" value={`${data.dismantleDays}d`} small />
-              <Figure label="Crew" value={String(data.crewSize)} small />
-              <Figure label="On rent" value={`${data.rentalDays}d`} small />
+              <SummaryFigure label="Erect" value={`${data.erectDays}d`} small />
+              <SummaryFigure label="Dismantle" value={`${data.dismantleDays}d`} small />
+              <SummaryFigure label="Crew" value={String(data.crewSize)} small />
+              <SummaryFigure label="On rent" value={`${data.rentalDays}d`} small />
             </div>
           </div>
         </div>
@@ -1118,8 +1118,8 @@ function OnePage({ data }: { data: BidPresentationData }) {
             </p>
             <p className="mt-1 text-4xl font-bold tracking-tight text-white">{money(data.finalBid)}</p>
             <div className="mt-3 grid grid-cols-2 gap-3">
-              <Figure label={`${data.trade} rental`} value={money(data.rentalRevenue)} small />
-              <Figure label="Labor" value={money(data.laborRevenue)} small />
+              <SummaryFigure label={`${data.trade} rental`} value={money(data.rentalRevenue)} small />
+              <SummaryFigure label="Labor" value={money(data.laborRevenue)} small />
             </div>
           </div>
         </div>
@@ -1136,7 +1136,9 @@ function OnePage({ data }: { data: BidPresentationData }) {
   );
 }
 
-function Figure({ label, value, small }: { label: string; value: string; small?: boolean }) {
+/** A labelled figure on the summary. The deck's own Figure counts numbers up;
+ *  this one prints a value that is already formatted. */
+function SummaryFigure({ label, value, small }: { label: string; value: string; small?: boolean }) {
   return (
     <div>
       <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">{label}</p>
