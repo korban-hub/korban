@@ -2003,14 +2003,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
              * so. There has to be a difference between "draw here" and "you
              * are just moving the mouse".
              */
-            style={drawingArmed ? { cursor: "crosshair", userSelect: "none" } : undefined}
             onDragStart={(e)=>{ if (highlightMode) e.preventDefault(); }}
             onMouseDown={handleViewerMouseDown}
             onMouseMove={(e)=>{handleHighlightMove(e);handleViewerMouseMove(e);}}
             onMouseUp={(e)=>{handleHighlightUp();handleViewerMouseUp(e);}}
             onMouseLeave={handleHighlightUp}
             onDoubleClick={handleViewerDblClick}
-            style={{cursor:isCapturing?"crosshair":"default"}}>
+            /*
+             * One style, not two.
+             *
+             * The crosshair used to be set in a second style prop further up -
+             * and React keeps the last one, so this line quietly overrode it
+             * and forced the plain arrow back on every drawing mode. A tool
+             * that is armed has to look armed.
+             */
+            style={{
+              cursor: drawingArmed || isCapturing ? "crosshair" : "default",
+              ...(drawingArmed ? { userSelect: "none" as const } : {}),
+            }}>
 
             {!viewerUrl&&!pdfLoading&&(
               <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)handleFile(f);}}

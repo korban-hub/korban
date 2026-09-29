@@ -3368,9 +3368,11 @@ export default function SetScaffoldV2Inner() {
               style={{
                 cursor: isPanning
                   ? "grabbing"
-                  : editMode
-                    // Orange crosshair — signals the mouse is a design tool
-                    // right now, not a plain pointer.
+                  : editMode || addRunMode || measureMode
+                    // Orange crosshair - the mouse is a drawing tool right now,
+                    // not a plain pointer. Add Run and Measure want a mark on
+                    // the drawing just as much as edit mode does, and said
+                    // nothing about it.
                     ? `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg stroke='%23f97316' stroke-width='2'%3E%3Cline x1='12' y1='1' x2='12' y2='9'/%3E%3Cline x1='12' y1='15' x2='12' y2='23'/%3E%3Cline x1='1' y1='12' x2='9' y2='12'/%3E%3Cline x1='15' y1='12' x2='23' y2='12'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='1.5' fill='%23f97316'/%3E%3C/svg%3E") 12 12, crosshair`
                     : "grab",
               }}>
