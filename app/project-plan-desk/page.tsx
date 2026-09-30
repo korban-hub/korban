@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { KorbanButton, KorbanHeader, type KorbanMenuLink } from "@/components/korban";
 import {
+  readLedger,
   clearElevationTakeoff,
   saveActiveElevation,
   listDispatchedLoads,
@@ -189,7 +190,43 @@ export default function ProjectPlanDeskPage() {
    */
   const dispatched = project.projectId ? listDispatchedLoads(project.projectId) : [];
 
-  const engine = elevation?.quantityEngine;
+  /*
+   * The counts come from the load list, like everywhere else.
+   *
+   * This read the quantity engine - the estimate worked out from linear feet
+   * divided by bay length - while Set Scaffold's tiles and the load list read
+   * the ledger, which is squared to the layout actually drawn. So this page
+   * reported 22 frames and 11 legs where the job had 28 and 14: corners joined
+   * and rail bays closed change the leg count, and division cannot know that.
+   *
+   * The engine still answers until a layout exists, which is the right answer
+   * for a Quick Bid or a job that has not reached Set Scaffold yet.
+   */
+  /** What the plan preview draws: every traced level, every stroke. */
+  const planLevels = (elevation?.overlayGeometry?.fullOverlayRows ?? [])
+    .filter((row) => row.points.length >= 2)
+    .map((row) => ({ points: row.points, closed: row.closed, color: row.color || "#f97316", level: row.level }));
+  const planStrokes = (elevation?.highlights ?? [])
+    .filter((h) => (h.lf ?? 0) > 0)
+    .map((h) => ({ a: h.a, b: h.b, label: h.label, lf: h.lf }));
+
+  const ledger = elevation ? readLedger(elevation) : [];
+  const fromLedger = (match: (partNo: string) => boolean) =>
+    ledger.reduce((sum, row) => sum + (match(row.partNo) ? row.qty || 0 : 0), 0);
+
+  const laidOut = ledger.length > 0;
+  const stored = elevation?.quantityEngine;
+  const engine = laidOut
+    ? {
+        frameCount: fromLedger((p) => /^(FO|FM)/.test(p)),
+        plankCount: fromLedger((p) => /^WP/.test(p)),
+        crossBraceCount: fromLedger((p) => /^B\d/.test(p)),
+        guardrailCount: fromLedger((p) => /^GR/.test(p)),
+        // Every leg takes a base plate, so the plates are the legs.
+        legCount: fromLedger((p) => p === "BP1") || (stored?.legCount ?? 0),
+        bayCount: stored?.bayCount ?? 0,
+      }
+    : stored;
   const linearFeet = elevation?.linearFeet ?? 0;
 
   const details: { key: keyof ProjectRecord; label: string; placeholder: string; hint?: string }[] = [
@@ -546,6 +583,7 @@ export default function ProjectPlanDeskPage() {
               <div className="grid grid-cols-3 gap-2">
                 <ViewBay
                   label="Plan overlay"
+                  preview={hasPlanGeometry ? <PlanPreview levels={planLevels} strokes={planStrokes} compact /> : null}
                   ready={hasPlanGeometry}
                   note={tracedLevels > 0
                     ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"}`
@@ -636,6 +674,11 @@ export default function ProjectPlanDeskPage() {
             </div>
 
             <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+              {/* The plan draws itself. The other two still describe themselves
+                  until their viewers are built. */}
+              {openView.ready && openView.label === "Plan overlay" ? (
+                <PlanPreview levels={planLevels} strokes={planStrokes} />
+              ) : (
               <div className="text-center">
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">
                   {openView.label}
@@ -650,6 +693,7 @@ export default function ProjectPlanDeskPage() {
                     : "No section drawn yet. Trace a wall profile in Set Scaffold and the frame configuration shows here against the real wall."}
                 </p>
               </div>
+              )}
             </div>
           </div>
         </div>
@@ -661,6 +705,60 @@ export default function ProjectPlanDeskPage() {
 // -----------------------------------------------------------------------------
 // Pieces
 // -----------------------------------------------------------------------------
+
+/**
+ * The plan, drawn from what the takeoff actually holds.
+ *
+ * The view tiles were placeholders that said the drawing would render here one
+ * day - which is a poor answer on a page whose job is showing where a bid
+ * stands. This draws the real thing: every traced level in its own colour, and
+ * every highlighter stroke, fitted to whatever space it is given.
+ *
+ * Small in a tile, large in the viewer. Same component, same geometry.
+ */
+function PlanPreview({
+  levels, strokes, compact,
+}: {
+  levels: { points: { x: number; y: number }[]; closed: boolean; color: string; level: string }[];
+  strokes: { a: { x: number; y: number }; b: { x: number; y: number }; label: string; lf: number }[];
+  compact?: boolean;
+}) {
+  const points = [
+    ...levels.flatMap((row) => row.points),
+    ...strokes.flatMap((run) => [run.a, run.b]),
+  ];
+  if (points.length < 2) return null;
+
+  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = Math.max((maxX - minX), (maxY - minY)) * 0.08 || 8;
+  const box = `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
+  const span = Math.max(maxX - minX, maxY - minY) || 1;
+  const stroke = span / (compact ? 90 : 320);
+
+  return (
+    <svg viewBox={box} className="h-full w-full" preserveAspectRatio="xMidYMid meet">
+      {levels.map((row, i) => (
+        row.closed ? (
+          <polygon key={i} points={row.points.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill={row.color} fillOpacity={0.06} stroke={row.color} strokeWidth={stroke} />
+        ) : (
+          <polyline key={i} points={row.points.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill="none" stroke={row.color} strokeWidth={stroke} />
+        )
+      ))}
+      {strokes.map((run, i) => (
+        <g key={`s-${i}`}>
+          <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
+            stroke="#fbbf24" strokeWidth={stroke * 7} strokeLinecap="round" opacity={0.3} />
+          <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
+            stroke="#fbbf24" strokeWidth={stroke * 1.4} strokeLinecap="round" />
+        </g>
+      ))}
+    </svg>
+  );
+}
 
 function Panel({
   title, right, scan = true, children,
@@ -808,7 +906,7 @@ function Stage({
  * taking shape rather than a page with things missing.
  */
 function ViewBay({
-  label, ready, note, onOpen, onMake,
+  label, ready, note, onOpen, onMake, preview,
 }: {
   label: string;
   ready: boolean;
@@ -816,6 +914,8 @@ function ViewBay({
   onOpen: () => void;
   /** Where the work that makes this view is done. */
   onMake: () => void;
+  /** The drawing itself, when there is one to show. */
+  preview?: React.ReactNode;
 }) {
   /*
    * A view that is not ready still does something.
@@ -834,6 +934,12 @@ function ViewBay({
           : "border-dashed border-zinc-800 bg-transparent hover:border-zinc-600"
       }`}
     >
+      {/* The drawing fills the tile when there is one; the label sits under it. */}
+      {preview && (
+        <span className="pointer-events-none block h-full w-full flex-1 overflow-hidden px-1.5 pt-1.5">
+          {preview}
+        </span>
+      )}
       <span
         className={`font-mono text-[10px] font-medium uppercase tracking-[0.14em] ${
           ready ? "text-orange-300" : "text-zinc-700"
