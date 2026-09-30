@@ -196,6 +196,16 @@ function Tooltip({ text, children }: { text: string; children: React.ReactNode }
 }
 
 // -- Main Page ----------------------------------------------------------------
+/**
+ * The drawing cursor.
+ *
+ * The system crosshair is a thin black cross, which vanishes against line work
+ * on a white sheet - exactly where it is needed. This is the orange one Set
+ * Scaffold already uses, so an armed tool looks the same in both places.
+ */
+const KORBAN_CROSSHAIR =
+  `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg stroke='%23f97316' stroke-width='2'%3E%3Cline x1='12' y1='1' x2='12' y2='9'/%3E%3Cline x1='12' y1='15' x2='12' y2='23'/%3E%3Cline x1='1' y1='12' x2='9' y2='12'/%3E%3Cline x1='15' y1='12' x2='23' y2='12'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='1.5' fill='%23f97316'/%3E%3C/svg%3E") 12 12, crosshair`;
+
 export default function TakeoffWorkspaceAdvancedPage() {
   const [activeTab,      setActiveTab]      = useState<ActiveTab>("elevation");
   // Which bid depth is open. Higher depths build on lower ones - work
@@ -2018,7 +2028,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
              * that is armed has to look armed.
              */
             style={{
-              cursor: drawingArmed || isCapturing ? "crosshair" : "default",
+              cursor: drawingArmed || isCapturing ? KORBAN_CROSSHAIR : "default",
               ...(drawingArmed ? { userSelect: "none" as const } : {}),
             }}>
 
