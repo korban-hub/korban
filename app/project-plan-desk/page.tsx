@@ -50,10 +50,17 @@ const LEVEL_LABEL: Record<EstimateDepth, string> = {
   "korban-bid": "Korban Bid",
 };
 
-const LEVEL_ACCURACY: Record<EstimateDepth, string> = {
-  "quick-bid": "+/-15-25%",
-  "full-bid": "+/-8-12%",
-  "korban-bid": "+/-3-6%",
+/*
+ * What each tier is for, rather than an accuracy band.
+ *
+ * The percentages read like a promise nobody made, and Review dropped them
+ * already - this page kept showing them beside the bid level, which is the one
+ * place a customer might read them over an estimator's shoulder.
+ */
+const LEVEL_SERVES: Record<EstimateDepth, { serves: string; detail: string }> = {
+  "quick-bid": { serves: "Budget Number", detail: "Low Detail" },
+  "full-bid": { serves: "Most Bids", detail: "Good Coverage" },
+  "korban-bid": { serves: "Hard Bids", detail: "Detailed & Precise" },
 };
 
 // -----------------------------------------------------------------------------
@@ -261,16 +268,21 @@ export default function ProjectPlanDeskPage() {
           <>
             <div className="rounded-lg border border-zinc-800 bg-korban-raised px-3.5 py-1.5 text-right">
               <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">Bid level</p>
-              {/* Blank until the estimator chooses one in Takeoff. Showing a
-                  level before anything is measured claims an accuracy the job
-                  hasn't earned. */}
+              {/* Blank until real takeoff work backs it up. Naming a tier
+                  before anything is measured claims a depth the job has not
+                  reached. */}
               {levelChosen ? (
-                <p className="font-mono text-[12px] font-bold leading-tight text-zinc-200">
-                  {LEVEL_LABEL[depth]}
-                  <span className="ml-2 text-[10px] font-normal text-zinc-600">
-                    {LEVEL_ACCURACY[depth]}
-                  </span>
-                </p>
+                <>
+                  <p className="font-mono text-[12px] font-bold leading-tight text-zinc-200">
+                    {LEVEL_LABEL[depth]}
+                    <span className="ml-2 text-[10px] font-normal text-zinc-400">
+                      {LEVEL_SERVES[depth].serves}
+                    </span>
+                  </p>
+                  <p className="font-mono text-[9px] leading-tight text-amber-200/60">
+                    {LEVEL_SERVES[depth].detail}
+                  </p>
+                </>
               ) : (
                 <p className="font-mono text-[12px] font-bold leading-tight text-zinc-700">
                   Not set

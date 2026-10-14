@@ -1241,6 +1241,106 @@ function FrameConfigOptions({
 
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
+/*
+ * The drawing sheet.
+ *
+ * A takeoff that leaves the office is a drawing, and a drawing carries a title
+ * block - whose job, who drew it, at what scale. An estimator handing a GC a
+ * screenshot looks like an estimator guessing; the same layout on a sheet
+ * looks like a set of plans.
+ *
+ * Four sizes, chosen beside the Print button. The column down the right holds
+ * the mark, the company, the job, the numbers and the project data, and the
+ * trade names itself at the foot - that word changes when another trade is
+ * built on this.
+ */
+const SHEET_SIZES = {
+  /*
+   * Every sheet prints landscape - a building is wider than it is tall, and a
+   * column down the right only works across the long edge.
+   *
+   * The two large sizes give their dimensions the long way round rather than
+   * saying "landscape": CSS ignores the keyword once explicit dimensions are
+   * named, so "24in 36in landscape" would have printed portrait.
+   */
+  "letter": { label: '8\u00bd \u00d7 11', css: "letter landscape", colIn: 2.1 },
+  "tabloid": { label: '11 \u00d7 17', css: "tabloid landscape", colIn: 2.4 },
+  "arch-d": { label: '36 \u00d7 24', css: "36in 24in", colIn: 3.4 },
+  "arch-e": { label: '42 \u00d7 30', css: "42in 30in", colIn: 3.8 },
+} as const;
+type SheetSize = keyof typeof SHEET_SIZES;
+
+/** The column down the right of every sheet. */
+function SheetColumn({
+  company, projectName, address, customer, jobNumber, bidNumber, estimator,
+  scaleNote, data, trade, sheetTitle,
+}: {
+  company: string;
+  projectName: string;
+  address: string;
+  customer: string;
+  jobNumber: string;
+  bidNumber: string;
+  estimator: string;
+  scaleNote: string;
+  data: { label: string; value: string }[];
+  trade: string;
+  sheetTitle: string;
+}) {
+  return (
+    <div className="korban-tb">
+      {/* The maker's mark, on its own ground - Korban made the tool, the
+          company made the bid, and on a sheet going to a GC the estimator's
+          name is the one that should be loud. */}
+      <div className="korban-tb-mark">
+        <svg width="18" height="18" viewBox="0 0 44 44" aria-hidden>
+          <path d="M22 5 L40 38 L4 38 Z" fill="#111" opacity="0.55" />
+          <path d="M22 5 L40 38 L22 38 Z" fill="#c2410c" />
+        </svg>
+        <span>Korban</span>
+      </div>
+
+      <div className="korban-tb-company">
+        <p className="korban-tb-who">Company</p>
+        <p className="korban-tb-name">{company || "\u2014"}</p>
+      </div>
+
+      <div className="korban-tb-rule" />
+
+      <div className="korban-tb-job">
+        <p className="korban-tb-proj">{projectName || "Untitled project"}</p>
+        {address && <p className="korban-tb-addr">{address}</p>}
+        {customer && <p className="korban-tb-addr">{customer}</p>}
+      </div>
+
+      <div className="korban-tb-rule" />
+
+      <dl className="korban-tb-meta">
+        <dt>Job no.</dt><dd>{jobNumber || "\u2014"}</dd>
+        {bidNumber && <><dt>Bid no.</dt><dd>{bidNumber}</dd></>}
+        <dt>Drawn</dt><dd>{estimator || "\u2014"}</dd>
+        <dt>Date</dt><dd>{new Date().toLocaleDateString()}</dd>
+        <dt>Scale</dt><dd>{scaleNote}</dd>
+      </dl>
+
+      <div className="korban-tb-data">
+        <p className="korban-tb-cap">Project data</p>
+        <dl className="korban-tb-figs">
+          {data.map((row) => (
+            <Fragment key={row.label}>
+              <dt>{row.label}</dt><dd>{row.value}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </div>
+
+      <div className="korban-tb-trade">
+        <span><span className="korban-tb-accent">{trade}</span> {sheetTitle}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function SetScaffoldV2Inner() {
   const [scaffoldWidth,  setScaffoldWidth]  = useState<ScaffoldWidth>("3'");
   const [bayLength,      setBayLength]      = useState("10'");
@@ -1281,6 +1381,32 @@ export default function SetScaffoldV2Inner() {
   /** Off, a run goes exactly where it is drawn. On, it lines up. */
   const [snapAngle,      setSnapAngle]      = useState(true);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
+  /** Which paper the sheet prints on. Letter until someone says otherwise. */
+  const [sheetSize,      setSheetSize]      = useState<SheetSize>("letter");
+  /*
+   * What the sheets hold at print time.
+   *
+   * A drawing cannot be in two places at once, so the sheet carries a copy of
+   * the live SVG rather than the SVG itself - taken the moment Print is
+   * pressed, so it is exactly what was on screen. Markup, not a picture: it
+   * prints at the printer's resolution.
+   */
+  const planSheetRef = useRef<HTMLDivElement>(null);
+  const sectionSheetRef = useRef<HTMLDivElement>(null);
+
+  function printSheet() {
+    const copyInto = (box: HTMLDivElement | null, source: Element | null) => {
+      if (!box) return;
+      box.replaceChildren();
+      if (source) box.appendChild(source.cloneNode(true));
+    };
+    copyInto(
+      planSheetRef.current,
+      document.querySelector(activeMainTab === "section" ? ".korban-section-print" : ".korban-plan-print"),
+    );
+    copyInto(sectionSheetRef.current, document.querySelector(".korban-section-print"));
+    window.print();
+  }
   const [sectionExpanded, setSectionExpanded] = useState(false);
   // Estimate depth gates which views are available here. Quick Bid shows
   // counts and frame config only — no layout, no 3D, no sections.
@@ -2081,6 +2207,21 @@ export default function SetScaffoldV2Inner() {
    * or the load list quietly describes a building with one fewer run on it.
    */
   /*
+   * The figures in the title block.
+   *
+   * The same counts the tiles and the load list read, so a sheet handed to a
+   * foreman cannot disagree with the sheet handed to the yard.
+   */
+  const sheetFigures = [
+    { label: "Coverage", value: `${Math.round(elevation?.linearFeet ?? 0).toLocaleString()} LF` },
+    { label: "Wall height", value: (elevation?.wallHeight ?? 0) > 0 ? `${(elevation?.wallHeight ?? 0).toFixed(1)}'` : "\u2014" },
+    { label: "Frames", value: totals.frames.toLocaleString() },
+    { label: "Planks", value: totals.planks.toLocaleString() },
+    { label: "Bays", value: totals.bays.toLocaleString() },
+    { label: "Legs", value: totals.legs.toLocaleString() },
+  ];
+
+  /*
    * What the ledger watches.
    *
    * The drawn runs were missing from this, and on a Full Bid every leg is a
@@ -2846,7 +2987,7 @@ export default function SetScaffoldV2Inner() {
   );
 
   return (
-    <main className="h-screen flex flex-col overflow-hidden bg-[#080604] text-white">
+    <main className="korban-root h-screen flex flex-col overflow-hidden bg-[#080604] text-white">
       <KorbanHeader
         title="Set Scaffold"
         subtitle="Overlay · 3D Model · Section View"
@@ -2876,93 +3017,224 @@ export default function SetScaffoldV2Inner() {
          * a guess; the same layout in a title block looks like a set of plans.
          */
         @media print {
-          @page { size: letter landscape; margin: 0.35in; }
-          body { background: #fff !important; }
-          body * { visibility: hidden !important; }
-
-          .korban-sheet, .korban-sheet * { visibility: visible !important; }
-          .korban-sheet {
-            display: block !important;
-            position: absolute; left: 0; top: 0;
-            width: 100%; height: 100%;
-            background: #fff; color: #111;
-          }
-
-          .korban-plan-print, .korban-plan-print * { visibility: visible !important; }
-          .korban-plan-print {
-            position: absolute !important;
-            left: 0.2in; top: 0.2in;
-            width: calc(100% - 0.4in); height: calc(100% - 2.1in);
+          @page { size: ${SHEET_SIZES[sheetSize].css}; margin: 0.3in; }
+          html, body {
             background: #fff !important;
+            margin: 0 !important; padding: 0 !important;
+            width: auto !important; height: auto !important;
             overflow: visible !important;
           }
-          .korban-plan-print svg { width: 100% !important; height: 100% !important; }
-          /* Ink on paper, not glow on black. */
-          .korban-plan-print line[stroke="#f8fafc"] { stroke: #111 !important; }
-          .korban-plan-print text { fill: #111 !important; }
-          .korban-no-print { display: none !important; }
+          body * { visibility: hidden !important; }
+          /*
+           * The page itself gets out of the way.
+           *
+           * The workspace is a full-height column that hides its overflow,
+           * which on paper would crop a sheet to the size of a screen. In
+           * print it becomes an ordinary block that grows with its contents,
+           * and the sheets inside it position against the page.
+           */
+          .korban-root {
+            position: static !important;
+            display: block !important;
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            background: #fff !important;
+          }
+          .korban-sheet-draw { overflow: hidden; }
 
-          .korban-titleblock {
-            position: absolute; right: 0.2in; bottom: 0.2in;
-            width: 4.4in; border: 1.5px solid #111;
-            font-family: ui-monospace, monospace; font-size: 7.5pt; line-height: 1.35;
+          /* Only the sheets, and everything inside them. */
+          .korban-sheet, .korban-sheet * { visibility: visible !important; }
+          /*
+           * The sheet fills the paper.
+           *
+           * It used to sit in the middle of the page at the size the screen
+           * layout gave it, with white all round - a drawing floating on a
+           * sheet rather than a drawing sheet. Pinned to the page edges, the
+           * drawing gets every inch the paper has.
+           */
+          /*
+           * The sheet fills the paper.
+           *
+           * It used to sit in the middle of the page at whatever size the
+           * screen layout gave it, with white all round - a drawing floating
+           * on a sheet rather than a drawing sheet. The sheets are lifted out
+           * of the page's layout and laid one per page, so the drawing gets
+           * every inch the paper has.
+           */
+          .korban-sheet {
+            display: grid !important;
+            grid-template-columns: minmax(0,1fr) ${SHEET_SIZES[sheetSize].colIn}in;
+            gap: 0.14in;
+            position: absolute !important;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            margin: 0;
+            padding: 0.12in;
+            background: #fff;
+            color: #111;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           }
+          /* One per page, stacked down the printed document. */
+          .korban-sheet:nth-of-type(1) { top: 0; }
+          .korban-sheet:nth-of-type(2) { top: 100vh; }
+
+          /* The interface corner brackets, at the corners of the paper. */
+          .korban-sheet::before, .korban-sheet::after {
+            content: ""; position: absolute; width: 0.2in; height: 0.2in;
+          }
+          .korban-sheet::before {
+            left: 0.04in; top: 0.04in;
+            border-left: 1.6px solid #c2410c; border-top: 1.6px solid #c2410c;
+          }
+          .korban-sheet::after {
+            right: 0.04in; bottom: 0.04in;
+            border-right: 1.6px solid #c2410c; border-bottom: 1.6px solid #c2410c;
+          }
+
+          /*
+           * The drawing itself.
+           *
+           * It is already vector on screen, so it prints at the printer's
+           * resolution rather than as a picture of a screen. What was glow on
+           * black becomes ink on paper.
+           */
+          .korban-sheet-draw {
+            border: 1px solid #111;
+            display: flex; align-items: center; justify-content: center;
+            overflow: hidden; background: #fff; min-height: 0;
+          }
+          .korban-sheet-draw svg { width: 100% !important; height: 100% !important; }
+          .korban-sheet-draw [stroke="#f8fafc"],
+          .korban-sheet-draw [stroke="#fafafa"],
+          .korban-sheet-draw [stroke="#e4e4e7"],
+          .korban-sheet-draw [stroke="#d4d4d8"],
+          .korban-sheet-draw [stroke="#a1a1aa"] { stroke: #111 !important; }
+          .korban-sheet-draw [fill="#fafafa"],
+          .korban-sheet-draw [fill="#e4e4e7"],
+          .korban-sheet-draw [fill="#d4d4d8"],
+          .korban-sheet-draw [fill="#a1a1aa"] { fill: #111 !important; }
+          .korban-sheet-draw text { fill: #111 !important; }
+
+          /* The column. */
+          .korban-tb {
+            border: 1px solid #111;
+            display: flex; flex-direction: column; gap: 0.11in;
+            padding: 0.11in 0.09in 0.08in;
+            min-height: 0;
+          }
+          .korban-tb-rule { border-top: 1px solid #111; }
           .korban-tb-mark {
-            display: flex; align-items: center; gap: 6px;
-            border-bottom: 1px solid #111; padding: 4px 6px;
-            font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            background: #f2f2f2; border-bottom: 1px solid #111;
+            margin: -0.11in -0.09in 0; padding: 5px 8px;
           }
-          .korban-titleblock dl {
-            display: grid; grid-template-columns: 4.4em 1fr;
-            margin: 0; padding: 5px 6px; gap: 1px 8px;
+          .korban-tb-mark svg { opacity: 0.55; }
+          .korban-tb-mark span {
+            font-size: 8.5pt; font-weight: 700; letter-spacing: 0.22em;
+            text-transform: uppercase; color: #c2410c; opacity: 0.75;
           }
-          .korban-titleblock dt { color: #555; text-transform: uppercase; font-size: 6.5pt; }
-          .korban-titleblock dd { margin: 0; font-weight: 600; }
-          .korban-tb-sheet {
-            display: flex; align-items: center; justify-content: space-between;
-            border-top: 1px solid #111; padding: 4px 6px;
-            text-transform: uppercase; letter-spacing: 0.1em;
+          .korban-tb-company { text-align: center; }
+          .korban-tb-who {
+            margin: 0; font-size: 6pt; letter-spacing: 0.18em;
+            text-transform: uppercase; color: #6b6b6b;
           }
-          .korban-tb-sheet strong { font-size: 13pt; }
+          .korban-tb-name {
+            margin: 3px 0 0; font-size: 9.5pt; font-weight: 700;
+            letter-spacing: 0.14em; text-transform: uppercase;
+          }
+          .korban-tb-job { text-align: center; }
+          .korban-tb-proj {
+            margin: 0; font-family: var(--font-title), ui-sans-serif, system-ui;
+            font-size: 15.5pt; font-weight: 700; line-height: 1.02;
+            text-transform: uppercase;
+          }
+          .korban-tb-addr { margin: 3px 0 0; font-size: 7pt; color: #6b6b6b; line-height: 1.4; }
+          .korban-tb-meta {
+            display: grid; grid-template-columns: auto 1fr; gap: 3px 8px;
+            margin: 0; font-size: 7pt; line-height: 1.4;
+          }
+          .korban-tb-meta dt {
+            color: #6b6b6b; text-transform: uppercase; font-size: 6pt; align-self: center;
+          }
+          .korban-tb-meta dd { margin: 0; font-weight: 600; text-align: right; }
+          /* The data sits at the foot, so there is no dead space under it at
+             any sheet size. */
+          .korban-tb-data { margin-top: auto; }
+          .korban-tb-cap {
+            margin: 0 0 7px; font-size: 6pt; letter-spacing: 0.16em;
+            text-transform: uppercase; color: #6b6b6b;
+          }
+          .korban-tb-figs {
+            display: grid; grid-template-columns: 1fr auto; gap: 4px 8px;
+            align-items: baseline; margin: 0;
+          }
+          .korban-tb-figs dt {
+            font-size: 6.5pt; letter-spacing: 0.08em; text-transform: uppercase; color: #6b6b6b;
+          }
+          .korban-tb-figs dd { margin: 0; font-size: 9.5pt; font-weight: 700; text-align: right; }
+          .korban-tb-trade {
+            border-top: 1px solid #111; padding-top: 7px; text-align: center;
+          }
+          .korban-tb-trade span {
+            font-size: 7.5pt; letter-spacing: 0.16em; text-transform: uppercase; font-weight: 700;
+          }
+          .korban-tb-accent { color: #c2410c; }
+
+          .korban-no-print { display: none !important; }
         }
       `}</style>
 
       {/*
-        * The printed sheet.
+        * The sheets.
         *
-        * A takeoff that leaves the office is a drawing, and a drawing carries a
-        * title block - who drew it, for whom, at what scale, on what date. An
-        * estimator handing a GC a screenshot looks like an estimator guessing;
-        * the same layout in a title block looks like a set of plans.
+        * Hidden on screen, laid out on paper by the rules above. The drawing is
+        * whatever view is on screen - you choose what you are looking at, then
+        * print it - and a Korban Bid with a section drawn prints both, the plan
+        * first and the section behind it.
         *
-        * Hidden on screen, laid out on paper by the print rules below.
+        * These hold the live drawing rather than a copy of it, so what prints
+        * is exactly what was on screen, at the printer's resolution.
         */}
       <div className="korban-sheet hidden">
-        <div className="korban-sheet-body" />
-        <div className="korban-titleblock">
-          <div className="korban-tb-mark">
-            <svg width="22" height="22" viewBox="0 0 44 44" aria-hidden>
-              <path d="M22 4 L40 38 L4 38 Z" fill="#111" />
-              <path d="M22 4 L40 38 L22 38 Z" fill="#555" />
-            </svg>
-            <span>{sheetInfo.company || "KORBAN"}</span>
-          </div>
-          <dl>
-            <dt>Project</dt><dd>{projectName || "-"}</dd>
-            <dt>Address</dt><dd>{sheetInfo.address || "-"}</dd>
-            <dt>Customer</dt><dd>{sheetInfo.customer || "-"}</dd>
-            <dt>Job no.</dt><dd>{sheetInfo.jobNumber || "-"}</dd>
-            <dt>Drawn by</dt><dd>{sheetInfo.estimator || "-"}</dd>
-            <dt>Date</dt><dd>{new Date().toLocaleDateString()}</dd>
-            <dt>Scale</dt><dd>{scaleOk ? "As noted" : "Not to scale"}</dd>
-            <dt>Frame</dt><dd>{scaffoldWidthFt === 3.5 ? `3'-6"` : `${scaffoldWidthFt}'`} wide, {bayLengthFt}&apos; bays</dd>
-          </dl>
-          <div className="korban-tb-sheet">
-            <span>Scaffold Layout</span>
-            <strong>S-1</strong>
-          </div>
-        </div>
+        <div ref={planSheetRef} className="korban-sheet-draw" />
+        <SheetColumn
+          company={sheetInfo.company}
+          projectName={projectName}
+          address={sheetInfo.address}
+          customer={sheetInfo.customer}
+          jobNumber={sheetInfo.jobNumber}
+          bidNumber=""
+          estimator={sheetInfo.estimator}
+          scaleNote={scaleOk ? "As noted" : "Not to scale"}
+          data={sheetFigures}
+          trade="Scaffold"
+          sheetTitle={activeMainTab === "section" ? "Section" : "Layout"}
+        />
       </div>
+
+      {/* A Korban Bid that has a section carries it on its own sheet, behind
+          the plan - the two answer different questions and neither reads well
+          crowded onto one page. */}
+      {activeMainTab !== "section" && tier.sectionView && (elevation?.sectionViews?.length ?? 0) > 0 && (
+        <div className="korban-sheet hidden">
+          <div ref={sectionSheetRef} className="korban-sheet-draw" />
+          <SheetColumn
+            company={sheetInfo.company}
+            projectName={projectName}
+            address={sheetInfo.address}
+            customer={sheetInfo.customer}
+            jobNumber={sheetInfo.jobNumber}
+            bidNumber=""
+            estimator={sheetInfo.estimator}
+            scaleNote={scaleOk ? "As noted" : "Not to scale"}
+            data={sheetFigures}
+            trade="Scaffold"
+            sheetTitle="Section"
+          />
+        </div>
+      )}
 
       {/* Where the scaffold stands relative to the trace, and what Korban
           makes of the job as it is. Both sit above the workspace because both
@@ -3198,11 +3470,7 @@ export default function SetScaffoldV2Inner() {
                     {snapAngle ? "Snap on" : "Snap off"}
                   </button>
                 )}
-                <button onClick={() => window.print()}
-                  title="Print the layout as a drawing sheet with a title block"
-                  className="rounded-lg border border-zinc-700 px-2 py-1 text-[9px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300">
-                  Print
-                </button>
+
                 <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureFrom(null); setMeasureTo(null); }}
                   disabled={!scaleOk}
                   title={scaleOk ? "Measure between two points" : "No scale on this elevation"}
@@ -3219,6 +3487,37 @@ export default function SetScaffoldV2Inner() {
                   <span className="text-[9px] font-mono text-zinc-600 w-9 text-center">{Math.round(viewerZoom * 100)}%</span>
                   <button onClick={() => setViewerZoom(z => Math.min(4, z + 0.15))} className="rounded border border-zinc-800 w-6 h-6 text-zinc-400 hover:text-white text-xs font-bold">+</button>
                   <button onClick={() => { setViewerZoom(1); setViewerPan({ dx: 0, dy: 0 }); }} className="rounded border border-zinc-800 px-2 h-6 text-[9px] text-zinc-500 hover:text-white">Fit</button>
+                </div>
+
+                {/*
+                  * The drawing sheet, set apart.
+                  *
+                  * These two put ink on paper while everything beside them
+                  * changes what is on screen, so they carry a faint light of
+                  * their own - enough to read as a different kind of tool
+                  * without becoming another colour in the bar.
+                  */}
+                <div
+                  className="korban-no-print ml-1 flex items-center gap-1 rounded-lg border border-zinc-700/70 px-1.5 py-1"
+                  style={{ background: "rgba(255,255,255,0.055)", boxShadow: "0 0 10px rgba(255,255,255,0.07)" }}
+                >
+                  <select
+                    value={sheetSize}
+                    onChange={(e) => setSheetSize(e.target.value as SheetSize)}
+                    title="Paper size. Every size prints landscape."
+                    className="rounded border border-zinc-700 bg-black/60 px-1 py-0.5 font-mono text-[9px] text-zinc-300 outline-none hover:border-zinc-500 focus:border-orange-500/50"
+                  >
+                    {(Object.keys(SHEET_SIZES) as SheetSize[]).map((key) => (
+                      <option key={key} value={key}>{SHEET_SIZES[key].label}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={printSheet}
+                    title="Print what is on screen as a drawing sheet, with the title block and project data"
+                    className="rounded border border-zinc-600 bg-white/5 px-2 py-0.5 text-[9px] font-bold text-zinc-200 transition hover:border-white/50 hover:bg-white/10"
+                  >
+                    Print
+                  </button>
                 </div>
               </div>
             </div>
@@ -3757,6 +4056,8 @@ export default function SetScaffoldV2Inner() {
 
             <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
               {(elevation?.sectionViews?.length ?? 0) > 0 ? (
+                /* korban-section-print is what the sheet copies at print time. */
+                <div className="korban-section-print h-full w-full">
                 <SectionDrawing
                   section={(elevation?.sectionViews ?? []).find(
                     sv => sv.id === (activeSectionId ?? elevation?.sectionViews?.[0]?.id),
@@ -3769,6 +4070,7 @@ export default function SetScaffoldV2Inner() {
                   onSideChange={handleSectionSide}
                   onSummary={setSectionSummary}
                 />
+                </div>
               ) : (
               <SectionViewPanel
                 wallOutline={sectionWallOutline}

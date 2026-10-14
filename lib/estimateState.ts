@@ -193,13 +193,27 @@ export const PRODUCTION_TYPES: {
   { key: "competitive", title: "Competitive", days: 4, note: "Schedule, access and repetition support a tighter number." },
 ];
 
+/*
+ * What each tier is for, and what it is built on.
+ *
+ * The accuracy bands went because they read like a promise nobody made - an
+ * estimator knows what a budget number is worth without being given a range
+ * for it, and a customer reading one over a shoulder is given a figure the
+ * company never offered.
+ *
+ * The "feeds" line for Full Bid also described tracing a perimeter, which is a
+ * Korban Bid. Full Bid measures with the highlighter.
+ */
 export const BID_LEVELS: {
   key: BidLevel;
   title: string;
-  accuracy: string;
+  /** What this tier is for, in two words. */
+  serves: string;
+  /** How closely it looks. */
+  detail: string;
   feeds: string;
 }[] = [
-  { key: "quick-bid", title: "Quick Bid", accuracy: "+/-15-25%", feeds: "Elevation lengths entered by hand." },
-  { key: "full-bid", title: "Full Bid", accuracy: "+/-8-12%", feeds: "Traced perimeter, one grip per elevation." },
-  { key: "korban-bid", title: "Korban Bid", accuracy: "+/-3-6%", feeds: "Traced perimeter, multiple areas, section views." },
+  { key: "quick-bid",  title: "Quick Bid",  serves: "Budget Number", detail: "Low Detail",         feeds: "Elevation lengths entered by hand." },
+  { key: "full-bid",   title: "Full Bid",   serves: "Most Bids",     detail: "Good Coverage",      feeds: "Highlighted runs, each gripped for height." },
+  { key: "korban-bid", title: "Korban Bid", serves: "Hard Bids",     detail: "Detailed & Precise", feeds: "Traced perimeter, multiple areas, section views." },
 ];

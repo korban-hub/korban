@@ -1110,10 +1110,19 @@ function LevelSelector({
           );
         })}
       </div>
+      {/*
+        * What the tier serves, not a percentage.
+        *
+        * This read "+/-8-12% expected accuracy" - a number nobody committed to,
+        * on the one page a customer is most likely to be looking at over an
+        * estimator's shoulder.
+        */}
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[13px] font-bold text-zinc-200">{selectedLevel.accuracy}</span>
-        <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
-          expected accuracy
+        <span className="font-mono text-[13px] font-bold text-zinc-200">
+          {selectedLevel.serves}
+        </span>
+        <span className="font-mono text-[10px] text-amber-200/70">
+          {selectedLevel.detail}
         </span>
         <span className="text-zinc-800">·</span>
         <span className="text-[10px] text-zinc-600">{selectedLevel.feeds}</span>

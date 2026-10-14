@@ -301,13 +301,8 @@ export type TierSnapshot = {
   courtyards: StoredCourtyard[];
   highlights: StoredHighlight[];
   includeCourtyards: boolean;
-  /**
-   * What the other tiers measured, kept so switching back finds the work where
-   * it was left. The tier on screen lives in the fields above.
-   */
-  tierSnapshots: Partial<Record<EstimateDepth, TierSnapshot>>;
-  /** Which tier the fields above belong to. */
-  activeTier: EstimateDepth;
+  /** Walls this tier set interior - see ProjectElevation.interiorWalls. */
+  interiorWalls: number[];
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -402,6 +397,21 @@ export type ProjectElevation = {
   interiorWalls: number[];
   /** Whether courtyard quantities roll into project totals. */
   includeCourtyards: boolean;
+  /*
+   * The tiers, declared where they live.
+   *
+   * These two were declared on TierSnapshot and set on the elevation, which
+   * ran correctly only because switchElevationTier writes them explicitly -
+   * three type errors waiting for the day type checking goes back on, and a
+   * misleading pair for anyone reading either type.
+   *
+   * A snapshot is what one tier measured. The elevation is what is on screen,
+   * so it is the elevation that knows which tier that is and holds the others.
+   */
+  /** What the other tiers measured, so switching back finds the work. */
+  tierSnapshots: Partial<Record<EstimateDepth, TierSnapshot>>;
+  /** Which tier the fields above belong to. */
+  activeTier: EstimateDepth;
 };
 
 export type ProjectLevel = {
