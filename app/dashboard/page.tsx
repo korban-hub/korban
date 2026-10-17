@@ -915,8 +915,13 @@ export default function DashboardPage() {
                             "Quick"
                           ) : project.estimateDepth === "full-bid" ? (
                             "Full"
-                          ) : (
+                          ) : project.estimateDepth === "korban-bid" ? (
                             "Korban"
+                          ) : (
+                            /* No tier on record. This fell through to
+                               "Korban", so a job whose tier had been cleared
+                               was listed here as the deepest of the three. */
+                            <span className="text-zinc-700">-</span>
                           )}
                         </span>
                         <ProgressPill progress={progress} />

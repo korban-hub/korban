@@ -23,6 +23,7 @@ import {
   listDispatchedLoads,
   getActiveElevation,
   getActiveProject,
+  clearEstimateDepth,
   getEstimateDepth,
   updateActiveProject,
   computeElevationOnlyTotals,
@@ -184,8 +185,16 @@ export default function ProjectPlanDeskPage() {
   const hasPlanGeometry = tracedLevels > 0 || swiped.length > 0;
   const hasSection = (elevation?.sectionView?.wallOutline?.length ?? 0) >= 2;
   const hasPricing = Boolean(derived && derived.rentalsRevenue > 0);
-  // A level only counts as chosen once real takeoff work backs it up.
-  const levelChosen = hasScale || hasGrips || tracedLevels > 0;
+  /*
+   * A level only counts as chosen once real takeoff work backs it up.
+   *
+   * hasScale used to count, and it is the one thing a reset deliberately
+   * keeps - so a job cleared back to blank still announced a tier it had no
+   * work behind. A locked scale says the plan has been measured against a
+   * ruler; it says nothing about how the job is being bid.
+   */
+  const levelChosen =
+    Boolean(project.estimateDepth) && (hasGrips || hasPlanGeometry || hasPricing);
 
   /*
    * What has already left the yard on this job, newest first.
@@ -252,6 +261,29 @@ export default function ProjectPlanDeskPage() {
   const filled = details.filter((row) => String(project[row.key] ?? "").trim() !== "").length;
   const complete = filled === details.length;
 
+  /*
+   * Empty the job details, leaving the takeoff alone.
+   *
+   * Two buttons on this page and they undo different halves of a job: this
+   * one forgets who the job is for, reset below forgets what was measured.
+   * Built from the same `details` list the tile renders, so a field added to
+   * the tile is cleared by this without anyone remembering to come back here.
+   *
+   * Union status is not in it - it falls back to the Backend default rather
+   * than to blank, so there is no empty state to put it in.
+   */
+  function clearJobDetails() {
+    const sure = window.confirm(
+      "Clear the job details? Project name, address, customer, contacts, estimator, bid number and due date all go blank. The takeoff and the dispatched loads stay."
+    );
+    if (!sure) return;
+    const blanked: Partial<ProjectRecord> = {};
+    for (const row of details) blanked[row.key] = "" as never;
+    blanked.onSiteContactName = "";
+    blanked.onSiteContactPhone = "";
+    setProject(updateActiveProject(blanked));
+  }
+
   return (
     <main className="min-h-screen bg-korban-base text-white">
       <KorbanMotionStyles />
@@ -273,14 +305,12 @@ export default function ProjectPlanDeskPage() {
                   reached. */}
               {levelChosen ? (
                 <>
+                  {/* The tier first, on its own. What it is for reads under it. */}
                   <p className="font-mono text-[12px] font-bold leading-tight text-zinc-200">
                     {LEVEL_LABEL[depth]}
-                    <span className="ml-2 text-[10px] font-normal text-zinc-400">
-                      {LEVEL_SERVES[depth].serves}
-                    </span>
                   </p>
-                  <p className="font-mono text-[9px] leading-tight text-amber-200/60">
-                    {LEVEL_SERVES[depth].detail}
+                  <p className="font-mono text-[9px] leading-tight text-amber-200/70">
+                    {LEVEL_SERVES[depth].serves}: {LEVEL_SERVES[depth].detail}
                   </p>
                 </>
               ) : (
@@ -318,13 +348,22 @@ export default function ProjectPlanDeskPage() {
           <Panel
             title="Job details"
             right={
-              <span
-                className={`font-mono text-[9px] uppercase tracking-[0.14em] ${
-                  complete ? "text-emerald-400/70" : "text-zinc-600"
-                }`}
-              >
-                {complete ? "complete" : `${filled} of ${details.length}`}
-              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`font-mono text-[9px] uppercase tracking-[0.14em] ${
+                    complete ? "text-emerald-400/70" : "text-zinc-600"
+                  }`}
+                >
+                  {complete ? "complete" : `${filled} of ${details.length}`}
+                </span>
+                <button
+                  onClick={clearJobDetails}
+                  disabled={filled === 0}
+                  className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-red-500/50 hover:text-red-400 disabled:cursor-default disabled:border-zinc-900 disabled:text-zinc-700 disabled:hover:border-zinc-900 disabled:hover:text-zinc-700"
+                >
+                  clear
+                </button>
+              </div>
             }
           >
             {!complete && (
@@ -422,6 +461,12 @@ export default function ProjectPlanDeskPage() {
                   saveActiveElevation(clearElevationTakeoff(getActiveElevation()));
                   // The price came from work that no longer exists.
                   clearEstimateState();
+                  /*
+                   * And so did the tier. Quick, Full and Korban differ by how
+                   * the work was measured, so with the measurements gone there
+                   * is nothing left to say which of the three this was.
+                   */
+                  clearEstimateDepth();
                   window.location.reload();
                 }}
                 className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-red-500/50 hover:text-red-400"
@@ -490,51 +535,95 @@ export default function ProjectPlanDeskPage() {
             <Panel
               title="Where this bid stands"
               right={
-                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
-                  {LEVEL_LABEL[depth]}
+                /* The same rule as the header badge. This read the stored
+                   depth outright, so a cleared job still said "Full Bid"
+                   here while the badge above it said Not set. */
+                <span
+                  className={`font-mono text-[9px] uppercase tracking-[0.14em] ${
+                    levelChosen ? "text-zinc-600" : "text-zinc-700"
+                  }`}
+                >
+                  {levelChosen ? LEVEL_LABEL[depth] : "Not set"}
                 </span>
               }
               scan={false}
             >
               <div className="grid gap-1">
-                <Stage
-                  done={hasScale}
-                  label="Scale set"
-                  detail={hasScale ? "Drawing measured" : "Nothing measured until scale is locked"}
-                  onGo={() => router.push("/takeoff-workspace-advanced")}
-                />
-                <Stage
-                  done={hasGrips}
-                  label="Elevations gripped"
-                  detail={
-                    elevationTotals.areaCount > 0
-                      ? `${elevationTotals.areaCount} area${elevationTotals.areaCount === 1 ? "" : "s"} - ${elevationTotals.linearFeet.toLocaleString()} LF`
-                      : strokesWithHeight > 0
-                        ? `${strokesWithHeight} of ${swiped.length} run${swiped.length === 1 ? "" : "s"} with a height`
-                        : "No coverage recorded"
-                  }
-                  onGo={() => router.push("/takeoff-workspace-advanced")}
-                />
-                <Stage
-                  done={hasPlanGeometry}
-                  label={swiped.length > 0 ? "Coverage highlighted" : "Floor plan traced"}
-                  detail={
-                    tracedLevels > 0
-                      ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced`
-                      : swiped.length > 0
-                        ? `${swiped.length} run${swiped.length === 1 ? "" : "s"} - ${Math.round(strokeLinearFeet).toLocaleString()} LF`
-                        : "Full Bid and above"
-                  }
-                  optional={depth === "quick-bid"}
-                  onGo={() => router.push("/takeoff-workspace-advanced")}
-                />
-                <Stage
-                  done={hasSection}
-                  label="Section drawn"
-                  detail={hasSection ? "Wall profile captured" : "Korban Bid only"}
-                  optional={depth !== "korban-bid"}
-                  onGo={() => router.push("/set-scaffold-v2")}
-                />
+                {/*
+                  * A Quick Bid has its own two steps.
+                  *
+                  * Setting a scale, gripping elevations, tracing a plan and
+                  * cutting a section are all things done TO a drawing. A Quick
+                  * Bid is typed, and Korban draws the outline from the lengths
+                  * - so every one of them ticked itself the moment the sides
+                  * were entered, reporting work nobody did. On the one page
+                  * whose job is saying how far along a bid is, that is worse
+                  * than useless.
+                  *
+                  * So the tier gets the step it really has: the sides are in,
+                  * or they are not.
+                  */}
+                {depth === "quick-bid" && (
+                  <Stage
+                    done={hasGrips}
+                    label="Dimensions entered"
+                    detail={
+                      elevationTotals.areaCount > 0
+                        ? `${elevationTotals.areaCount} side${elevationTotals.areaCount === 1 ? "" : "s"} - ${elevationTotals.linearFeet.toLocaleString()} LF at up to ${Math.round(elevation?.wallHeight ?? 0)}'`
+                        : "Length and height, side by side"
+                    }
+                    onGo={() => router.push("/takeoff-workspace-advanced")}
+                  />
+                )}
+                {depth !== "quick-bid" && (
+                  <Stage
+                    done={hasScale}
+                    label="Scale set"
+                    detail={hasScale ? "Drawing measured" : "Nothing measured until scale is locked"}
+                    onGo={() => router.push("/takeoff-workspace-advanced")}
+                  />
+                )}
+                {depth !== "quick-bid" && (
+                  <Stage
+                    done={hasGrips}
+                    label="Elevations gripped"
+                    detail={
+                      elevationTotals.areaCount > 0
+                        ? `${elevationTotals.areaCount} area${elevationTotals.areaCount === 1 ? "" : "s"} - ${elevationTotals.linearFeet.toLocaleString()} LF`
+                        : strokesWithHeight > 0
+                          ? `${strokesWithHeight} of ${swiped.length} run${swiped.length === 1 ? "" : "s"} with a height`
+                          : "No coverage recorded"
+                    }
+                    onGo={() => router.push("/takeoff-workspace-advanced")}
+                  />
+                )}
+                {depth !== "quick-bid" && (
+                  <Stage
+                    done={hasPlanGeometry}
+                    label={swiped.length > 0 ? "Coverage highlighted" : "Floor plan traced"}
+                    detail={
+                      tracedLevels > 0
+                        ? `${tracedLevels} level${tracedLevels === 1 ? "" : "s"} traced`
+                        : swiped.length > 0
+                          ? `${swiped.length} run${swiped.length === 1 ? "" : "s"} - ${Math.round(strokeLinearFeet).toLocaleString()} LF`
+                          : "Full Bid and above"
+                    }
+                    onGo={() => router.push("/takeoff-workspace-advanced")}
+                  />
+                )}
+                {/* Cutting a section needs a wall to cut through. Hidden
+                    rather than dimmed on a typed job, for the same reason as
+                    the rest; still dimmed on a Full Bid, where the plans are
+                    there and it is a genuine choice not to. */}
+                {depth !== "quick-bid" && (
+                  <Stage
+                    done={hasSection}
+                    label="Section drawn"
+                    detail={hasSection ? "Wall profile captured" : "Korban Bid only"}
+                    optional={depth !== "korban-bid"}
+                    onGo={() => router.push("/set-scaffold-v2")}
+                  />
+                )}
                 <Stage
                   done={hasPricing}
                   label="Priced"

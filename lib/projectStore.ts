@@ -312,7 +312,19 @@ export const TIER_CAPABILITIES: Record<EstimateDepth, {
   model3d: boolean;
   sectionView: boolean;
 }> = {
-  "quick-bid":  { overlayFrom: "none",       materialList: false, model3d: false, sectionView: false },
+  /*
+   * Quick Bid draws too.
+   *
+   * "none" meant Set Scaffold never even looked for an outline at this tier,
+   * so a job typed side by side arrived at the layout with nothing to lay out
+   * - counts on the left, blank canvas on the right. Four lengths describe a
+   * rectangle, and the form now writes that rectangle as a real outline, so
+   * the tier reads it the same way a traced one is read.
+   *
+   * 3D and the section view stay off. Those need a building measured off a
+   * drawing, not four numbers, and Korban Bid is where they belong.
+   */
+  "quick-bid":  { overlayFrom: "traced",     materialList: false, model3d: false, sectionView: false },
   "full-bid":   { overlayFrom: "highlights", materialList: true,  model3d: false, sectionView: false },
   "korban-bid": { overlayFrom: "traced",     materialList: true,  model3d: true,  sectionView: true  },
 };
@@ -397,6 +409,15 @@ export type ProjectElevation = {
   interiorWalls: number[];
   /** Whether courtyard quantities roll into project totals. */
   includeCourtyards: boolean;
+  /**
+   * The trades that will work off this scaffold.
+   *
+   * A property of the job rather than of how it was measured, so it sits on
+   * the elevation and survives a tier switch: the mason is still the mason
+   * whether the job was typed, highlighted or traced. Several at once is
+   * normal - the scaffold gets built to the most demanding of them.
+   */
+  finishes?: string[];
   /*
    * The tiers, declared where they live.
    *
@@ -477,10 +498,17 @@ export type ProjectRecord = {
   bidStatus: BidStatus;
   updatedAt: string;
   schemaVersion: number;
-  /** Estimate depth — see EstimateDepth. Defaults to korban-bid for
-   *  projects created before depth tiers existed, so nothing that was
-   *  already accessible becomes hidden on upgrade. */
-  estimateDepth: EstimateDepth;
+  /**
+   * Estimate depth - see EstimateDepth.
+   *
+   * Optional, because "no tier chosen" is a real state and there was no way
+   * to say it. A reset clears everything the tier was decided from, so the
+   * tier itself has to go too - otherwise the job still claims to be a Full
+   * Bid with nothing measured behind it. Absent reads as korban-bid through
+   * getEstimateDepth(), so every consumer keeps a usable tier; only the
+   * question "did anyone actually choose?" can now be answered honestly.
+   */
+  estimateDepth?: EstimateDepth;
   takeoff: {
     levels: ProjectLevel[];
   };
@@ -1071,6 +1099,7 @@ function createEmptyElevation(): ProjectElevation {
     highlights: [],
     interiorWalls: [],
     includeCourtyards: true,
+    finishes: [],
     tierSnapshots: {},
     activeTier: "korban-bid",
   };
@@ -1115,6 +1144,7 @@ function createDemoElevation(): ProjectElevation {
     highlights: [],
     interiorWalls: [],
     includeCourtyards: true,
+    finishes: [],
     tierSnapshots: {},
     activeTier: "korban-bid",
   };
@@ -1297,6 +1327,14 @@ function normalizeElevation(value: unknown): ProjectElevation {
     // on the job; the toggle exists to break them out, not hide them.
     includeCourtyards: record.includeCourtyards === false ? false : true,
     /*
+     * The trades, kept. Everything not named in this object is dropped on
+     * every read, so a field the form writes and the normalizer forgets is a
+     * field that lasts until the next page load and no longer.
+     */
+    finishes: asArray<unknown>(record.finishes).filter(
+      (name): name is string => typeof name === "string" && name.trim() !== ""
+    ),
+    /*
      * Which tier this record belongs to.
      *
      * Jobs made before the tiers were kept apart hold whatever was measured,
@@ -1370,9 +1408,14 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
       : fallback.bidStatus,
     updatedAt: asString(record.updatedAt, nowIso()),
     schemaVersion: asNumber(record.schemaVersion, 2),
+    /*
+     * Unset stays unset. This used to coerce anything unrecognised to
+     * korban-bid, which meant a cleared tier came straight back on the next
+     * read - the clear looked like it worked until the page reloaded.
+     */
     estimateDepth: DEPTH_ORDER.includes(record.estimateDepth as EstimateDepth)
       ? (record.estimateDepth as EstimateDepth)
-      : "korban-bid",
+      : undefined,
     takeoff: {
       levels: normalizedLevels.length ? normalizedLevels : fallback.takeoff.levels,
     },
@@ -2204,6 +2247,35 @@ export function getEstimateDepth(): EstimateDepth {
   } catch {
     return "korban-bid";
   }
+}
+
+/**
+ * Whether a tier was actually picked, as opposed to read as a default.
+ *
+ * getEstimateDepth() always hands back a usable tier so callers can get on
+ * with laying out a page. This is the other question - is there a choice on
+ * record - which is what a badge should be asking before it names one.
+ */
+export function isEstimateDepthChosen(): boolean {
+  try {
+    return DEPTH_ORDER.includes(getActiveProject().estimateDepth as EstimateDepth);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Forgets which tier this job was bid at.
+ *
+ * Paired with clearElevationTakeoff: the tier was chosen to suit work that
+ * no longer exists, so leaving it behind states something the job cannot
+ * back up. The next tier choice in Takeoff writes it again.
+ */
+export function clearEstimateDepth() {
+  const project = getActiveProject();
+  const next = { ...project };
+  delete next.estimateDepth;
+  saveActiveProject(next);
 }
 
 export type ElevationOnlyTotals = {

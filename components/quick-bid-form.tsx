@@ -39,7 +39,15 @@ type Form = {
   lf: Record<ElevKey, string>;
   /** Height per face. A stepped building is the normal case, not the exception. */
   ht: Record<ElevKey, string>;
-  finish: string;
+  /**
+   * Every trade that will work off this scaffold.
+   *
+   * More than one is the normal case, not the exception - a mason goes up
+   * first and a painter follows, off the same steel. It was a single string,
+   * so picking the painter forgot the mason and the deck came back three
+   * boards wide for a trade that needs six.
+   */
+  finishes: string[];
 
   // Tank
   measureBy: "radius" | "circumference";
@@ -79,7 +87,7 @@ const BLANK: Form = {
   faces: { north: true, east: true, south: true, west: true },
   lf: { north: "", east: "", south: "", west: "", special: "" },
   ht: { north: "", east: "", south: "", west: "", special: "" },
-  finish: "",
+  finishes: [],
   measureBy: "circumference",
   tankLengthFt: "",
   tankHeightFt: "",
@@ -99,6 +107,50 @@ const BLANK: Form = {
   mirrorNorthSouth: false,
   mirrorEastWest: false,
 };
+
+/**
+ * What a scaffold several trades share has to be built to.
+ *
+ * The scaffold is one structure. If a mason and a painter both work off it, it
+ * gets built for the mason - five foot frames and a six board deck - because
+ * the painter can work off that and the mason cannot work off the painter's.
+ * So the governing rule is the most demanding of those selected, taken field
+ * by field: the widest frame, the deepest deck, and the bracket that carries
+ * the most boards among any that call for one.
+ *
+ * `finish` on the returned rule names whichever selection set the width, so
+ * the screen can say which trade is driving it rather than leaving an
+ * estimator to guess why a 3' job came back at 5'.
+ *
+ * Lives here because the Quick Bid is its only caller. It belongs in
+ * backendStore beside getFinishRule the moment a second tier needs it.
+ */
+function governingFinishRule(finishes: string[], settings: ReturnType<typeof getBackendSettings>) {
+  const rules = finishes
+    .map((finish) => getFinishRule(finish, settings))
+    .filter((rule): rule is NonNullable<typeof rule> => Boolean(rule));
+  if (!rules.length) return undefined;
+
+  const widest = rules.reduce((best, rule) => (rule.scaffoldWidth > best.scaffoldWidth ? rule : best));
+  const planksPerJump = Math.max(...rules.map((rule) => rule.planksPerJump));
+
+  // The bracket that carries the most boards, among those that want one.
+  const bracketed = rules.filter((rule) => rule.bracketPartNo);
+  const capacity = (partNo: string) =>
+    settings.material.stock.find((row) => row.partNo === partNo)?.plankCapacity ?? 0;
+  const bracketPartNo = bracketed.length
+    ? bracketed.reduce((best, rule) =>
+        capacity(rule.bracketPartNo) > capacity(best.bracketPartNo) ? rule : best
+      ).bracketPartNo
+    : "";
+
+  return {
+    finish: widest.finish,
+    scaffoldWidth: widest.scaffoldWidth,
+    planksPerJump,
+    bracketPartNo,
+  };
+}
 
 // -- Small building blocks ----------------------------------------------------
 
@@ -343,14 +395,26 @@ export default function QuickBidForm() {
    * overruled it. Masonry needs a five-foot frame and eight planks; a painter
    * does not, and neither should be typed in twice.
    */
+  /*
+   * Adds or removes a trade, then rebuilds the width from whoever is left.
+   *
+   * Taking the mason off a job that still has a painter on it has to drop the
+   * scaffold back to what the painter needs - recomputing from the whole
+   * selection rather than from the trade just clicked is what makes that work
+   * in both directions.
+   */
   function chooseFinish(finish: string) {
-    const next = form.finish === finish ? "" : finish;
-    const rule = next ? getFinishRule(next) : undefined;
-    setForm((f) => ({
-      ...f,
-      finish: next,
-      widthFt: rule && !f.widthOverridden ? rule.scaffoldWidth : f.widthFt,
-    }));
+    setForm((f) => {
+      const finishes = f.finishes.includes(finish)
+        ? f.finishes.filter((name) => name !== finish)
+        : [...f.finishes, finish];
+      const rule = governingFinishRule(finishes, getBackendSettings());
+      return {
+        ...f,
+        finishes,
+        widthFt: rule && !f.widthOverridden ? rule.scaffoldWidth : f.widthFt,
+      };
+    });
   }
 
   function setWidth(widthFt: number) {
@@ -371,7 +435,7 @@ export default function QuickBidForm() {
 
   const derived = useMemo(() => {
     const backend = getBackendSettings();
-    const rule = form.finish ? getFinishRule(form.finish, backend) : undefined;
+    const rule = governingFinishRule(form.finishes, backend);
 
     // Planks follow the finish unless width was set by hand, in which case
     // the width rule takes over - that is what an override means.
@@ -448,6 +512,56 @@ export default function QuickBidForm() {
           }),
         ];
 
+    /*
+     * Each face beside the engine that counted it.
+     *
+     * engines[i] has always belonged to perFace[i] - the pairing was just
+     * never kept, so the per-face legs, bays and jumps were summed away and
+     * could not be written down. A gripped face carries its own, and a typed
+     * one has to arrive the same way or it is a lesser kind of run.
+     */
+    const faceRuns = perFace.map((row, index) => ({ ...row, engine: engines[index] }));
+
+    /*
+     * The building, as a shape.
+     *
+     * Four sides with lengths is a rectangle - that is the whole reason this
+     * form asks side by side rather than for a perimeter total. North and
+     * south run across, east and west run down, so the two pairs are the two
+     * extents, and the outline is the four corners between them.
+     *
+     * Four lengths only close into a rectangle when the opposite sides match.
+     * When they do not, the numbers describe no single shape - an L, a
+     * trapezoid and a dog-leg all fit them - so the longer of each pair is
+     * drawn and the estimator is told what was assumed. A slightly generous
+     * rectangle that says so beats a blank screen.
+     *
+     * A tank gets none of this. A shell is not four sides, and drawing it as
+     * a box would be a lie about the building rather than an approximation of
+     * one.
+     */
+    const sideFt = (face: FaceKey) => {
+      if (face === "south" && form.mirrorNorthSouth) return parseFloat(form.lf.north) || 0;
+      if (face === "west" && form.mirrorEastWest) return parseFloat(form.lf.east) || 0;
+      return parseFloat(form.lf[face]) || 0;
+    };
+    const northFt = sideFt("north"), southFt = sideFt("south");
+    const eastFt = sideFt("east"), westFt = sideFt("west");
+    const planWidthFt = Math.max(northFt, southFt);
+    const planDepthFt = Math.max(eastFt, westFt);
+    const plan =
+      structure === "building" && planWidthFt > 0 && planDepthFt > 0
+        ? {
+            widthFt: planWidthFt,
+            depthFt: planDepthFt,
+            perimeterFt: 2 * (planWidthFt + planDepthFt),
+            /** Opposite sides disagree, so the rectangle is an assumption. */
+            assumed:
+              (northFt > 0 && southFt > 0 && northFt !== southFt) ||
+              (eastFt > 0 && westFt > 0 && eastFt !== westFt),
+          }
+        : null;
+
     const sum = (pick: (e: (typeof engines)[number]) => number) =>
       engines.reduce((total, engine) => total + (pick(engine) || 0), 0);
 
@@ -510,6 +624,18 @@ export default function QuickBidForm() {
       }
     }
 
+    if (plan?.assumed) {
+      flags.push({
+        tone: "note",
+        text: `Opposite sides do not match, so these lengths do not close into one shape. The plan is drawn ${plan.widthFt}' x ${plan.depthFt}' off the longer of each pair - the counts still use every side at its own length.`,
+      });
+    }
+    if (structure === "building" && plan === null && perFace.length > 0) {
+      flags.push({
+        tone: "note",
+        text: "A length is needed across and down - two opposite sides alone give no depth - before the layout can be drawn. The counts work without it.",
+      });
+    }
     if (structure === "building" && perFace.length > 0 && perFace.length < 4 && form.coverage === "full") {
       flags.push({
         tone: "warn",
@@ -554,7 +680,7 @@ export default function QuickBidForm() {
         text: "Sloped floor means screw jack range varies leg to leg. Base heights need field adjustment.",
       });
     }
-    if (lf > 0 && height > 0 && !form.finish) {
+    if (lf > 0 && height > 0 && !form.finishes.length) {
       flags.push({
         tone: "note",
         text: "No work selected, so frame width and deck are on defaults rather than the trade.",
@@ -566,6 +692,8 @@ export default function QuickBidForm() {
       lf: Math.round(lf * 10) / 10,
       height,
       perFace,
+      faceRuns,
+      plan,
       q,
       flags,
       planksPerJump,
@@ -575,6 +703,8 @@ export default function QuickBidForm() {
       labor,
       material,
       ruleApplies: Boolean(rule) && !form.widthOverridden,
+      /** Which trade set the width, for the hint beside the control. */
+      governingFinish: rule?.finish ?? "",
     };
   }, [form, structure]);
 
@@ -597,6 +727,126 @@ export default function QuickBidForm() {
     const timer = setTimeout(() => {
       try {
         const elevation = getActiveElevation();
+
+        /*
+         * The sides, written where the rest of Korban reads them.
+         *
+         * Everything downstream counts a Quick Bid through
+         * computeElevationOnlyTotals, and that looks in exactly one place:
+         * overlayGeometry.elevationHeights[].areas[]. This effect was writing
+         * the totals and the engine but never the sides, so Set Scaffold, the
+         * ledger and Plan Desk all recomputed from an empty set and reported
+         * nothing gripped - four sides typed in, priced on this screen, and
+         * gone by the next one.
+         *
+         * Written in the same shape the grip tool writes a gripped face, so
+         * nothing downstream has to know which tier produced it. That is the
+         * point: a Quick Bid is a measured job, just measured by typing.
+         */
+        const runs = derived.faceRuns.length
+          ? derived.faceRuns.map((row) => ({
+              face: row.face,
+              lf: row.lf,
+              ht: row.ht || derived.height,
+              frameTall: row.engine.frameTall || 0,
+              legs: row.engine.legCount || 0,
+              bays: row.engine.bayCount || 0,
+            }))
+          /*
+           * A tank has a shell, not four sides. It still has to arrive as a
+           * run or it cannot be laid out, so the whole circumference goes in
+           * as one.
+           */
+          : [{
+              face: "north",
+              lf: derived.lf,
+              ht: derived.height,
+              frameTall: derived.q.frameTall,
+              legs: derived.q.legCount,
+              bays: derived.q.bayCount,
+            }];
+
+        const elevationHeights = runs.map((run) => ({
+          elevation: run.face.charAt(0).toUpperCase() + run.face.slice(1),
+          overallHeightInput: run.ht ? `${run.ht}'` : "",
+          belowGradeEnabled: false,
+          belowGradeInput: "",
+          multipleHeights: false,
+          totalLF: run.lf,
+          totalLegs: run.legs,
+          avgFrameTall: run.frameTall,
+          areas: [{
+            areaIndex: 1,
+            lf: run.lf,
+            heightFt: run.ht,
+            frameTall: run.frameTall,
+            legs: run.legs,
+            bayCount: run.bays,
+            fromLevelId: null,
+            toLevelId: null,
+            baseElevationFt: null,
+          }],
+        }));
+
+        /*
+         * The outline, at whatever scale is in force.
+         *
+         * Set Scaffold reads the plan in page units and turns them into feet
+         * through scale.pageUnitsPerFoot, so the rectangle has to be drawn in
+         * the same units as anything already traced. If a plan sheet has been
+         * scaled, that scale governs and the corners are multiplied into it.
+         * If there is no sheet - the ordinary Quick Bid - there is nothing to
+         * measure against, so the drawing is made one unit to the foot and
+         * that scale is written alongside it.
+         *
+         * An existing scale is never overwritten. It belongs to the plan
+         * sheet, is shared by all three tiers, and typing four lengths is no
+         * reason to throw away a scale somebody locked against a real drawing.
+         */
+        const storedPuf = (elevation.scale as { pageUnitsPerFoot?: number } | null)
+          ?.pageUnitsPerFoot;
+        const hasRealScale = typeof storedPuf === "number" && storedPuf > 0;
+        const puf = hasRealScale ? storedPuf : 1;
+
+        const planRow = derived.plan
+          ? [{
+              id: 1,
+              isKeyFloor: true,
+              overlayType: "Level",
+              level: "Main Level",
+              points: [
+                { x: 0, y: 0 },
+                { x: derived.plan.widthFt * puf, y: 0 },
+                { x: derived.plan.widthFt * puf, y: derived.plan.depthFt * puf },
+                { x: 0, y: derived.plan.depthFt * puf },
+              ],
+              closed: true,
+              linealFeet: derived.plan.perimeterFt,
+              color: "#f97316",
+              pageNumber: 1,
+              refPoint: null,
+              alignedPoints: [],
+            }]
+          : [];
+
+        /*
+         * Everything else in overlayGeometry is left exactly as it was - the
+         * locked scale above all, which belongs to the plan sheet rather than
+         * to any one tier and must survive a Quick Bid being typed over it.
+         */
+        const geometry = elevation.overlayGeometry ?? {
+          elevationName: elevation.elevationName,
+          levelName: "Main Level",
+          tracedPerimeter: [],
+          overlayPoints: [],
+          wallSegments: [],
+          referencePoints: [],
+          elevationPoints: [],
+          fullOverlayRows: [],
+          elevationRefs: [],
+          scale: null,
+        };
+
         saveActiveElevation({
           ...elevation,
           linearFeet: derived.lf,
@@ -608,6 +858,27 @@ export default function QuickBidForm() {
             plankCountPerBay: derived.planksPerJump,
           },
           quantityEngine: { ...elevation.quantityEngine, ...derived.q },
+          /*
+           * What the scaffold is for. Never stored before, so the proposal and
+           * the load list could not say which trades the steel was built to
+           * carry - and on a reopened job nobody could tell why the deck was
+           * six boards wide.
+           */
+          finishes: form.finishes,
+          /*
+           * One unit to the foot, only when nothing better exists. Written on
+           * the elevation because that is where Set Scaffold reads it from.
+           */
+          scale: hasRealScale
+            ? elevation.scale
+            : { pageUnitsPerFoot: 1, scaleLabel: "Typed dimensions" },
+          overlayGeometry: {
+            ...geometry,
+            elevationHeights,
+            /* Only replace the outline when there is one to put there, so a
+               tank or a half-described building keeps whatever was traced. */
+            fullOverlayRows: planRow.length ? planRow : geometry.fullOverlayRows,
+          },
         });
       } catch { /* nothing to save into yet */ }
     }, 600);
@@ -676,23 +947,38 @@ export default function QuickBidForm() {
                   )}
                 </div>
               </Row>
-              <Row label="Work being done" hint="Sets frame width and deck, unless you override below">
+              <Row
+                label="Work being done"
+                hint="Pick every trade that will work off it. The most demanding one sets frame width and deck, unless you override below."
+              >
                 <div className="flex flex-wrap gap-1.5">
-                  {getBackendSettings().material.finishRules.map((rule) => (
-                    <button
-                      key={rule.finish}
-                      onClick={() => chooseFinish(rule.finish)}
-                      title={`${rule.scaffoldWidth === 3.5 ? "3'-6\"" : `${rule.scaffoldWidth}'`} frame, ${rule.planksPerJump} planks per jump${rule.bracketPartNo ? ` plus ${rule.bracketPartNo}` : ""}`}
-                      className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
-                        form.finish === rule.finish
-                          ? "border-orange-500 bg-orange-500/15 text-orange-300"
-                          : "border-white/10 text-zinc-500 hover:border-white/25 hover:text-zinc-300"
-                      }`}
-                    >
-                      {rule.finish}
-                    </button>
-                  ))}
+                  {getBackendSettings().material.finishRules.map((rule) => {
+                    const picked = form.finishes.includes(rule.finish);
+                    return (
+                      <button
+                        key={rule.finish}
+                        onClick={() => chooseFinish(rule.finish)}
+                        aria-pressed={picked}
+                        title={`${rule.scaffoldWidth === 3.5 ? "3'-6\"" : `${rule.scaffoldWidth}'`} frame, ${rule.planksPerJump} planks per jump${rule.bracketPartNo ? ` plus ${rule.bracketPartNo}` : ""}`}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
+                          picked
+                            ? "border-orange-500 bg-orange-500/15 text-orange-300"
+                            : "border-white/10 text-zinc-500 hover:border-white/25 hover:text-zinc-300"
+                        }`}
+                      >
+                        {rule.finish}
+                      </button>
+                    );
+                  })}
                 </div>
+                {/* Which trade is driving the steel, when more than one is on it. */}
+                {form.finishes.length > 1 && derived.governingFinish && (
+                  <p className="mt-1.5 text-[10px] leading-4 text-zinc-600">
+                    {form.finishes.length} trades selected &mdash; built to{" "}
+                    <span className="text-amber-200/80">{derived.governingFinish}</span>, the most
+                    demanding of them.
+                  </p>
+                )}
               </Row>
             </Group>
 
@@ -898,7 +1184,7 @@ export default function QuickBidForm() {
                 label="Frame width"
                 hint={
                   derived.ruleApplies
-                    ? `Set by ${form.finish}. Changing it here takes over.`
+                    ? `Set by ${derived.governingFinish}. Changing it here takes over.`
                     : form.widthOverridden
                     ? "Set by hand. The work selection no longer drives this."
                     : undefined
@@ -914,10 +1200,10 @@ export default function QuickBidForm() {
                       { v: "5", label: "5'" },
                     ]}
                   />
-                  {form.widthOverridden && form.finish && (
+                  {form.widthOverridden && form.finishes.length > 0 && (
                     <button
                       onClick={() => {
-                        const rule = getFinishRule(form.finish);
+                        const rule = governingFinishRule(form.finishes, getBackendSettings());
                         setForm((f) => ({
                           ...f,
                           widthOverridden: false,
@@ -926,7 +1212,7 @@ export default function QuickBidForm() {
                       }}
                       className="rounded border border-white/12 px-2.5 py-0.5 font-mono text-[10px] text-zinc-500 transition hover:border-orange-500/40 hover:text-orange-300"
                     >
-                      Back to what {form.finish} calls for
+                      Back to what {derived.governingFinish || "the work"} calls for
                     </button>
                   )}
                 </div>

@@ -1043,6 +1043,8 @@ function OnePage({ data }: { data: BidPresentationData }) {
     `transition-all duration-700 ${inAt(n) ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"}`;
 
   const money = (v: number) => `$${Math.round(v).toLocaleString()}`;
+  /* Time on site: up and down. Not the rental period, which runs between. */
+  const erectAndDismantleDays = Math.max(0, Math.round(data.erectDays + data.dismantleDays));
 
   return (
     <div className="flex h-full w-full flex-col gap-3 p-8">
@@ -1112,14 +1114,33 @@ function OnePage({ data }: { data: BidPresentationData }) {
             <RotatingScaffold data={data} spin={spin} />
           </div>
 
+          {/*
+            * What it costs, and how long we are on site.
+            *
+            * "Investment" is what a brochure calls a price. This is a bid: the
+            * customer is being told a number, and the plainer word is the one
+            * the rest of the file already uses.
+            *
+            * Duration sits with the money because it is the other thing a
+            * customer asks in the same breath - the schedule card breaks it
+            * into erect and dismantle, this is the answer to "how long are you
+            * on my site".
+            */}
           <div className={`rounded-xl border border-orange-500/40 bg-orange-500/[0.07] p-4 ${block(4)}`}>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-orange-300/80">
-              Investment
+              Cost
             </p>
             <p className="mt-1 text-4xl font-bold tracking-tight text-white">{money(data.finalBid)}</p>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <SummaryFigure label={`${data.trade} rental`} value={money(data.rentalRevenue)} small />
               <SummaryFigure label="Labor" value={money(data.laborRevenue)} small />
+            </div>
+            <div className="mt-3 border-t border-orange-500/20 pt-2.5">
+              <SummaryFigure
+                label="Estimated duration"
+                value={`${erectAndDismantleDays} day${erectAndDismantleDays === 1 ? "" : "s"}`}
+                small
+              />
             </div>
           </div>
         </div>

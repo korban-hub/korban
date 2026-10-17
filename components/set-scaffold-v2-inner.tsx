@@ -1175,65 +1175,72 @@ function SectionViewPanel({
   );
 }
 
-// ── Frame Config Options ──────────────────────────────────────────────────────
-// Shows up to 3 real, buildable frame combinations (6'-4"/5'/3' + screw
-// jack) that reach the same effective height — never an invented frame
-// size. If a wall is short enough that only one sensible combination
-// exists, the remaining slot(s) show a plain note instead of padding
-// with duplicates.
+// ── Frame Configuration ───────────────────────────────────────────────────────
+/*
+ * How this leg is made up, and only how it is made up.
+ *
+ * This showed three combinations - Optimal, Alternate B, Alternate C - and
+ * padded the two it could not fill with "no further recommendations beyond
+ * optimal approach", which is a long way of printing nothing twice.
+ *
+ * There is one right answer. The combination that reaches the height with the
+ * fewest pieces and the least screw jack is the one a yard pulls and a crew
+ * builds; the others are arithmetic, not choices. Offering them invited an
+ * estimator to pick the worse one, and left a panel two thirds empty on every
+ * short wall.
+ *
+ * Real frames only - 6'-4", 5', 3' and the jack. Never an invented size.
+ */
 function FrameConfigOptions({
   effectiveHeightFt, screwJackMaxExtensionIn, scaffoldWidthFt,
 }: { effectiveHeightFt: number; screwJackMaxExtensionIn: number; scaffoldWidthFt: number }) {
-  const options = useMemo(
-    () => findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 3),
+  // One, because there is one. The third argument used to ask for three.
+  const makeup = useMemo(
+    () => findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 1)[0],
     [effectiveHeightFt, screwJackMaxExtensionIn],
   );
-  const labels = ["Optimal", "Alternate B", "Alternate C"];
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-shrink-0">
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Frame Configuration Options</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">Frame Configuration</p>
       </div>
-      <div className="px-3 pt-2 pb-3 space-y-2">
-        {labels.map((label, i) => {
-          const opt = options[i];
-          if (!opt) {
-            return (
-              <div key={label} className="rounded-xl border border-zinc-800 bg-black p-2.5">
-                <p className="text-[9px] font-bold uppercase tracking-wider mb-1 text-zinc-600">{label}</p>
-                <p className="text-[8px] text-zinc-600 italic">No further recommendations beyond optimal approach</p>
+      <div className="px-3 pt-2 pb-3">
+        {!makeup ? (
+          <div className="rounded-xl border border-zinc-800 bg-black p-2.5">
+            <p className="text-[9px] text-zinc-600 italic">
+              Set a wall height and the frames that reach it appear here.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-orange-500/40 bg-orange-500/5 p-2.5">
+            <p className="mb-1.5 text-[9px] font-bold uppercase tracking-wider text-orange-300">
+              Frames per leg
+            </p>
+            <div className="space-y-1">
+              {makeup.pieces.map((p) => (
+                <div key={p.label} className="flex justify-between text-[9px]">
+                  <span className="text-zinc-600">{p.label} Frame</span>
+                  <span className="font-mono text-zinc-300">× {p.qty}</span>
+                </div>
+              ))}
+              {makeup.screwJackExtensionIn > 0.05 && (
+                <div className="flex justify-between text-[9px]">
+                  <span className="text-zinc-600">Screw Jack</span>
+                  <span className="font-mono text-zinc-300">{makeup.screwJackExtensionIn.toFixed(1)}&quot;</span>
+                </div>
+              )}
+              <div className="flex justify-between text-[9px]">
+                <span className="text-zinc-600">Total Frames</span>
+                <span className="font-mono text-zinc-300">{makeup.frameTall}</span>
               </div>
-            );
-          }
-          return (
-            <div key={label} className={`rounded-xl border p-2.5 ${i === 0 ? "border-orange-500/40 bg-orange-500/5" : "border-zinc-800 bg-black"}`}>
-              <p className={`text-[9px] font-bold uppercase tracking-wider mb-1.5 ${i === 0 ? "text-orange-300" : "text-zinc-400"}`}>{label}</p>
-              <div className="space-y-1">
-                {opt.pieces.map((p) => (
-                  <div key={p.label} className="flex justify-between text-[9px]">
-                    <span className="text-zinc-600">{p.label} Frame</span>
-                    <span className="font-mono text-zinc-300">× {p.qty}</span>
-                  </div>
-                ))}
-                {opt.screwJackExtensionIn > 0.05 && (
-                  <div className="flex justify-between text-[9px]">
-                    <span className="text-zinc-600">Screw Jack</span>
-                    <span className="font-mono text-zinc-300">{opt.screwJackExtensionIn.toFixed(1)}&quot;</span>
-                  </div>
-                )}
-                <div className="flex justify-between text-[9px]">
-                  <span className="text-zinc-600">Total Frames</span>
-                  <span className="font-mono text-zinc-300">{opt.frameTall}</span>
-                </div>
-                <div className="flex justify-between text-[9px]">
-                  <span className="text-zinc-600">Width</span>
-                  <span className="font-mono text-zinc-300">{scaffoldWidthFt}&apos;</span>
-                </div>
+              <div className="flex justify-between text-[9px]">
+                <span className="text-zinc-600">Width</span>
+                <span className="font-mono text-zinc-300">{scaffoldWidthFt}&apos;</span>
               </div>
             </div>
-          );
-        })}
+          </div>
+        )}
       </div>
     </div>
   );
