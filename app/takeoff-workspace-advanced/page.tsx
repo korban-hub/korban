@@ -275,6 +275,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * he shows a crew where they are working.
    */
   const [highlightMode, setHighlightMode] = useState(false);
+  /** True while the line being drawn is being held square. */
+  const [orthoActive, setOrthoActive] = useState(false);
   const [highlights,    setHighlights]    = useState<StoredHighlight[]>([]);
   /** One elevation tile per stroke, kept in step with them. */
   const [highlightElev, setHighlightElev] = useState<ElevationData[]>([]);
@@ -723,6 +725,42 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * target, drawn differently so it is always clear which one caught:
    * a reference point on another level, or a corner of a trace.
    */
+  /*
+   * Ortho, the way a drafter expects it.
+   *
+   * Buildings are square. A wall drawn by hand across a plan almost never is -
+   * it lands a degree or two off, and from then on every leg, every bay and
+   * every corner inherits the lean. Nothing downstream can tell a deliberate
+   * three degree splay from a shaky mouse, so it builds the splay.
+   *
+   * Within five degrees of square the line is taken as square and projected
+   * onto the axis, exactly as AutoCAD does with ortho on. Past five degrees
+   * the estimator plainly means it - a real skewed wall - and the line is
+   * left alone.
+   *
+   * Projected rather than rotated: the point drops onto the axis, so the run
+   * is its horizontal or vertical component. Rotating it would keep a length
+   * the estimator never drew.
+   */
+  const ORTHO_TOLERANCE_DEGREES = 5;
+
+  function orthoSnap(from: Pt, to: Pt): { pt: Pt; snapped: boolean } {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    if (dx === 0 && dy === 0) return { pt: to, snapped: false };
+
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    const square = Math.round(angle / 90) * 90;
+    if (Math.abs(angle - square) > ORTHO_TOLERANCE_DEGREES) return { pt: to, snapped: false };
+
+    // 0 and 180 are across; 90 and -90 are down and up.
+    const horizontal = square === 0 || Math.abs(square) === 180;
+    return {
+      pt: horizontal ? { ...to, y: from.y } : { ...to, x: from.x },
+      snapped: true,
+    };
+  }
+
   function snapPoint(pt: Pt, excludeLevelId?: string): { pt: Pt; kind: "ref" | "corner" | null } {
     const radius = 12 / Math.max(viewerZoom, 0.05); // constant on screen
     let best: { pt: Pt; kind: "ref" | "corner"; dist: number } | null = null;
@@ -960,13 +998,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
     }
     const lvl=floorLevels.find(l=>l.id===activeLevel);
     if (lvl?.traceMode&&!lvl.traceClosed) {
-      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,tracePoints:[...l.tracePoints,pt]}:l));
+      /* Square to the point before it, which is the wall being followed. The
+         first point of an outline has nothing to be square to. */
+      const previous = lvl.tracePoints[lvl.tracePoints.length - 1];
+      const placed = previous ? orthoSnap(previous, pt).pt : pt;
+      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,tracePoints:[...l.tracePoints,placed]}:l));
       return;
     }
     if (gripMode) { setGripStart(pt); setGripCurrent(pt); return; }
     const sec=sections.find(s=>s.id===activeSection);
     if (wallOutlineMode&&sec&&!sec.wallComplete) {
-      setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[...s.wallOutline,pt]}:s));
+      /* Square to the point before it, same as the plan trace. A wall profile
+         is mostly plumb and level - and where it genuinely is not, a parapet
+         batter or a sloped soffit, it is past five degrees and left alone. */
+      const previous = sec.wallOutline[sec.wallOutline.length - 1];
+      const placed = previous ? orthoSnap(previous, pt).pt : pt;
+      setSections(prev=>prev.map(s=>s.id===activeSection?{...s,wallOutline:[...s.wallOutline,placed]}:s));
     }
   }
 
@@ -987,10 +1034,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   function handleHighlightMove(e:React.MouseEvent<HTMLDivElement>) {
     if (!highlightMode || !strokeFrom) return;
-    const pt = getImgPt(e); if (pt) setStrokeTo(pt);
+    const pt = getImgPt(e);
+    if (!pt) return;
+    /* Snapped live, so the line visibly straightens under the hand rather
+       than jumping at release. */
+    const ortho = orthoSnap(strokeFrom, pt);
+    setStrokeTo(ortho.pt);
+    setOrthoActive(ortho.snapped);
   }
 
   function handleHighlightUp() {
+    setOrthoActive(false);
     if (!highlightMode || !strokeFrom || !strokeTo) return;
     const puf = tabScales.floor.pageUnitsPerFoot;
     const lf = puf > 0 ? Math.hypot(strokeTo.x-strokeFrom.x, strokeTo.y-strokeFrom.y)/puf : 0;

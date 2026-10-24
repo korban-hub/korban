@@ -305,6 +305,8 @@ export type TierSnapshot = {
   interiorWalls: number[];
   /** The Quick Bid form as typed - this tier's takeoff, in its own words. */
   quickBid?: Record<string, unknown> | null;
+  /** Hours added for obstructions on the site this round was measured on. */
+  obstruction?: ObstructionLabor | null;
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -430,6 +432,8 @@ export type ProjectElevation = {
   freestanding?: FreestandingPlan | null;
   /** Canopy frames under a pedestrian tunnel. Null when there is none. */
   tunnel?: TunnelPlan | null;
+  /** Hours added for working around obstructions. Null when the site is clear. */
+  obstruction?: ObstructionLabor | null;
   /**
    * The Quick Bid form exactly as it was typed.
    *
@@ -647,6 +651,25 @@ export type TunnelPlan = {
   /** "lineal", "elevation" or "full" - how the run was described. */
   coverage: string;
   parts: { partNo: string; qty: number; note?: string }[];
+};
+
+/**
+ * What working around obstructions costs in hours.
+ *
+ * Trees, canopies, utilities, anything a crew has to build around. The
+ * material uplift for this was being applied and the labor was not - the
+ * factor was calculated, returned, and dropped on the floor, while the screen
+ * said "labor up 15%, already in these counts". It was not in the counts, and
+ * the Estimate had no idea obstructions existed.
+ *
+ * Counted per elevation and rounded up, because a crew mobilising to an
+ * awkward face pays the setup whether that face is forty feet or a hundred.
+ */
+export type ObstructionLabor = {
+  /** "none", "moderate" or "heavy". */
+  level: string;
+  /** Additional man-hours, on top of the production rate. */
+  hours: number;
 };
 
 export type ProjectData = Record<string, ProjectRecord>;
@@ -1174,6 +1197,7 @@ function createEmptyElevation(): ProjectElevation {
     finishes: [],
     freestanding: null,
     tunnel: null,
+    obstruction: null,
     quickBid: null,
     tierSnapshots: {},
     /*
@@ -1233,6 +1257,7 @@ function createDemoElevation(): ProjectElevation {
     finishes: [],
     freestanding: null,
     tunnel: null,
+    obstruction: null,
     quickBid: null,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1424,6 +1449,12 @@ function normalizeElevation(value: unknown): ProjectElevation {
       (name): name is string => typeof name === "string" && name.trim() !== ""
     ),
     quickBid: isRecord(record.quickBid) ? record.quickBid : null,
+    obstruction: (() => {
+      const o = record.obstruction;
+      if (!isRecord(o)) return null;
+      const hours = asNumber(o.hours, 0);
+      return hours > 0 ? { level: asString(o.level, "none"), hours } : null;
+    })(),
     tunnel: (() => {
       const t = record.tunnel;
       if (!isRecord(t)) return null;
@@ -1728,7 +1759,45 @@ export function writeLedgerEntries(
   return { ...elevation, partLedger: [...others, ...mine] };
 }
 
-/** Every part on this elevation, one line each, sources folded together. */
+/**
+ * The order a yard pulls material in.
+ *
+ * Frames first, always - they are what the job is, everything else hangs off
+ * them, and they are the first thing on the truck. Then the pieces that make
+ * a bay stand, then what a crew works off, then what holds it to the ground,
+ * then the specials.
+ *
+ * Matched in order and specifically, because the prefixes overlap: BP1 and
+ * BR20S both begin with B and neither is a cross brace.
+ */
+const PART_ORDER: RegExp[] = [
+  /^F/,      // frames - FO6L, FM33, FO7CF canopy
+  /^B\d/,    // cross braces - B102, B104
+  /^WP/,     // planks
+  /^GR/,     // guardrail
+  /^BR/,     // side brackets
+  /^BP/,     // base plates
+  /^AL/,     // screw jacks
+  /^CP/,     // coupling pins
+  /^ST/,     // tubes
+  /^CRA/,    // clamps
+];
+
+function partRank(partNo: string): number {
+  const index = PART_ORDER.findIndex((pattern) => pattern.test(partNo));
+  // Anything unrecognised sorts last rather than first, so a part Korban has
+  // never seen cannot push the frames down the page.
+  return index === -1 ? PART_ORDER.length : index;
+}
+
+/**
+ * Every part on this elevation, one line each, sources folded together.
+ *
+ * Sorted the way the load list reads, not by quantity. Sorted by quantity it
+ * came out in a different order on every job - and worse, in a different
+ * order from the list the crew is handed, so checking one against the other
+ * meant hunting line by line.
+ */
 export function readLedger(elevation: ProjectElevation | null): { partNo: string; qty: number }[] {
   const totals = new Map<string, number>();
   (elevation?.partLedger ?? []).forEach((row) => {
@@ -1736,7 +1805,13 @@ export function readLedger(elevation: ProjectElevation | null): { partNo: string
   });
   return [...totals.entries()]
     .map(([partNo, qty]) => ({ partNo, qty }))
-    .sort((a, b) => b.qty - a.qty);
+    .sort((a, b) => {
+      const byGroup = partRank(a.partNo) - partRank(b.partNo);
+      if (byGroup !== 0) return byGroup;
+      // Within a group the biggest count first, then by part number so the
+      // order never wobbles between two parts of equal quantity.
+      return b.qty - a.qty || a.partNo.localeCompare(b.partNo);
+    });
 }
 
 /** One part's count, across every source. Zero when nothing wrote it. */
@@ -2709,6 +2784,7 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     includeCourtyards: elevation.includeCourtyards,
     interiorWalls: elevation.interiorWalls,
     quickBid: elevation.quickBid,
+    obstruction: elevation.obstruction,
   };
 }
 

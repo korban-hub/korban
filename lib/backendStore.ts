@@ -175,7 +175,39 @@ export type LaborRateSet = {
   travelHourlyRate: number;
 };
 
+/**
+ * How fast this company's crews set frames.
+ *
+ * Three levels, and two things that bend them. A two man crew - which is what
+ * a run below four jumps needs - works slower than three or more. And height
+ * slows everything: material goes up by hand, so past ten jumps it has
+ * further to travel, and past twenty further again.
+ *
+ * The penalties come off the base rate, and apply only to the frames above
+ * each threshold. The bottom of a tall scaffold is no harder to build than
+ * the bottom of a short one.
+ *
+ * Every company builds at its own speed. These are Korban's starting numbers,
+ * not anybody's standard.
+ */
+export type ProductionRates = {
+  /** Frames a crew of three or more sets in a day, up to ten jumps. */
+  conservativePerDay: number;
+  conventionalPerDay: number;
+  competitivePerDay: number;
+  /** What two men manage, below four jumps. */
+  conservativeTwoManPerDay: number;
+  conventionalTwoManPerDay: number;
+  competitiveTwoManPerDay: number;
+  /** Taken off the base rate for frames above the tenth jump. */
+  aboveTenJumpsPenalty: number;
+  /** Taken off the base rate for frames above the twentieth. */
+  aboveTwentyJumpsPenalty: number;
+};
+
 export type LaborDefaults = {
+  /** Frames per crew per day, by level, with the height and crew penalties. */
+  production: ProductionRates;
   installCrewSize: number;
   dismantleCrewSize: number;
   installProductionRate: number;
@@ -502,6 +534,17 @@ export const DEFAULT_FINISH_RULES: FinishRule[] = [
   { finish: "Masonry", scaffoldWidth: 5, planksPerJump: 6, bracketPartNo: "BR20S" },
 ];
 
+export const DEFAULT_PRODUCTION_RATES: ProductionRates = {
+  conservativePerDay: 50,
+  conventionalPerDay: 55,
+  competitivePerDay: 60,
+  conservativeTwoManPerDay: 35,
+  conventionalTwoManPerDay: 40,
+  competitiveTwoManPerDay: 45,
+  aboveTenJumpsPenalty: 10,
+  aboveTwentyJumpsPenalty: 15,
+};
+
 export const DEFAULT_OBSTRUCTION_RULES: ObstructionRules = {
   moderateLaborPercent: 15,
   moderateMaterialPercent: 10,
@@ -641,6 +684,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
     obstructions: DEFAULT_OBSTRUCTION_RULES,
   },
   labor: {
+    production: DEFAULT_PRODUCTION_RATES,
     installCrewSize: 4,
     dismantleCrewSize: 4,
     installProductionRate: 25,
@@ -927,6 +971,23 @@ function normalizeRateSet(value: unknown, d: LaborRateSet): LaborRateSet {
   };
 }
 
+function normalizeProduction(value: unknown): ProductionRates {
+  const r = isRecord(value) ? value : {};
+  const d = DEFAULT_PRODUCTION_RATES;
+  // A rate of zero would divide by nothing, so the floor is one frame a day.
+  const rate = (v: unknown, fallback: number) => Math.max(1, asNumber(v, fallback));
+  return {
+    conservativePerDay: rate(r.conservativePerDay, d.conservativePerDay),
+    conventionalPerDay: rate(r.conventionalPerDay, d.conventionalPerDay),
+    competitivePerDay: rate(r.competitivePerDay, d.competitivePerDay),
+    conservativeTwoManPerDay: rate(r.conservativeTwoManPerDay, d.conservativeTwoManPerDay),
+    conventionalTwoManPerDay: rate(r.conventionalTwoManPerDay, d.conventionalTwoManPerDay),
+    competitiveTwoManPerDay: rate(r.competitiveTwoManPerDay, d.competitiveTwoManPerDay),
+    aboveTenJumpsPenalty: Math.max(0, asNumber(r.aboveTenJumpsPenalty, d.aboveTenJumpsPenalty)),
+    aboveTwentyJumpsPenalty: Math.max(0, asNumber(r.aboveTwentyJumpsPenalty, d.aboveTwentyJumpsPenalty)),
+  };
+}
+
 function normalizeLabor(value: unknown): LaborDefaults {
   const r = isRecord(value) ? value : {};
   const d = DEFAULT_BACKEND_SETTINGS.labor;
@@ -937,6 +998,7 @@ function normalizeLabor(value: unknown): LaborDefaults {
   const nonUnion = normalizeRateSet(r.nonUnion, d.nonUnion);
   const active = activeRateSet === "union" ? union : nonUnion;
   return {
+    production: normalizeProduction(r.production),
     activeRateSet,
     union,
     nonUnion,
@@ -1171,6 +1233,26 @@ export function getObstructionFactor(
     };
   }
   return { labor: 1, material: 1 };
+}
+
+/**
+ * This company's production rates, in the shape the estimate wants them.
+ *
+ * Returned as the same three-level list the estimate has always worked from,
+ * so nothing downstream has to know whether a company set its own numbers or
+ * is on Korban's.
+ */
+export function getProductionRates(settings: BackendSettings = getBackendSettings()) {
+  const p = settings.labor.production ?? DEFAULT_PRODUCTION_RATES;
+  return {
+    levels: [
+      { key: "conservative" as const, perDay: p.conservativePerDay, twoManPerDay: p.conservativeTwoManPerDay },
+      { key: "conventional" as const, perDay: p.conventionalPerDay, twoManPerDay: p.conventionalTwoManPerDay },
+      { key: "competitive" as const, perDay: p.competitivePerDay, twoManPerDay: p.competitiveTwoManPerDay },
+    ],
+    aboveTenJumpsPenalty: p.aboveTenJumpsPenalty,
+    aboveTwentyJumpsPenalty: p.aboveTwentyJumpsPenalty,
+  };
 }
 
 /** One stock row by part number. */

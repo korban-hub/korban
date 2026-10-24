@@ -190,16 +190,156 @@ export function saveEstimateState(patch: Partial<EstimateState>) {
   }
 }
 
+/**
+ * How fast a crew sets frames, not how long a job takes.
+ *
+ * These were flat day counts - six, five and four - so a job took however
+ * many days the level said, whatever its size. A 280 foot job and a ten
+ * thousand foot job both came out at five days, and the frame count, the one
+ * number that decides how long erecting takes, was never consulted.
+ *
+ * A production level is a rate. Two things bend it, and both are facts about
+ * the scaffold rather than judgements about the job:
+ *
+ *   a two man crew is slower       Below four jumps there are only two men,
+ *                                  and two men setting and feeding do not
+ *                                  move at the pace of three.
+ *
+ *   height is slower               Material goes up by hand. Past ten jumps
+ *                                  it has further to travel, and past twenty
+ *                                  further again.
+ *
+ * Both are defaults. Every company builds at its own speed, so these belong
+ * in backend settings and are read from there once a company has set them.
+ */
 export const PRODUCTION_TYPES: {
   key: ProductionKey;
   title: string;
-  days: number;
+  /** Frames a crew of three or more sets in a day, up to ten jumps. */
+  framesPerCrewPerDay: number;
+  /** What two men manage, below four jumps. */
+  twoManFramesPerDay: number;
   note: string;
 }[] = [
-  { key: "conservative", title: "Conservative", days: 6, note: "Difficult access, unclear plans, higher field risk." },
-  { key: "conventional", title: "Conventional", days: 5, note: "Standard production for typical frame scaffold." },
-  { key: "competitive", title: "Competitive", days: 4, note: "Schedule, access and repetition support a tighter number." },
+  { key: "conservative", title: "Conservative", framesPerCrewPerDay: 50, twoManFramesPerDay: 35, note: "Difficult access, unclear plans, higher field risk." },
+  { key: "conventional", title: "Conventional", framesPerCrewPerDay: 55, twoManFramesPerDay: 40, note: "Standard production for typical frame scaffold." },
+  { key: "competitive", title: "Competitive", framesPerCrewPerDay: 60, twoManFramesPerDay: 45, note: "Schedule, access and repetition support a tighter number." },
 ];
+
+/**
+ * How many men a run of this height needs.
+ *
+ * Material goes up by hand, so a man stands every other jump to pass it on.
+ * One on the ground, skip a jump, one at the second, skip, one at the fourth,
+ * and so on to the top. Two men minimum: below three jumps there is still
+ * someone setting and someone feeding.
+ *
+ * Crew size is a consequence of the scaffold, not a preference. A thirteen
+ * jump run needs seven men whatever anybody would prefer to pay for.
+ */
+export function crewForJumps(jumps: number): number {
+  return Math.max(2, 1 + Math.floor(Math.max(0, jumps) / 2));
+}
+
+/**
+ * Where the rate steps down, measured in jumps.
+ *
+ * The thresholds are Korban's - ten and twenty jumps is where material
+ * handling changes, and that is a fact about ladders and arms rather than
+ * about any one company. What it costs them is theirs, and comes from
+ * backend settings.
+ */
+const HEIGHT_THRESHOLDS = [10, 20] as const;
+
+export type ProductionBand = {
+  /** Jumps in this band - 1 to 10, 11 to 20, 21 up. */
+  fromJump: number;
+  toJump: number;
+  frames: number;
+  framesPerDay: number;
+  crewDays: number;
+};
+
+/**
+ * What erecting this scaffold takes.
+ *
+ * The height penalty applies only to the frames ABOVE each threshold, not to
+ * the whole job. A twenty five jump run sets its first ten jumps at the full
+ * rate, the next ten slower, and the last five slower again - because the
+ * bottom of a tall scaffold is no harder to build than the bottom of a short
+ * one. Applying the penalty to every frame would price the easy part of a
+ * tall job as though it were the hard part.
+ *
+ * Frames are spread evenly up the run - total frames divided by jumps gives
+ * what one jump costs - rather than assuming legs times jumps, which stops
+ * being true the moment a leg mixes a 6'-4" frame with a 3'.
+ *
+ * Crew days stay fractional. Rounding each band to whole days first would
+ * lose the difference between the three levels on most jobs, which is the
+ * one thing the levels exist to show. Hours are hours.
+ */
+export function productionPlan(
+  frames: number,
+  jumps: number,
+  key: ProductionKey,
+  rates?: {
+    levels: { key: ProductionKey; perDay: number; twoManPerDay: number }[];
+    aboveTenJumpsPenalty: number;
+    aboveTwentyJumpsPenalty: number;
+  },
+): { crew: number; crewDays: number; days: number; erectHours: number; bands: ProductionBand[] } {
+  const empty = { crew: 0, crewDays: 0, days: 0, erectHours: 0, bands: [] as ProductionBand[] };
+  if (frames <= 0 || jumps <= 0) return empty;
+
+  /* The company's numbers when it has set them, Korban's otherwise. */
+  const fallback = PRODUCTION_TYPES.find((row) => row.key === key) ?? PRODUCTION_TYPES[1];
+  const level = rates?.levels.find((row) => row.key === key);
+  const perDay = level?.perDay ?? fallback.framesPerCrewPerDay;
+  const twoManPerDay = level?.twoManPerDay ?? fallback.twoManFramesPerDay;
+  const penalties = [
+    0,
+    rates?.aboveTenJumpsPenalty ?? 10,
+    rates?.aboveTwentyJumpsPenalty ?? 15,
+  ];
+
+  const crew = crewForJumps(jumps);
+  // Two men work to their own rate; three or more to the standard one.
+  const base = crew <= 2 ? twoManPerDay : perDay;
+  const framesPerJump = frames / jumps;
+
+  const bands: ProductionBand[] = [];
+  let fromJump = 1;
+  const edges = [...HEIGHT_THRESHOLDS, Infinity];
+  for (let i = 0; i < edges.length; i++) {
+    if (fromJump > jumps) break;
+    const band = { upTo: edges[i], penalty: penalties[i] ?? 0 };
+    const toJump = Math.min(jumps, band.upTo);
+    const jumpsHere = toJump - fromJump + 1;
+    if (jumpsHere > 0) {
+      // Never below five a day, however tall - a crew that slow is a crew
+      // that has stopped, and a divide by zero is not an estimate.
+      const framesPerDay = Math.max(5, base - band.penalty);
+      const bandFrames = framesPerJump * jumpsHere;
+      bands.push({
+        fromJump,
+        toJump,
+        frames: bandFrames,
+        framesPerDay,
+        crewDays: bandFrames / framesPerDay,
+      });
+    }
+    fromJump = toJump + 1;
+  }
+
+  const crewDays = bands.reduce((sum, band) => sum + band.crewDays, 0);
+  return {
+    crew,
+    crewDays,
+    days: Math.max(1, Math.ceil(crewDays)),
+    erectHours: Math.round(crewDays * crew * 8),
+    bands,
+  };
+}
 
 /*
  * What each tier is for, and what it is built on.

@@ -24,6 +24,7 @@ import {
   getActiveElevation,
   getActiveProject,
   clearEstimateDepth,
+  createProject,
   getEstimateDepth,
   readTier,
   updateActiveProject,
@@ -352,6 +353,26 @@ export default function ProjectPlanDeskPage() {
                 </p>
               )}
             </div>
+            {/*
+              * Start a job from the page a job starts on.
+              *
+              * This existed only on Projects, so beginning a second bid meant
+              * going back to find the button - on the one page whose whole
+              * purpose is setting a job up.
+              */}
+            <KorbanButton
+              variant="ghost"
+              onClick={() => {
+                const sure = window.confirm(
+                  "Start a new project? This one is saved and stays in the Projects list."
+                );
+                if (!sure) return;
+                createProject();
+                window.location.reload();
+              }}
+            >
+              + New project
+            </KorbanButton>
             <KorbanButton variant="ghost" onClick={() => router.push("/margin-review")}>
               Margins
             </KorbanButton>
@@ -761,6 +782,55 @@ export default function ProjectPlanDeskPage() {
             </Panel>
 
             {/* ---- What the job looks like ------------------------------- */}
+            {/*
+              * Messages, and the people on this job.
+              *
+              * A placeholder, and honest about it: a won bid turns into weeks
+              * of back and forth with a GC, a super and a yard, and none of
+              * that lives here yet. The tile exists now so the shape of the
+              * page is right when it does, and so an estimator looking for
+              * the contacts they entered has somewhere to click.
+              */}
+            <Panel
+              title="Messages"
+              scan={false}
+              right={
+                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-700">
+                  coming soon
+                </span>
+              }
+            >
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                <p className="text-[11px] leading-[1.6] text-zinc-600">
+                  Job messages will run here - the GC, the superintendent and the yard
+                  against this project rather than scattered across inboxes. Not built yet.
+                </p>
+                <button
+                  onClick={() => router.push("/contacts")}
+                  className="justify-self-start rounded border border-zinc-800 bg-korban-raised px-3 py-1.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-orange-500/40 hover:text-orange-300 sm:justify-self-end"
+                >
+                  Contacts &rarr;
+                </button>
+              </div>
+              {/* What this job already knows about who to call. */}
+              <div className="mt-2.5 grid gap-1.5 border-t border-zinc-900/70 pt-2.5">
+                {[
+                  ["Bid contact", project.contactName, project.contactPhone],
+                  ["On site", project.onSiteContactName, project.onSiteContactPhone],
+                ].map(([label, name, phone]) => (
+                  <div key={label as string} className="grid grid-cols-[92px_1fr_auto] items-baseline gap-2">
+                    <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
+                      {label}
+                    </span>
+                    <span className={`truncate text-[11px] ${name ? "text-zinc-300" : "text-zinc-700"}`}>
+                      {name || "Not set"}
+                    </span>
+                    <span className="font-mono text-[10px] text-zinc-600">{phone || ""}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
             <Panel title="Project views" scan={false}>
               <p className="mb-2 px-1 text-[10px] leading-[1.5] text-zinc-600">
                 Fills in as the takeoff progresses. Click any view to open it.

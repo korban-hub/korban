@@ -8,7 +8,7 @@ import {
   type KorbanMenuLink,
 } from "@/components/korban";
 import { DEPTH_ORDER, getActiveElevation, getActiveProject, readTier } from "@/lib/projectStore";
-import { computeTravel, getBackendSettings, getPieceRate, type BackendSettings } from "@/lib/backendStore";
+import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
 import { buildPresentationUrl } from "@/lib/presentationLink";
 import {
@@ -23,6 +23,8 @@ import {
 } from "@/lib/alternates";
 import {
   BID_LEVELS,
+  crewForJumps,
+  productionPlan,
   DEFAULT_ESTIMATE_STATE,
   PRODUCTION_TYPES,
   loadEstimateState,
@@ -315,7 +317,40 @@ export default function EstimateReviewPage() {
   const [dismantlePercent, setDismantlePercent] = useState(DEFAULT_ESTIMATE_STATE.dismantlePercentOfErect);
 
   const [productionKey, setProductionKey] = useState<ProductionKey>(DEFAULT_ESTIMATE_STATE.productionKey);
-  const [crewSize, setCrewSize] = useState(DEFAULT_ESTIMATE_STATE.crewSize);
+  /*
+   * Frames per leg, which decides how many men the run needs. Read from the
+   * round's own takeoff like everything else on this page.
+   *
+   * Declared before crewSize, which reads it. A const is not hoisted the way
+   * a function is - referring to one above its own line throws rather than
+   * reading undefined, which is the better failure but a failure all the same.
+   */
+  const [jumps, setJumps] = useState(0);
+  /*
+   * The round on screen, readable from a listener.
+   *
+   * The hydration effect is set up once and never torn down, so anything it
+   * registers closes over the first render's values forever. A ref is how a
+   * long-lived listener asks what the page is showing NOW.
+   */
+  const bidLevelRef = useRef<BidLevel>(DEFAULT_ESTIMATE_STATE.bidLevel);
+  /*
+   * Crew size follows the scaffold.
+   *
+   * Typed in before, defaulting to four and sitting there while the job grew
+   * to thirteen jumps. Material goes up by hand, so the height decides how
+   * many men are needed - one every other jump to pass it on - and that is a
+   * fact about the run rather than a preference about the budget.
+   */
+  const crewSize = crewForJumps(jumps);
+  /*
+   * Hours for working around obstructions, carried from the takeoff.
+   *
+   * Belongs to the round rather than the job - the site is described when it
+   * is measured - so it is read per tier alongside everything else.
+   */
+  const [obstructionHours, setObstructionHours] = useState(0);
+  const [obstructionLevel, setObstructionLevel] = useState("none");
   const [phaseModeOn, setPhaseModeOn] = useState(DEFAULT_ESTIMATE_STATE.phaseModeOn);
   const [phases, setPhases] = useState<ProductionPhase[]>(DEFAULT_ESTIMATE_STATE.phases);
 
@@ -401,6 +436,9 @@ export default function EstimateReviewPage() {
       setBayLength(live.scaffoldInput?.standardBayLength ?? 10);
       setPlanksPerDeck(width >= 5 ? 5 : width >= 3.5 ? 4 : 3);
       setWallHeight(elevation.wallHeight ?? 0);
+      setObstructionHours(elevation.obstruction?.hours ?? 0);
+      setObstructionLevel(elevation.obstruction?.level ?? "none");
+      setJumps(quantityEngine.jumps ?? 0);
 
       const tracedLevels = (elevation.overlayGeometry?.fullOverlayRows ?? []).filter(
         (row) => row.points.length >= 3
@@ -457,7 +495,7 @@ export default function EstimateReviewPage() {
       setConsumables(saved.consumables);
       setSiteMiles(saved.siteMiles);
       setProductionKey(saved.productionKey);
-      setCrewSize(saved.crewSize);
+
       setPhaseModeOn(saved.phaseModeOn);
       setPhases(saved.phases);
       setMiscRevenue(saved.miscRevenue);
@@ -468,16 +506,37 @@ export default function EstimateReviewPage() {
       setIsHydrated(true);
     }
 
-    const delay = window.setTimeout(loadStoredEstimate, 250);
-    window.addEventListener("focus", loadStoredEstimate);
-    window.addEventListener("pageshow", loadStoredEstimate);
+    /*
+     * Called, not handed to the browser.
+     *
+     * addEventListener passes the event as the first argument, and this
+     * function takes a bid level there - so every tab switch called it with a
+     * FocusEvent as the round to read. readTier matched no tier, handed back
+     * a blank one, and the whole estimate emptied. Clicking another level
+     * refilled it, which made it look like a display glitch rather than the
+     * page reading a browser event as a bid.
+     *
+     * Coming back to a tab re-reads the round that is ON SCREEN, not the one
+     * that was saved - those differ for as long as it takes the save to
+     * settle, and an estimator should not see their work vanish in the gap.
+     */
+    const reload = () => loadStoredEstimate(bidLevelRef.current);
+
+    const delay = window.setTimeout(() => loadStoredEstimate(), 250);
+    window.addEventListener("focus", reload);
+    window.addEventListener("pageshow", reload);
 
     return () => {
       window.clearTimeout(delay);
-      window.removeEventListener("focus", loadStoredEstimate);
-      window.removeEventListener("pageshow", loadStoredEstimate);
+      window.removeEventListener("focus", reload);
+      window.removeEventListener("pageshow", reload);
     };
   }, []);
+
+  /* Keep the ref in step with the picker. */
+  useEffect(() => {
+    bidLevelRef.current = bidLevel;
+  }, [bidLevel]);
 
   /*
    * Changing the round re-reads that round.
@@ -513,6 +572,9 @@ export default function EstimateReviewPage() {
     setElevationBreakdownRows(covered);
     setAllElevationRows(tier.elevationBreakdown || []);
     setWallHeight(tier.wallHeight ?? 0);
+    setObstructionHours(tier.obstruction?.hours ?? 0);
+    setObstructionLevel(tier.obstruction?.level ?? "none");
+    setJumps(qe?.jumps ?? 0);
     const traced = (tier.overlayGeometry?.fullOverlayRows ?? []).filter(
       (row) => row.points.length >= 3,
     ).length;
@@ -557,6 +619,22 @@ export default function EstimateReviewPage() {
   const selectedProduction =
     PRODUCTION_TYPES.find((type) => type.key === productionKey) ?? PRODUCTION_TYPES[1];
   const selectedLevel = BID_LEVELS.find((depth) => depth.key === bidLevel) ?? BID_LEVELS[2];
+  /*
+   * What erecting this scaffold takes, banded by height.
+   *
+   * The whole calculation lives in one place so the Estimate, the phase plan
+   * and anything built later read the same arithmetic rather than each
+   * keeping its own copy of the rules.
+   */
+  /** This company's rates, or Korban's until they set their own. */
+  const productionRates = useMemo(
+    () => getProductionRates(backend ?? undefined),
+    [backend],
+  );
+  const plan = useMemo(
+    () => productionPlan(estimate.frames, jumps, productionKey, productionRates),
+    [estimate.frames, jumps, productionKey, productionRates],
+  );
 
   /*
    * Which rounds this job has actually been bid at.
@@ -596,8 +674,40 @@ export default function EstimateReviewPage() {
     );
     const phaseDays = phases.reduce((sum, row) => sum + row.days, 0);
 
-    const productionDays = phaseModeOn ? phaseDays : selectedProduction.days;
-    const erectHours = phaseModeOn ? phaseManHours : selectedProduction.days * crewSize * HOURS_PER_DAY;
+    /*
+     * Nothing to build is nothing to price.
+     *
+     * Erect hours are production days times crew times eight - a figure that
+     * never once looked at the takeoff. So an empty job, or a round nobody
+     * has measured, came out at five days and four laborers and priced itself
+     * at a full labor cost: a bid for a building that does not exist.
+     *
+     * The production level is a rate, not a quantity. It says how the work
+     * goes, and with no work it says nothing.
+     */
+    const hasWork =
+      (estimate.totalLinearFeet ?? 0) > 0 ||
+      estimate.frames > 0 ||
+      estimate.planks > 0;
+
+    /*
+     * How long erecting takes, from the frames there are to erect.
+     *
+     * Days were asserted by the production level and crew size was typed in,
+     * so neither had any connection to the job: five days and four men
+     * whether the building was 280 feet or 10,000.
+     *
+     * Both now follow the work. The crew is however many men the height
+     * needs - one every other jump, passing material up - and the days are
+     * the frames divided by what a crew of that size sets in a day.
+     *
+     * Hours stay fractional and are rounded once at the end. Taking whole
+     * days first would make Conservative and Conventional identical on any
+     * job whose frame count happens to round the same way, which is most of
+     * them - the level would appear to do nothing.
+     */
+    const productionDays = !hasWork ? 0 : phaseModeOn ? phaseDays : plan.days;
+    const erectHours = !hasWork ? 0 : phaseModeOn ? phaseManHours : plan.erectHours;
     const dismantleHours = Math.round(erectHours * (dismantlePercent / 100));
 
     const erectCost = erectHours * erectRate;
@@ -605,7 +715,21 @@ export default function EstimateReviewPage() {
     // Travel follows the loads this job actually ships.
     const travel = computeTravel(estimate.planks, siteMiles);
     const travelCost = travel.cost;
-    const laborCost = erectCost + dismantleCost + travelCost;
+    /*
+     * Obstructions, at last.
+     *
+     * The takeoff counted the hours - so many per hundred feet of each
+     * elevation - and until now nothing on this page knew they existed. A
+     * crew working around trees and live utilities was priced as though the
+     * site were clear.
+     *
+     * Added on top of the production rate rather than folded into it: the
+     * production level is a judgement about how the work goes, the
+     * obstructions are a fact about where it happens, and an estimator should
+     * be able to see the two apart.
+     */
+    const obstructionCost = obstructionHours * erectRate;
+    const laborCost = erectCost + dismantleCost + travelCost + obstructionCost;
 
     const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
     const alternateRevenue = approvedAlternates.reduce(
@@ -623,12 +747,14 @@ export default function EstimateReviewPage() {
       rentalMonths, frameRental, plankRental, consumablesRevenue, rentalsRevenue,
       productionDays, phaseDays, erectHours, dismantleHours,
       erectCost, dismantleCost, travelCost, laborCost, travel,
+      obstructionHours, obstructionCost, obstructionLevel,
       laborRevenue, alternateRevenue, finalBid, totalPieces,
     };
   }, [
     alternatePricing, approvedAlternates, consumables, crewSize, dismantlePercent, erectRate, estimate,
+    obstructionHours, obstructionLevel,
     frameRate, laborMarkupPercent, miscRevenue, phaseModeOn, phases, plankRate,
-    rentalDays, selectedProduction.days, siteMiles, travelRate,
+    rentalDays, plan, jumps, siteMiles, travelRate,
   ]);
 
   // -- Persist ----------------------------------------------------------------
@@ -681,7 +807,10 @@ export default function EstimateReviewPage() {
     if (covered.length === 0) return;
 
     const totalLf = covered.reduce((sum, row) => sum + row.approxLinearFeet, 0);
-    const budget = selectedProduction.days;
+    /* The days the job actually takes, split across the faces by coverage -
+       not a flat number that was the same for every job. */
+    const budget = plan.days;
+    if (budget === 0) return;
 
     setPhases((current) => {
       // Only rebuild when the plan doesn't already match the faces on record,
@@ -702,7 +831,7 @@ export default function EstimateReviewPage() {
         };
       });
     });
-  }, [isHydrated, allElevationRows, selectedProduction.days, crewSize]);
+  }, [isHydrated, allElevationRows, plan, crewSize]);
 
   const activeRevision =
     revisionHistory.find((revision) => revision.phase === bidRoundPhase) ?? null;
@@ -860,6 +989,9 @@ export default function EstimateReviewPage() {
                 erectCost={totals.erectCost}
                 dismantleCost={totals.dismantleCost}
                 travelCost={totals.travelCost}
+                obstructionHours={totals.obstructionHours}
+                obstructionCost={totals.obstructionCost}
+                obstructionLevel={totals.obstructionLevel}
                 laborCost={totals.laborCost}
                 dismantlePercent={dismantlePercent}
               />
@@ -868,7 +1000,9 @@ export default function EstimateReviewPage() {
                 productionKey={productionKey}
                 setProductionKey={setProductionKey}
                 crewSize={crewSize}
-                setCrewSize={setCrewSize}
+                jumps={jumps}
+                bands={plan.bands}
+                productionRates={productionRates}
                 phaseModeOn={phaseModeOn}
                 setPhaseModeOn={setPhaseModeOn}
                 phases={phases}
@@ -876,7 +1010,9 @@ export default function EstimateReviewPage() {
                 renamePhase={renamePhase}
                 addPhase={addPhase}
                 removePhase={removePhase}
-                selectedProductionDays={selectedProduction.days}
+                /* The days this job takes, which is none when there is no
+                   job. The three buttons still show the rate on offer. */
+                selectedProductionDays={totals.productionDays}
                 coverageByFace={Object.fromEntries(
                   allElevationRows.map((row) => [row.elevation, row.approxLinearFeet])
                 )}
@@ -1449,6 +1585,7 @@ function LaborPanel({
   erectHours, dismantleHours, travel, siteMiles, setSiteMiles,
   erectRate, setErectRate, travelRate, setTravelRate,
   erectCost, dismantleCost, travelCost, laborCost, dismantlePercent,
+  obstructionHours, obstructionCost, obstructionLevel,
 }: {
   erectHours: number; dismantleHours: number;
   travel: { loads: number; legs: number; legHours: number; hours: number; cost: number };
@@ -1457,6 +1594,7 @@ function LaborPanel({
   erectRate: number; setErectRate: (rate: number) => void;
   travelRate: number; setTravelRate: (rate: number) => void;
   erectCost: number; dismantleCost: number; travelCost: number; laborCost: number;
+  obstructionHours: number; obstructionCost: number; obstructionLevel: string;
   dismantlePercent: number;
 }) {
   return (
@@ -1526,6 +1664,30 @@ function LaborPanel({
         </span>
       </div>
 
+      {/*
+        * Obstructions on their own line.
+        *
+        * Shown apart from the production rate because they answer a different
+        * question: production is a judgement about how the work goes,
+        * obstructions are a fact about where it happens. Folded together, an
+        * estimator defending a number cannot say which part is which.
+        */}
+      {obstructionHours > 0 && (
+        <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1">
+          <div>
+            <span className="text-[11px] text-zinc-300">Obstructions</span>
+            <p className="font-mono text-[9px] text-zinc-700">
+              {obstructionLevel === "heavy" ? "Heavy" : "Moderate"} site &middot;{" "}
+              {obstructionHours.toLocaleString()} hrs from the takeoff
+            </p>
+          </div>
+          <span />
+          <span className="text-right font-mono text-[12px] font-bold text-zinc-200">
+            {formatMoney(obstructionCost)}
+          </span>
+        </div>
+      )}
+
       <TotalBox label="Labor cost" value={laborCost} />
     </Panel>
   );
@@ -1536,7 +1698,7 @@ function LaborPanel({
 // ----------------------------------------------------------------------
 
 function ProductionPanel({
-  productionKey, setProductionKey, crewSize, setCrewSize, phaseModeOn, setPhaseModeOn,
+  productionKey, setProductionKey, crewSize, jumps, bands, productionRates, phaseModeOn, setPhaseModeOn,
   phases, updatePhase, renamePhase, addPhase, removePhase,
   selectedProductionDays, coverageByFace, hasCoverage,
   phaseDays, erectHours, dismantleHours, dismantlePercent,
@@ -1544,7 +1706,9 @@ function ProductionPanel({
   productionKey: ProductionKey;
   setProductionKey: (key: ProductionKey) => void;
   crewSize: number;
-  setCrewSize: (size: number) => void;
+  jumps: number;
+  bands: { fromJump: number; toJump: number; frames: number; framesPerDay: number; crewDays: number }[];
+  productionRates: { levels: { key: ProductionKey; perDay: number; twoManPerDay: number }[] };
   phaseModeOn: boolean;
   setPhaseModeOn: (on: boolean) => void;
   phases: ProductionPhase[];
@@ -1604,23 +1768,84 @@ function ProductionPanel({
               }`}
             >
               {type.title}
-              <span className="ml-1.5 font-normal text-zinc-500">{type.days}d</span>
+              {/* The rate THIS company works to, for THIS crew - two men have
+                  their own, and a company may have set both. */}
+              <span className="ml-1.5 font-normal text-zinc-500">
+                {(() => {
+                  const own = productionRates.levels.find((row) => row.key === type.key);
+                  const perDay = crewSize <= 2
+                    ? own?.twoManPerDay ?? type.twoManFramesPerDay
+                    : own?.perDay ?? type.framesPerCrewPerDay;
+                  return `${perDay}/day`;
+                })()}
+              </span>
             </button>
           );
         })}
       </div>
 
+      {/*
+        * How the rate was arrived at, band by band.
+        *
+        * Only shown when the run is tall enough to have been slowed, because
+        * on a short job there is one rate and saying so is noise. On a tall
+        * one it is the opposite: the number looks wrong until you can see
+        * that the top ten jumps were priced slower than the bottom ten.
+        */}
+      {!phaseModeOn && bands.length > 1 && (
+        <div className="mb-2 rounded border border-zinc-800 bg-black/40 px-2.5 py-2">
+          <p className="pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+            Production by height
+          </p>
+          {/*
+            * Korban says what moved the number.
+            *
+            * The bands below are the arithmetic; this is the reason. A tall
+            * job takes longer than its frame count suggests, and an estimator
+            * who cannot see why will either distrust the figure or - worse -
+            * trust it without understanding it.
+            */}
+          <p className="pb-1.5 text-[10px] leading-[1.5] text-amber-200/70">
+            {bands.length > 2
+              ? `Past the 10th jump material has further to travel by hand, and past the 20th further again. Only the frames above each line are slowed - the bottom ten are set at full rate. Worth a look at access and hoisting on a run this tall.`
+              : `Past the 10th jump material has further to travel by hand, so those jumps are set ${bands[0].framesPerDay - bands[1].framesPerDay} a day slower. The ten below are unaffected.`}
+          </p>
+          {bands.map((band) => (
+            <div
+              key={band.fromJump}
+              className="flex items-baseline justify-between py-0.5 font-mono text-[10px]"
+            >
+              <span className="text-zinc-500">
+                Jumps {band.fromJump}&ndash;{band.toJump}
+              </span>
+              <span className="text-zinc-600">
+                {Math.round(band.frames).toLocaleString()} frames
+                <span className="mx-1.5 text-zinc-800">&middot;</span>
+                <span className="text-zinc-400">{band.framesPerDay}/day</span>
+                <span className="mx-1.5 text-zinc-800">&middot;</span>
+                {band.crewDays.toFixed(1)}d
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {!phaseModeOn ? (
         <div className="flex flex-wrap items-baseline gap-4 border-t border-zinc-900 pt-2">
           <p
-            className="text-[22px] font-semibold leading-none text-zinc-200"
+            className={`text-[22px] font-semibold leading-none ${
+              selectedProductionDays > 0 ? "text-zinc-200" : "text-zinc-700"
+            }`}
             style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
           >
-            {selectedProductionDays} days
+            {selectedProductionDays > 0 ? `${selectedProductionDays} days` : "No takeoff"}
           </p>
           <span className="flex items-baseline gap-1.5">
-            <MiniInput value={crewSize} onChange={(v) => setCrewSize(Math.max(1, v))} width="w-12" />
-            <span className="text-[11px] text-zinc-500">laborers</span>
+            {/* Read, not typed - the height decides it. */}
+            <span className="font-mono text-[13px] font-bold text-zinc-200">{crewSize}</span>
+            <span className="text-[11px] text-zinc-500">
+              laborers{jumps > 0 ? ` \u00b7 ${jumps} jump${jumps === 1 ? "" : "s"}` : ""}
+            </span>
           </span>
           <span className="ml-auto font-mono text-[10px] text-zinc-500">
             {erectHours.toLocaleString()} erect hrs

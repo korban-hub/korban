@@ -21,6 +21,7 @@ import {
   planksPerBayForWidth, saveActiveElevation,
 } from "@/lib/projectStore";
 import { getBackendSettings, getFinishRule, getObstructionFactor } from "@/lib/backendStore";
+import { crewForJumps } from "@/lib/estimateState";
 import { KorbanGuidance } from "@/components/korban";
 
 type Structure = "building" | "tank";
@@ -409,7 +410,7 @@ function freestandingParts(
       rows.push({
         partNo: partsForConfiguration(w, bayFt).frame,
         qty: frames,
-        note: `Freestanding rear run, ${widthLabel(w)} wide`,
+        note: `Free Stand rear run, ${widthLabel(w)} wide`,
       });
     }
   });
@@ -418,16 +419,16 @@ function freestandingParts(
     rows.push({
       partNo: partsForConfiguration(free.rearWidth || 3, bayFt).brace,
       qty: free.rearBraces,
-      note: "Freestanding rear run",
+      note: "Free Stand rear run",
     });
   }
 
   // A leg stands on a jack and a plate whether it carries boards or not.
   if (free.rearLegs > 0) {
-    rows.push({ partNo: "AL1S", qty: free.rearLegs, note: "Freestanding rear leg" });
-    rows.push({ partNo: "BP1", qty: free.rearLegs, note: "Freestanding rear leg" });
+    rows.push({ partNo: "AL1S", qty: free.rearLegs, note: "Free Stand rear leg" });
+    rows.push({ partNo: "BP1", qty: free.rearLegs, note: "Free Stand rear leg" });
     const pins = free.rearLegs * Math.max(0, free.rearJumps - 1) * 2;
-    if (pins > 0) rows.push({ partNo: "CPS", qty: pins, note: "Freestanding rear run" });
+    if (pins > 0) rows.push({ partNo: "CPS", qty: pins, note: "Free Stand rear run" });
   }
 
   // The tubes that bridge the gaps, and the clamps at both ends of each.
@@ -437,7 +438,7 @@ function freestandingParts(
       qty: free.tubes,
       note: `Ties runs ${Math.round(free.gapFt * 12) / 12}' apart`,
     });
-    rows.push({ partNo: "CRA19", qty: free.clamps, note: "Freestanding tie, both ends" });
+    rows.push({ partNo: "CRA19", qty: free.clamps, note: "Free Stand tie, both ends" });
   }
 
   return rows;
@@ -706,6 +707,31 @@ export default function QuickBidForm() {
         ? planFreestanding(height, form.widthFt, form.bayFt, lf, ownedTubes)
         : null;
 
+    /*
+     * Hours for working around obstructions.
+     *
+     * Sixteen on a moderate site, twenty-four on a heavy one, for every
+     * hundred feet of each elevation - counted elevation by elevation and
+     * rounded up, because a crew mobilising to an awkward face pays the setup
+     * whether that face is forty feet or a hundred. Four short sides cost
+     * four setups, not one and a bit.
+     *
+     * The material uplift for this was already applied. The labor was
+     * calculated, returned and never used, while the screen claimed it was
+     * "already in these counts" - which was true of the material and false of
+     * the hours.
+     *
+     * Worked out HERE, above the flags, because one of them reports it. A
+     * const declared below its own reader throws rather than reading
+     * undefined - the better failure, but a failure all the same.
+     */
+    const OBSTRUCTION_HOURS: Record<string, number> = { none: 0, moderate: 16, heavy: 24 };
+    const perHundred = OBSTRUCTION_HOURS[form.obstructions] ?? 0;
+    const obstructionHours = perHundred === 0
+      ? 0
+      : (perFace.length > 0 ? perFace : lf > 0 ? [{ face: "shell", lf, ht: height }] : [])
+          .reduce((sum, row) => sum + Math.ceil(row.lf / 100) * perHundred, 0);
+
     const flags: { tone: "warn" | "note"; text: string }[] = [];
     if (free && free.mode !== "none") {
       const base = `${Math.floor(free.requiredBase)}'-${Math.round((free.requiredBase % 1) * 12)}"`;
@@ -714,17 +740,17 @@ export default function QuickBidForm() {
       if (free.mode === "unreachable") {
         flags.push({
           tone: "warn",
-          text: `Freestanding needs a ${base} base and nothing on the yard bridges the gaps that leaves. Either widen the frames, add a run, or this one gets tied to the structure.`,
+          text: `Free Stand needs a ${base} base and nothing on the yard bridges the gaps that leaves. Either widen the frames, add a run, or this one gets tied to the structure.`,
         });
       } else if (free.mode === "adjacent") {
         flags.push({
           tone: "note",
-          text: `Freestanding needs a ${base} base at this height. Running ${free.runs} lines shoulder to shoulder gets there, standing ${Math.round(free.rearHeight)}' as a buttress.`,
+          text: `Free Stand needs a ${base} base at this height. Running ${free.runs} lines shoulder to shoulder gets there, standing ${Math.round(free.rearHeight)}' as a buttress.`,
         });
       } else {
         flags.push({
           tone: "warn",
-          text: `Freestanding needs a ${base} base. Korban has laid ${free.runs} runs - the face plus ${free.runs - 1} at ${widthLabel(free.rearWidth)} - standing ${Math.round(free.rearHeight)}' behind, with ${Math.round(free.gapFt * 12) / 12}' between each${free.tubes > 0 ? ` tied by ${free.tubes.toLocaleString()} ${free.tube?.partNo} and ${free.clamps.toLocaleString()} clamps` : " and no gap to tie"}.`,
+          text: `Free Stand needs a ${base} base. Korban has laid ${free.runs} runs - the face plus ${free.runs - 1} at ${widthLabel(free.rearWidth)} - standing ${Math.round(free.rearHeight)}' behind, with ${Math.round(free.gapFt * 12) / 12}' between each${free.tubes > 0 ? ` tied by ${free.tubes.toLocaleString()} ${free.tube?.partNo} and ${free.clamps.toLocaleString()} clamps` : " and no gap to tie"}.`,
         });
         flags.push({
           tone: "note",
@@ -764,16 +790,40 @@ export default function QuickBidForm() {
         text: "Pedestrian tunnel is priced as an add alternate, not in these counts.",
       });
     }
+    /*
+     * Say so when the run crosses into slower work.
+     *
+     * Production drops past ten jumps and again past twenty, and the drop
+     * applies only to the frames above each threshold - so the estimate quietly
+     * gets longer without anything on the screen explaining why. An estimator
+     * seeing a number they did not expect should be told what moved it, not
+     * left to find the band table.
+     */
+    const runJumps = q.frameTall;
+    if (runJumps > 20) {
+      const crew = crewForJumps(runJumps);
+      flags.push({
+        tone: "warn",
+        text: `${runJumps} jumps. Everything above the 10th is set slower, and everything above the 20th slower again - the bottom ten are unaffected, because the bottom of a tall scaffold is no harder than the bottom of a short one. Crew is ${crew} men, one every other jump passing material up. At this height the labor is the larger half of the job and the access route is worth a second look.`,
+      });
+    } else if (runJumps > 10) {
+      const crew = crewForJumps(runJumps);
+      flags.push({
+        tone: "note",
+        text: `${runJumps} jumps. Material has further to travel by hand above the 10th, so those ${runJumps - 10} jump${runJumps - 10 === 1 ? "" : "s"} are set 10 a day slower than the ten below them. Crew is ${crew} men, one every other jump.`,
+      });
+    }
+
     if (form.obstructions !== "none") {
       const pct = form.obstructions === "heavy"
         ? backend.material.obstructions.heavyMaterialPercent
         : backend.material.obstructions.moderateMaterialPercent;
-      const laborPct = form.obstructions === "heavy"
-        ? backend.material.obstructions.heavyLaborPercent
-        : backend.material.obstructions.moderateLaborPercent;
+      /* The backend's labor percentage is not read any more: obstruction
+         labor is hours per hundred feet per elevation, not a uplift on a
+         figure nobody had yet. */
       flags.push({
         tone: "note",
-        text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions: material up ${pct}%, labor up ${laborPct}%. Already in these counts.`,
+        text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions: material up ${pct}%, already in these counts. Labor adds ${obstructionHours.toLocaleString()} hours - ${perHundred} per 100 LF of each elevation - and carries to the Estimate.`,
       });
     }
     if (structure === "tank" && form.floor === "sloped") {
@@ -790,6 +840,7 @@ export default function QuickBidForm() {
     }
 
     const freeParts = free ? freestandingParts(free, form.bayFt) : [];
+
 
     /*
      * Canopy frames, where a tunnel runs under the scaffold.
@@ -824,6 +875,7 @@ export default function QuickBidForm() {
       freeParts,
       tunnelLegs,
       tunnelParts,
+      obstructionHours,
       lf: Math.round(lf * 10) / 10,
       height,
       perFace,
@@ -1017,6 +1069,11 @@ export default function QuickBidForm() {
            * by someone toggling it on and off again.
            */
           tunnel: tunnelPlan,
+          /* Null on a clear site, which also clears hours left behind by
+             someone trying Heavy and changing their mind. */
+          obstruction: derived.obstructionHours > 0
+            ? { level: form.obstructions, hours: derived.obstructionHours }
+            : null,
           /*
            * The rear runs, written down.
            *
@@ -1336,7 +1393,7 @@ export default function QuickBidForm() {
                 <Segmented
                   value={form.erection}
                   onChange={(v) => set("erection", v)}
-                  options={[{ v: "tied", label: "Tie-in" }, { v: "freestanding", label: "Freestanding" }]}
+                  options={[{ v: "tied", label: "Tie-in" }, { v: "freestanding", label: "Free Stand" }]}
                 />
               </Row>
               <Row
@@ -1468,6 +1525,33 @@ export default function QuickBidForm() {
                   </div>
                 )}
 
+                {/*
+                  * Hours for an awkward site, on their own.
+                  *
+                  * Not folded into the parts list below it, because it is not
+                  * a part - it is the only thing on this screen measured in
+                  * time, and burying it among frames and planks is how it
+                  * went unnoticed that it reached nothing at all.
+                  */}
+                {derived.obstructionHours > 0 && (
+                  <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
+                    <div className="flex items-baseline justify-between">
+                      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-amber-300/80">
+                        Obstruction labor
+                      </span>
+                      <span className="font-mono text-[15px] font-bold text-amber-200">
+                        {derived.obstructionHours.toLocaleString()}
+                        <span className="ml-1 text-[9px] font-normal text-amber-200/60">hrs</span>
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-4 text-zinc-500">
+                      {form.obstructions === "heavy" ? "Heavy" : "Moderate"} site &mdash;{" "}
+                      {form.obstructions === "heavy" ? 24 : 16} hours per 100 LF of each elevation,
+                      added to the Estimate on top of the production rate.
+                    </p>
+                  </div>
+                )}
+
                 <div className="mt-4 space-y-1">
                   {[
                     ["Scaffold frame", derived.q.frameCount],
@@ -1486,18 +1570,18 @@ export default function QuickBidForm() {
                     ...(derived.free && derived.free.mode !== "none"
                       ? ([
                           [
-                            `Freestanding frame ${derived.free.rearWidth === 3.5 ? `3'-6"` : `${derived.free.rearWidth}'`}`,
+                            `Free Stand frame ${derived.free.rearWidth === 3.5 ? `3'-6"` : `${derived.free.rearWidth}'`}`,
                             derived.free.rearFrames,
                           ],
-                          ["Freestanding brace", derived.free.rearBraces],
-                          ["Freestanding base plate", derived.free.rearLegs],
-                          ["Freestanding screw jack", derived.free.rearLegs],
+                          ["Free Stand brace", derived.free.rearBraces],
+                          ["Free Stand base plate", derived.free.rearLegs],
+                          ["Free Stand screw jack", derived.free.rearLegs],
                           /* Rear frames stack too, so they pin at every joint
                              like any others. Missing from this list while the
                              ledger counted them, which would have read as the
                              ledger inventing parts. */
                           [
-                            "Freestanding coupling pin",
+                            "Free Stand coupling pin",
                             derived.free.rearLegs * Math.max(0, derived.free.rearJumps - 1) * 2,
                           ],
                           ...(derived.free.tubes > 0
@@ -1686,6 +1770,25 @@ function SectionDiagram({
   const FRAME_FT = 6.333;
   const pxPerFt = jumpH / FRAME_FT;
 
+  /*
+   * Everything thin scales with everything tall.
+   *
+   * A jump is drawn shorter as a run gets taller - 46 pixels at seven jumps,
+   * 22 at twenty - and the deck width follows it. The leg tubes, the wall and
+   * the ground did not: they were fixed pixel sizes, so on a tall run the
+   * legs grew to a third of the deck and the whole section collapsed into a
+   * bunched mess.
+   *
+   * k is how far this drawing has shrunk from the size the proportions were
+   * drawn at. Multiplying the fixed dimensions by it keeps a 3' deck looking
+   * 3' wide whether the run is three jumps or thirty, which is the entire
+   * point of drawing a section rather than listing the parts.
+   *
+   * Floors on each, because below about a pixel a line stops being a line.
+   */
+  const k = Math.min(1, pxPerFt / (46 / FRAME_FT));
+  const px = (atFullSize: number, floor = 1) => Math.max(floor, atFullSize * k);
+
   // Scaffold sits left of the wall, dimensions left of that, callouts right.
   /*
    * A canopy frame sits under the run, not in it.
@@ -1728,9 +1831,17 @@ function SectionDiagram({
   const rearExtent = rearRuns > 0 ? rearRuns * rearDeckW + rearRuns * rearGapPx : 0;
   /* Shifted right by both, so neither has to be cramped into the margin. */
   const legX = 74 + rearExtent + canopyProtrude;
-  const legW = 3.4;                 // frame leg drawn as a tube, not a line
-  const wallX = legX + deckW + 6;
-  const wallW = 13;
+  const legW = px(3.4, 1.3);        // frame leg drawn as a tube, not a line
+  const wallX = legX + deckW + px(6, 2.5);
+  const wallW = px(13, 5);
+  /** Deck boards, the jack below the leg, the plate and the sill under that. */
+  const plankT = px(3, 1.4);
+  const jackH = px(6, 3);
+  const plateW = px(9, 4);
+  const plateT = px(1.8, 0.9);
+  const sillW = px(13, 6);
+  const sillT = px(3.2, 1.5);
+  const gradeY = px(15, 7);
   // A bracket carries its boards, so its reach follows the same scale.
   const bracketW = bracket ? Math.max(8, Math.round(bracketPlanks * 0.9 * pxPerFt)) : 0;
 
@@ -1858,9 +1969,9 @@ function SectionDiagram({
                 <rect
                   key={plank}
                   x={legX + legW + plank * (w + gap)}
-                  y={deckY - 3}
+                  y={deckY - plankT}
                   width={w}
-                  height="3"
+                  height={plankT}
                   fill="#3f3f46"
                   stroke="#a1a1aa"
                   strokeWidth="0.4"
@@ -1885,9 +1996,9 @@ function SectionDiagram({
                     <rect
                       key={plank}
                       x={legX + deckW + plank * (w + gap)}
-                      y={deckY - 3}
+                      y={deckY - plankT}
                       width={w}
-                      height="3"
+                      height={plankT}
                       fill="#3f3f46"
                       stroke="#F97316"
                       strokeWidth="0.4"
@@ -1900,10 +2011,10 @@ function SectionDiagram({
             {/* Guardrail at the working deck */}
             {top && (
               <>
-                <line x1={legX} y1={deckY - 18} x2={legX + deckW + bracketW} y2={deckY - 18} stroke="#fbbf24" strokeWidth="0.7" />
-                <line x1={legX} y1={deckY - 10} x2={legX + deckW + bracketW} y2={deckY - 10} stroke="#fbbf24" strokeWidth="0.55" />
-                <line x1={legX + legW / 2} y1={deckY - 3} x2={legX + legW / 2} y2={deckY - 18} stroke="#fbbf24" strokeWidth="0.7" />
-                <line x1={legX + deckW + bracketW} y1={deckY - 3} x2={legX + deckW + bracketW} y2={deckY - 18} stroke="#fbbf24" strokeWidth="0.7" />
+                <line x1={legX} y1={deckY - px(18, 7)} x2={legX + deckW + bracketW} y2={deckY - px(18, 7)} stroke="#fbbf24" strokeWidth="0.7" />
+                <line x1={legX} y1={deckY - px(10, 4)} x2={legX + deckW + bracketW} y2={deckY - px(10, 4)} stroke="#fbbf24" strokeWidth="0.55" />
+                <line x1={legX + legW / 2} y1={deckY - plankT} x2={legX + legW / 2} y2={deckY - px(18, 7)} stroke="#fbbf24" strokeWidth="0.7" />
+                <line x1={legX + deckW + bracketW} y1={deckY - plankT} x2={legX + deckW + bracketW} y2={deckY - px(18, 7)} stroke="#fbbf24" strokeWidth="0.7" />
               </>
             )}
           </g>
@@ -1938,8 +2049,8 @@ function SectionDiagram({
             const inner = canopyW - legW * 2;
             const w = (inner - gap * (count - 1)) / count;
             return (
-              <rect key={plank} x={canopyX + legW + plank * (w + gap)} y={stackBaseY - 3}
-                    width={w} height="3" fill="#3f3f46" stroke="#fbbf24" strokeWidth="0.4" />
+              <rect key={plank} x={canopyX + legW + plank * (w + gap)} y={stackBaseY - plankT}
+                    width={w} height={plankT} fill="#3f3f46" stroke="#fbbf24" strokeWidth="0.4" />
             );
           })}
           {leader(canopyX + canopyW * 0.5, baseY - canopyH * 0.5, baseY - canopyH * 0.5)}
@@ -1979,8 +2090,8 @@ function SectionDiagram({
             {/* Jack and plate under every rear leg, same as any other. */}
             {[runX + legW / 2, runX + rearDeckW - legW / 2].map((x) => (
               <g key={x}>
-                <line x1={x} y1={baseY} x2={x} y2={baseY + 6} stroke="#a1a1aa" strokeWidth="0.9" />
-                <rect x={x - 4} y={baseY + 6} width="8" height="1.6"
+                <line x1={x} y1={baseY} x2={x} y2={baseY + jackH} stroke="#a1a1aa" strokeWidth="0.9" />
+                <rect x={x - plateW / 2} y={baseY + jackH} width={plateW} height={plateT}
                       fill="none" stroke="#a1a1aa" strokeWidth="0.45" />
               </g>
             ))}
@@ -2015,33 +2126,35 @@ function SectionDiagram({
       {groundLegs.map((x) => (
         <g key={x}>
           {/* Screw jack thread */}
-          <line x1={x} y1={baseY} x2={x} y2={baseY + 6} stroke="#d4d4d8" strokeWidth="1.1" />
-          {[1.5, 3, 4.5].map((offset) => (
+          <line x1={x} y1={baseY} x2={x} y2={baseY + jackH} stroke="#d4d4d8" strokeWidth="1.1" />
+          {[0.25, 0.5, 0.75].map((at) => (
             <line
-              key={offset}
-              x1={x - 1.4} y1={baseY + offset} x2={x + 1.4} y2={baseY + offset}
+              key={at}
+              x1={x - legW / 2} y1={baseY + jackH * at} x2={x + legW / 2} y2={baseY + jackH * at}
               stroke="#71717a" strokeWidth="0.35"
             />
           ))}
           {/* Base plate */}
-          <rect x={x - 4.5} y={baseY + 6} width="9" height="1.8" fill="none" stroke="#d4d4d8" strokeWidth="0.55" />
+          <rect x={x - plateW / 2} y={baseY + jackH} width={plateW} height={plateT}
+                fill="none" stroke="#d4d4d8" strokeWidth="0.55" />
           {/*
             * A mudsill under each plate, not one plank under both.
             * A crew sets a pad where a leg lands; the span between two legs
             * carries nothing, and drawing it joined reads as a grade beam.
             */}
-          <rect x={x - 6.5} y={baseY + 10} width="13" height="3.2"
+          <rect x={x - sillW / 2} y={baseY + jackH + plateT} width={sillW} height={sillT}
                 fill="none" stroke="#d4d4d8" strokeWidth="0.55" />
-          <line x1={x - 6.5} y1={baseY + 11.6} x2={x + 6.5} y2={baseY + 11.6}
+          <line x1={x - sillW / 2} y1={baseY + jackH + plateT + sillT / 2}
+                x2={x + sillW / 2} y2={baseY + jackH + plateT + sillT / 2}
                 stroke="#52525b" strokeWidth="0.35" strokeDasharray="1.5,1.5" />
         </g>
       ))}
 
       {/* Grade, below everything and reaching past whatever stands furthest out */}
-      <line x1={groundLeft - 14} y1={baseY + 15} x2={wallX + wallW + 6} y2={baseY + 15}
+      <line x1={groundLeft - px(14, 6)} y1={baseY + gradeY} x2={wallX + wallW + px(6, 3)} y2={baseY + gradeY}
             stroke="#a1a1aa" strokeWidth="0.8" />
-      <rect x={groundLeft - 14} y={baseY + 15}
-            width={wallX + wallW + 20 - groundLeft} height="6" fill="url(#qbGround)" />
+      <rect x={groundLeft - px(14, 6)} y={baseY + gradeY}
+            width={wallX + wallW + px(20, 9) - groundLeft} height={px(6, 3)} fill="url(#qbGround)" />
 
       {/* Overall height, with extension lines and arrows */}
       <line x1={dimX - 5} y1={topY} x2={legX - 6} y2={topY} stroke="#3f3f46" strokeWidth="0.4" />

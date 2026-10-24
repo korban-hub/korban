@@ -9,11 +9,11 @@ import {
   type EstimatorSettings,
   type ScaffoldDefaults,
   type MaterialDefaults,
-  type MaterialDefaults,
   type MaterialItem,
   type StockItem,
   type LaborDefaults,
   type LaborRateSet,
+  type ProductionRates,
   type PricingDefaults,
   type ProposalDefaults,
   type AlternateRateDefaults,
@@ -342,16 +342,85 @@ export default function BackendPage() {
             <FieldRow label="Truck Rate"><MoneyInput value={labor.truckHourlyRate} onChange={(v) => setLabor({ ...labor, truckHourlyRate: v })} suffix="/hr" /></FieldRow>
           </div>
 
-          <p className="mt-1 mb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Crew & Production</p>
+          <p className="mt-1 mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Production Rates</p>
+          <p className="mb-2 text-[10px] leading-4 text-zinc-600">
+            Frames a crew sets in a day. This is what decides how long a job takes -
+            the days are divided out of the frame count, not chosen. Crew size is not
+            entered either: material goes up by hand, so a man stands every other jump
+            and the height decides how many.
+          </p>
+          <div className="mb-2 grid grid-cols-[1fr_repeat(2,88px)] items-center gap-2 px-1">
+            {["", "3+ men", "2 men"].map((heading, index) => (
+              <span key={index} className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">
+                {heading}
+              </span>
+            ))}
+          </div>
+          <div className="space-y-1.5">
+            {([
+              ["Conservative", "conservativePerDay", "conservativeTwoManPerDay"],
+              ["Conventional", "conventionalPerDay", "conventionalTwoManPerDay"],
+              ["Competitive", "competitivePerDay", "competitiveTwoManPerDay"],
+            ] as [string, keyof ProductionRates, keyof ProductionRates][]).map(
+              ([label, standardKey, twoManKey]) => (
+                <div key={label} className="grid grid-cols-[1fr_repeat(2,88px)] items-center gap-2">
+                  <span className="text-[11px] text-zinc-400">{label}</span>
+                  <BandCell
+                    value={labor.production[standardKey]}
+                    suffix="/day"
+                    onChange={(v) => setLabor({ ...labor, production: { ...labor.production, [standardKey]: v } })}
+                  />
+                  <BandCell
+                    value={labor.production[twoManKey]}
+                    suffix="/day"
+                    onChange={(v) => setLabor({ ...labor, production: { ...labor.production, [twoManKey]: v } })}
+                  />
+                </div>
+              ),
+            )}
+          </div>
+
+          <p className="mt-3 mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">Height Penalties</p>
+          <p className="mb-2 text-[10px] leading-4 text-zinc-600">
+            Taken off the rate above, and applied only to the frames above each
+            threshold - the bottom of a tall scaffold is no harder to build than the
+            bottom of a short one. Ten and twenty jumps is where material handling
+            changes; what it costs you is yours.
+          </p>
           <div className="grid grid-cols-2 gap-3">
+            <FieldRow label="Above 10 jumps" hint="Frames a day slower">
+              <NumberInput
+                value={labor.production.aboveTenJumpsPenalty}
+                onChange={(v) => setLabor({ ...labor, production: { ...labor.production, aboveTenJumpsPenalty: v } })}
+                suffix="/day"
+              />
+            </FieldRow>
+            <FieldRow label="Above 20 jumps" hint="Off the base rate, not compounded">
+              <NumberInput
+                value={labor.production.aboveTwentyJumpsPenalty}
+                onChange={(v) => setLabor({ ...labor, production: { ...labor.production, aboveTwentyJumpsPenalty: v } })}
+                suffix="/day"
+              />
+            </FieldRow>
+          </div>
+
+          <p className="mt-3 mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-600">
+            Crew &amp; Bay Rates <span className="text-zinc-700">(superseded)</span>
+          </p>
+          <p className="mb-2 text-[10px] leading-4 text-zinc-600">
+            Kept so older saved records still open. Crew size now follows the height and
+            production follows the frame count, so nothing reads these.
+          </p>
+          <div className="grid grid-cols-2 gap-3 opacity-50">
             <FieldRow label="Install Crew Size"><NumberInput value={labor.installCrewSize} onChange={(v) => setLabor({ ...labor, installCrewSize: v })} suffix="laborers" /></FieldRow>
             <FieldRow label="Dismantle Crew Size"><NumberInput value={labor.dismantleCrewSize} onChange={(v) => setLabor({ ...labor, dismantleCrewSize: v })} suffix="laborers" /></FieldRow>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 opacity-50">
             <FieldRow label="Install Production"><NumberInput value={labor.installProductionRate} onChange={(v) => setLabor({ ...labor, installProductionRate: v })} suffix="bays/day" /></FieldRow>
             <FieldRow label="Dismantle Production"><NumberInput value={labor.dismantleProductionRate} onChange={(v) => setLabor({ ...labor, dismantleProductionRate: v })} suffix="bays/day" /></FieldRow>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+
+          <div className="mt-3 grid grid-cols-2 gap-3">
             <FieldRow label="Travel Time"><NumberInput value={labor.travelTimeHours} onChange={(v) => setLabor({ ...labor, travelTimeHours: v })} suffix="hrs" /></FieldRow>
             <FieldRow label="Truck / Delivery"><MoneyInput value={labor.truckDeliveryRate} onChange={(v) => setLabor({ ...labor, truckDeliveryRate: v })} suffix="/trip" /></FieldRow>
           </div>
