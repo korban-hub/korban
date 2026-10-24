@@ -25,6 +25,7 @@ import {
   getActiveProject,
   clearEstimateDepth,
   getEstimateDepth,
+  readTier,
   updateActiveProject,
   computeElevationOnlyTotals,
   computeCourtyardTotals,
@@ -205,6 +206,38 @@ export default function ProjectPlanDeskPage() {
    * costs nothing.
    */
   const dispatched = project.projectId ? listDispatchedLoads(project.projectId) : [];
+
+  /*
+   * What this job has been bid at, and when.
+   *
+   * A bid level is not a setting, it is a round. A budget number goes out on
+   * typed dimensions; better plans arrive and the job is bid again on
+   * highlighted runs; a year later the GMP set lands and it is traced in full.
+   * All three are the same job, each worth keeping, and nothing on this page
+   * said which rounds had actually happened.
+   *
+   * Read per tier rather than off the live elevation - the live fields only
+   * ever hold the tier being worked in, so asking them which rounds exist
+   * gets one answer three times.
+   */
+  const bidRounds = (["quick-bid", "full-bid", "korban-bid"] as EstimateDepth[]).map((tier) => {
+    const snap = readTier(elevation, tier);
+    const rows = snap.overlayGeometry?.elevationHeights ?? [];
+    const measured = rows.reduce(
+      (sum: number, row: { totalLF?: number }) => sum + (row.totalLF ?? 0),
+      0,
+    );
+    const linearFeet = measured > 0 ? measured : (snap.linearFeet ?? 0);
+    return {
+      tier,
+      label: LEVEL_LABEL[tier],
+      linearFeet,
+      frames: snap.quantityEngine?.frameCount ?? 0,
+      /* A round that measured nothing never happened. */
+      done: linearFeet > 0 || (snap.highlights?.length ?? 0) > 0,
+      current: tier === depth && levelChosen,
+    };
+  });
 
   /*
    * The counts come from the load list, like everywhere else.
@@ -636,6 +669,57 @@ export default function ProjectPlanDeskPage() {
                 />
               </div>
             </Panel>
+
+            {/*
+              * The rounds this job has been bid at.
+              *
+              * Directly under the stages, because it answers the next question
+              * that panel raises: this is how far THIS round has come, and
+              * here are the rounds. A bid level is not a setting, it is a
+              * round - a budget number on typed dimensions, the same job again
+              * on better plans, and a full trace when the GMP set lands. All
+              * three are worth keeping and nothing said which had happened.
+              *
+              * Three across on one line: they are siblings, not steps, and
+              * stacking them read as a sequence to work down. Each says
+              * underneath what it holds, or that it was never bid.
+              */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
+              <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+                Bid levels
+              </span>
+              {bidRounds.map((round) => (
+                <button
+                  key={round.tier}
+                  onClick={() => router.push("/korban-review")}
+                  disabled={!round.done}
+                  className={`flex items-baseline gap-1.5 rounded px-1 py-0.5 transition ${
+                    round.done ? "hover:bg-zinc-900" : "cursor-default"
+                  }`}
+                >
+                  <span
+                    className={`font-mono text-[10px] uppercase tracking-[0.08em] ${
+                      round.done ? "text-zinc-300" : "text-zinc-700"
+                    }`}
+                  >
+                    {round.label}
+                  </span>
+                  {/* The status carries the state on its own - a dot as well
+                      would be the same fact twice on a line this short. */}
+                  <span
+                    className={`font-mono text-[9px] ${
+                      round.current
+                        ? "text-amber-200/70"
+                        : round.done
+                          ? "text-zinc-500"
+                          : "text-zinc-700"
+                    }`}
+                  >
+                    {round.current ? "current" : round.done ? "complete" : "not bid"}
+                  </span>
+                </button>
+              ))}
+            </div>
 
             {/* ---- What it currently totals ------------------------------ */}
             <Panel title="Current quantities" scan={false}>

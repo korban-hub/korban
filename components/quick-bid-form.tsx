@@ -62,7 +62,6 @@ type Form = {
 
   // Pedestrian tunnel
   pedestrian: boolean;
-  sidewalkFt: string;
   tunnelCoverage: TunnelCoverage;
   tunnelLf: string;
   tunnelFaces: Record<FaceKey, boolean>;
@@ -96,7 +95,6 @@ const BLANK: Form = {
   access: "manhole",
   obstructions: "none",
   pedestrian: false,
-  sidewalkFt: "",
   tunnelCoverage: "lineal",
   tunnelLf: "",
   tunnelFaces: { north: false, east: false, south: false, west: false },
@@ -367,6 +365,84 @@ function planFreestanding(
   };
 }
 
+/**
+ * What a freestanding base actually costs in steel.
+ *
+ * planFreestanding works out the shape - how many runs, how wide, how far
+ * apart, tied with what. This turns that into part numbers, which is the step
+ * that was missing: every piece below was being calculated and printed on the
+ * panel, and none of it was written down, so a freestanding job went to the
+ * yard as though it were tied to a building.
+ *
+ * Resolved here, next to the plan, rather than downstream. An adjacent base
+ * can be several frame widths at once, and a second place deriving part
+ * numbers from the same geometry is how a load list and a panel come to
+ * disagree about the same scaffold.
+ *
+ * No planks. The rear runs are a buttress - nobody works off them.
+ */
+function freestandingParts(
+  free: NonNullable<ReturnType<typeof planFreestanding>>,
+  bayFt: number,
+): { partNo: string; qty: number; note?: string }[] {
+  if (free.mode === "none" || free.mode === "unreachable") return [];
+
+  const rows: { partNo: string; qty: number; note?: string }[] = [];
+  const widthLabel = (w: number) => (w === 3.5 ? `3'-6"` : `${w}'`);
+
+  /*
+   * Frames, by the width they actually are.
+   *
+   * Shoulder to shoulder, Korban picks each added run to close the remaining
+   * gap, so the widths can differ run to run - a 5' behind a 3'-6" behind the
+   * face. Each width is its own part number and the yard pulls them apart.
+   */
+  const widths: number[] =
+    free.mode === "adjacent" && Array.isArray((free as { addedWidths?: number[] }).addedWidths)
+      ? ((free as { addedWidths?: number[] }).addedWidths as number[])
+      : Array.from({ length: Math.max(0, free.runs - 1) }, () => free.rearWidth);
+
+  const legsPerRun = widths.length > 0 ? free.rearLegs / widths.length : 0;
+  widths.forEach((w) => {
+    const frames = Math.round(legsPerRun * free.rearJumps);
+    if (frames > 0) {
+      rows.push({
+        partNo: partsForConfiguration(w, bayFt).frame,
+        qty: frames,
+        note: `Freestanding rear run, ${widthLabel(w)} wide`,
+      });
+    }
+  });
+
+  if (free.rearBraces > 0) {
+    rows.push({
+      partNo: partsForConfiguration(free.rearWidth || 3, bayFt).brace,
+      qty: free.rearBraces,
+      note: "Freestanding rear run",
+    });
+  }
+
+  // A leg stands on a jack and a plate whether it carries boards or not.
+  if (free.rearLegs > 0) {
+    rows.push({ partNo: "AL1S", qty: free.rearLegs, note: "Freestanding rear leg" });
+    rows.push({ partNo: "BP1", qty: free.rearLegs, note: "Freestanding rear leg" });
+    const pins = free.rearLegs * Math.max(0, free.rearJumps - 1) * 2;
+    if (pins > 0) rows.push({ partNo: "CPS", qty: pins, note: "Freestanding rear run" });
+  }
+
+  // The tubes that bridge the gaps, and the clamps at both ends of each.
+  if (free.tubes > 0 && free.tube) {
+    rows.push({
+      partNo: free.tube.partNo,
+      qty: free.tubes,
+      note: `Ties runs ${Math.round(free.gapFt * 12) / 12}' apart`,
+    });
+    rows.push({ partNo: "CRA19", qty: free.clamps, note: "Freestanding tie, both ends" });
+  }
+
+  return rows;
+}
+
 // -- Page ---------------------------------------------------------------------
 
 export default function QuickBidForm() {
@@ -375,6 +451,39 @@ export default function QuickBidForm() {
   const [form, setForm] = useState<Form>(BLANK);
   const [thinking, setThinking] = useState(false);
   const firstRun = useRef(true);
+  /*
+   * Nothing is written until what was already typed has been read.
+   *
+   * Without this the save effect could fire on the blank defaults and erase a
+   * job on its way to being restored - a reload turning into a deletion.
+   */
+  const [hydrated, setHydrated] = useState(false);
+
+  /*
+   * Put back what the estimator typed.
+   *
+   * The form worked everything out, wrote the results, and kept none of the
+   * questions - so a reload, or a walk to Set Scaffold and back, met a blank
+   * form on a job that had been fully bid. The counts were still there, which
+   * made it worse: the work plainly existed and the screen that produced it
+   * showed no sign of it.
+   *
+   * Merged over BLANK rather than used as-is, so a job saved before a field
+   * existed still opens, with that field on its default instead of undefined.
+   */
+  useEffect(() => {
+    try {
+      const saved = getActiveElevation().quickBid;
+      if (saved && typeof saved === "object") {
+        const { structure: savedStructure, ...rest } = saved as Record<string, unknown>;
+        setForm((f) => ({ ...f, ...(rest as Partial<Form>) }));
+        if (savedStructure === "tank" || savedStructure === "building") {
+          setStructure(savedStructure);
+        }
+      }
+    } catch { /* nothing saved on this job yet */ }
+    setHydrated(true);
+  }, []);
 
   function set<K extends keyof Form>(key: K, v: Form[K]) {
     setForm((f) => ({ ...f, [key]: v }));
@@ -667,13 +776,6 @@ export default function QuickBidForm() {
         text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions: material up ${pct}%, labor up ${laborPct}%. Already in these counts.`,
       });
     }
-    const sidewalk = parseFloat(form.sidewalkFt) || 0;
-    if (sidewalk > 0 && sidewalk < form.widthFt + 1) {
-      flags.push({
-        tone: "warn",
-        text: `${sidewalk}' sidewalk will not take a ${form.widthFt}' tower plus offset. Expect a permit or a narrower frame.`,
-      });
-    }
     if (structure === "tank" && form.floor === "sloped") {
       flags.push({
         tone: "note",
@@ -687,8 +789,41 @@ export default function QuickBidForm() {
       });
     }
 
+    const freeParts = free ? freestandingParts(free, form.bayFt) : [];
+
+    /*
+     * Canopy frames, where a tunnel runs under the scaffold.
+     *
+     * One at the base of every leg the tunnel passes, because a walkway needs
+     * clear head height for its whole length and a leg either stands in it or
+     * does not. How many legs that is, is exactly what the coverage question
+     * was asking - it just had nothing to do with the answer until now.
+     */
+    const legsFor = (runLf: number) =>
+      runLf > 0 ? Math.ceil(runLf / Math.max(1, form.bayFt)) + 1 : 0;
+    const tunnelLegs = !form.pedestrian
+      ? 0
+      : form.tunnelCoverage === "full"
+        ? q.legCount
+        : form.tunnelCoverage === "lineal"
+          ? legsFor(parseFloat(form.tunnelLf) || 0)
+          : FACES.filter((face) => form.tunnelFaces[face]).reduce(
+              (sum, face) => sum + legsFor(perFace.find((row) => row.face === face)?.lf ?? 0),
+              0,
+            );
+    const tunnelParts = tunnelLegs > 0
+      ? [{
+          partNo: "FO7CF",
+          qty: tunnelLegs,
+          note: `Canopy frame, 6'-0" x 7'-6" - one per leg under the tunnel`,
+        }]
+      : [];
+
     return {
       free,
+      freeParts,
+      tunnelLegs,
+      tunnelParts,
       lf: Math.round(lf * 10) / 10,
       height,
       perFace,
@@ -723,7 +858,7 @@ export default function QuickBidForm() {
    * keystroke.
    */
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !hydrated) return;
     const timer = setTimeout(() => {
       try {
         const elevation = getActiveElevation();
@@ -808,6 +943,10 @@ export default function QuickBidForm() {
         const hasRealScale = typeof storedPuf === "number" && storedPuf > 0;
         const puf = hasRealScale ? storedPuf : 1;
 
+        const tunnelPlan = derived.tunnelParts.length > 0
+          ? { legs: derived.tunnelLegs, coverage: form.tunnelCoverage, parts: derived.tunnelParts }
+          : null;
+
         const planRow = derived.plan
           ? [{
               id: 1,
@@ -866,6 +1005,37 @@ export default function QuickBidForm() {
            */
           finishes: form.finishes,
           /*
+           * The answers, kept with the figures they produced. Structure rides
+           * along because Building or Tank decides what the rest of the form
+           * even means.
+           */
+          quickBid: { ...form, structure },
+          /*
+           * The canopy frames, written down like any other part.
+           *
+           * Null when there is no tunnel, which also clears frames left behind
+           * by someone toggling it on and off again.
+           */
+          tunnel: tunnelPlan,
+          /*
+           * The rear runs, written down.
+           *
+           * Null when the job is tied, which also clears a plan left behind by
+           * someone trying freestanding and changing their mind - otherwise a
+           * tied job would keep shipping a buttress nobody is building.
+           */
+          freestanding:
+            derived.free && derived.freeParts.length > 0
+              ? {
+                  mode: derived.free.mode,
+                  runs: derived.free.runs,
+                  rearHeightFt: derived.free.rearHeight,
+                  requiredBaseFt: derived.free.requiredBase,
+                  gapFt: derived.free.gapFt,
+                  parts: derived.freeParts,
+                }
+              : null,
+          /*
            * One unit to the foot, only when nothing better exists. Written on
            * the elevation because that is where Set Scaffold reads it from.
            */
@@ -883,7 +1053,7 @@ export default function QuickBidForm() {
       } catch { /* nothing to save into yet */ }
     }, 600);
     return () => clearTimeout(timer);
-  }, [ready, derived, form.widthFt, form.bayFt]);
+  }, [ready, hydrated, derived, form, structure]);
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -1120,17 +1290,6 @@ export default function QuickBidForm() {
                 </Row>
 
                 {form.pedestrian && (
-                  <Row label="Sidewalk width" hint="How much walkway has to stay open">
-                    <NumField
-                      value={form.sidewalkFt}
-                      onChange={(v) => set("sidewalkFt", v)}
-                      unit="ft"
-                      placeholder="0"
-                    />
-                  </Row>
-                )}
-
-                {form.pedestrian && (
                   <Row label="Tunnel coverage" hint="Where the tunnel runs">
                     <div className="space-y-2">
                       <Segmented
@@ -1163,8 +1322,8 @@ export default function QuickBidForm() {
                         </div>
                       )}
                       <p className="text-[10px] leading-4 text-zinc-600">
-                        Any sidewalk width above zero adds the pedestrian tunnel to the proposal
-                        as an alternate.
+                        A tunnel adds canopy frames where it runs, and goes on the
+                        proposal as an alternate.
                       </p>
                     </div>
                   </Row>
@@ -1318,6 +1477,9 @@ export default function QuickBidForm() {
                     ["Coupling pin", derived.q.couplingPinCount],
                     ["Base plate", derived.q.basePlateCount],
                     ["Screw jack", derived.q.screwJackCount],
+                    ...(derived.tunnelLegs > 0
+                      ? ([["Canopy frame FO7CF", derived.tunnelLegs]] as [string, number][])
+                      : []),
                     ...(derived.brackets > 0
                       ? ([[`Side bracket ${derived.bracketPartNo}`, derived.brackets]] as [string, number][])
                       : []),
@@ -1330,6 +1492,14 @@ export default function QuickBidForm() {
                           ["Freestanding brace", derived.free.rearBraces],
                           ["Freestanding base plate", derived.free.rearLegs],
                           ["Freestanding screw jack", derived.free.rearLegs],
+                          /* Rear frames stack too, so they pin at every joint
+                             like any others. Missing from this list while the
+                             ledger counted them, which would have read as the
+                             ledger inventing parts. */
+                          [
+                            "Freestanding coupling pin",
+                            derived.free.rearLegs * Math.max(0, derived.free.rearJumps - 1) * 2,
+                          ],
                           ...(derived.free.tubes > 0
                             ? ([
                                 [`Tube ${derived.free.tube?.partNo}`, derived.free.tubes],
@@ -1444,6 +1614,8 @@ export default function QuickBidForm() {
                       bracket={derived.bracketPartNo}
                       bracketPlanks={derived.brackets > 0 ? derived.bracketPlankCount / derived.brackets : 0}
                       heightFt={derived.height}
+                      free={derived.free}
+                      canopy={form.pedestrian}
                     />
                   </div>
                 )}
@@ -1489,7 +1661,7 @@ function frameName(label: string, widthFt: number) {
  * with the number printed above it is worse than no drawing.
  */
 function SectionDiagram({
-  frameTall, planksPerJump, widthFt, bracket, bracketPlanks, heightFt,
+  frameTall, planksPerJump, widthFt, bracket, bracketPlanks, heightFt, free, canopy,
 }: {
   frameTall: number;
   planksPerJump: number;
@@ -1497,6 +1669,10 @@ function SectionDiagram({
   bracket: string;
   bracketPlanks: number;
   heightFt: number;
+  /** The rear runs holding a free stand up, or null when it is tied. */
+  free: ReturnType<typeof planFreestanding>;
+  /** A canopy frame at the base, where a tunnel runs under the scaffold. */
+  canopy: boolean;
 }) {
   const jumps = Math.max(1, frameTall);
   const jumpH = jumps > 16 ? 22 : jumps > 11 ? 28 : jumps > 7 ? 36 : 46;
@@ -1511,11 +1687,47 @@ function SectionDiagram({
   const pxPerFt = jumpH / FRAME_FT;
 
   // Scaffold sits left of the wall, dimensions left of that, callouts right.
+  /*
+   * A canopy frame sits under the run, not in it.
+   *
+   * Where a tunnel passes beneath, the bottom of every leg is a 6' x 7'-6"
+   * canopy frame rather than a standard one - taller, to clear a person, and
+   * wider, to span the walkway. The stack of ordinary frames starts on top of
+   * it, so the whole run is drawn one canopy higher.
+   */
+  const CANOPY_FT = 7.5;
+  const CANOPY_WIDE_FT = 6;
+
+  /*
+   * And a free stand is two structures, so the drawing has to hold both.
+   *
+   * The rear runs stand behind the face - away from the wall, which is to the
+   * left here - at a third of the height, with whatever gap the tubes bridge.
+   * Everything shifts right to make room for them, because the wall cannot
+   * move and the runs have to go somewhere.
+   */
+  const standing = free && free.mode !== "none" && free.mode !== "unreachable" ? free : null;
+  const rearRuns = standing ? Math.max(0, standing.runs - 1) : 0;
   const dimX = 30;
-  const legX = 74;
   // No floor worth speaking of - a floor would break the ratio, and the
   // ratio is the whole point. A tall run simply draws smaller.
   const deckW = Math.max(9, Math.round(widthFt * pxPerFt));
+  /*
+   * The canopy is wider than the run, and it grows the only way it can.
+   *
+   * Its inner leg stands with the run's inner leg, against the building. The
+   * extra width has to go the other way, out over the walkway, because the
+   * wall is where it is - drawn the other way round it ran into the hatching,
+   * which is a frame inside the building.
+   */
+  const canopyW = canopy ? Math.max(deckW, Math.round(CANOPY_WIDE_FT * pxPerFt)) : 0;
+  const canopyProtrude = canopy ? Math.max(0, canopyW - deckW) : 0;
+  const rearDeckW = standing ? Math.max(6, Math.round(standing.rearWidth * pxPerFt)) : 0;
+  const rearGapPx = standing ? Math.max(0, Math.round(standing.gapFt * pxPerFt)) : 0;
+  /** Everything the rear runs occupy, gaps included. */
+  const rearExtent = rearRuns > 0 ? rearRuns * rearDeckW + rearRuns * rearGapPx : 0;
+  /* Shifted right by both, so neither has to be cramped into the margin. */
+  const legX = 74 + rearExtent + canopyProtrude;
   const legW = 3.4;                 // frame leg drawn as a tube, not a line
   const wallX = legX + deckW + 6;
   const wallW = 13;
@@ -1523,7 +1735,29 @@ function SectionDiagram({
   const bracketW = bracket ? Math.max(8, Math.round(bracketPlanks * 0.9 * pxPerFt)) : 0;
 
   const topY = 34;
-  const baseY = topY + jumps * jumpH;
+  const canopyH = canopy ? Math.round(CANOPY_FT * pxPerFt) : 0;
+  const baseY = topY + jumps * jumpH + canopyH;
+  /** Where the ordinary frames start - on the canopy when there is one. */
+  const stackBaseY = baseY - canopyH;
+  /** Left edge of the canopy: its inner leg under the run's inner leg. */
+  const canopyX = legX + deckW - canopyW;
+
+  /*
+   * Whatever is standing on the ground is what gets a jack and a pad.
+   *
+   * With a canopy at the base it is the canopy's legs that touch the ground,
+   * not the run's - so the jacks stayed where the run was and one of them
+   * ended up under nothing at all, floating beside a frame it did not hold
+   * up. A jack always belongs to a leg.
+   */
+  const groundLegs = canopy
+    ? [canopyX + legW / 2, canopyX + canopyW - legW / 2]
+    : [legX + legW / 2, legX + deckW - legW / 2];
+  /** Outermost thing on the ground, for the grade line to reach past. */
+  const groundLeft = Math.min(
+    ...groundLegs,
+    rearRuns > 0 ? legX - canopyProtrude - rearExtent : Infinity,
+  );
   const width = wallX + wallW + 128;
   const height = baseY + 60;
 
@@ -1551,7 +1785,7 @@ function SectionDiagram({
   );
 
   const midJump = Math.floor(jumps / 2);
-  const midY = baseY - midJump * jumpH;
+  const midY = stackBaseY - midJump * jumpH;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="mt-3 w-full">
@@ -1580,7 +1814,7 @@ function SectionDiagram({
 
       {/* Frames, jump by jump */}
       {Array.from({ length: jumps }, (_, index) => {
-        const y = baseY - index * jumpH;
+        const y = stackBaseY - index * jumpH;
         const deckY = y - jumpH;
         const top = index === jumps - 1;
 
@@ -1677,11 +1911,108 @@ function SectionDiagram({
       })}
 
       {/*
+       * The canopy frame, where a tunnel runs beneath.
+       *
+       * Drawn as its own piece rather than another frame in the stack,
+       * because it is not one: 6' wide against the run's 3', and 7'-6" tall
+       * so somebody can walk under it. Its head is the deck the ordinary
+       * frames stand on, which is why everything above sits a canopy higher
+       * than it otherwise would.
+       */}
+      {canopy && (
+        <g>
+          <rect x={canopyX} y={stackBaseY} width={legW} height={canopyH}
+                fill="none" stroke="#fbbf24" strokeWidth="0.7" />
+          <rect x={canopyX + canopyW - legW} y={stackBaseY} width={legW} height={canopyH}
+                fill="none" stroke="#fbbf24" strokeWidth="0.7" />
+          <line x1={canopyX} y1={stackBaseY} x2={canopyX + canopyW} y2={stackBaseY}
+                stroke="#fbbf24" strokeWidth="0.8" />
+          {/*
+            * Decked right across, because the deck is the roof of the walkway
+            * - flush to the outside of the outer leg, which is where the
+            * protection has to reach.
+            */}
+          {Array.from({ length: Math.max(2, planksPerJump) }, (_, plank) => {
+            const count = Math.max(2, planksPerJump);
+            const gap = 0.8;
+            const inner = canopyW - legW * 2;
+            const w = (inner - gap * (count - 1)) / count;
+            return (
+              <rect key={plank} x={canopyX + legW + plank * (w + gap)} y={stackBaseY - 3}
+                    width={w} height="3" fill="#3f3f46" stroke="#fbbf24" strokeWidth="0.4" />
+            );
+          })}
+          {leader(canopyX + canopyW * 0.5, baseY - canopyH * 0.5, baseY - canopyH * 0.5)}
+          {label(baseY - canopyH * 0.5 - 2, `6'-0" x 7'-6" CANOPY`, "FRAME FO7CF (TYP)")}
+        </g>
+      )}
+
+      {/*
+       * The rear runs of a free stand.
+       *
+       * Faint, because they are not what anybody works off - they exist to
+       * stop the face run falling over, and a drawing that gives them equal
+       * weight suggests otherwise. Undecked for the same reason. The tubes
+       * between them are drawn where they actually go, every other deck.
+       */}
+      {standing && rearRuns > 0 && Array.from({ length: rearRuns }, (_, runIndex) => {
+        /* Measured from the outer face of whatever is at the base. */
+        const runX = legX - canopyProtrude - (runIndex + 1) * (rearDeckW + rearGapPx);
+        const rearH = Math.round(standing.rearJumps * jumpH);
+        const rearTop = baseY - rearH;
+        return (
+          <g key={`rear-${runIndex}`} opacity="0.55">
+            {Array.from({ length: standing.rearJumps }, (_, jumpIndex) => {
+              const y = baseY - jumpIndex * jumpH;
+              const deckY = y - jumpH;
+              return (
+                <g key={jumpIndex}>
+                  <rect x={runX} y={deckY} width={legW} height={jumpH}
+                        fill="none" stroke="#a1a1aa" strokeWidth="0.5" />
+                  <rect x={runX + rearDeckW - legW} y={deckY} width={legW} height={jumpH}
+                        fill="none" stroke="#a1a1aa" strokeWidth="0.5" />
+                  <line x1={runX} y1={deckY} x2={runX + rearDeckW} y2={deckY}
+                        stroke="#a1a1aa" strokeWidth="0.55" />
+                </g>
+              );
+            })}
+            {/* Jack and plate under every rear leg, same as any other. */}
+            {[runX + legW / 2, runX + rearDeckW - legW / 2].map((x) => (
+              <g key={x}>
+                <line x1={x} y1={baseY} x2={x} y2={baseY + 6} stroke="#a1a1aa" strokeWidth="0.9" />
+                <rect x={x - 4} y={baseY + 6} width="8" height="1.6"
+                      fill="none" stroke="#a1a1aa" strokeWidth="0.45" />
+              </g>
+            ))}
+            {/* Tubes bridging the gap to whatever stands in front. */}
+            {rearGapPx > 0 && Array.from(
+              { length: Math.max(1, Math.ceil(standing.rearJumps / 2)) },
+              (_, level) => {
+                const y = baseY - Math.min(standing.rearJumps, (level * 2) + 1) * jumpH;
+                return (
+                  <line key={`tube-${level}`}
+                        x1={runX + rearDeckW} y1={y}
+                        x2={runX + rearDeckW + rearGapPx} y2={y}
+                        stroke="#fbbf24" strokeWidth="0.6" strokeDasharray="2,1.5" />
+                );
+              }
+            )}
+            {runIndex === rearRuns - 1 && (
+              <text x={runX + rearDeckW / 2} y={rearTop - 5} textAnchor="middle"
+                    fontSize="5.8" fill="#a1a1aa" fontFamily="ui-monospace, monospace">
+                FREE STAND
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {/*
        * Three separate pieces, drawn separately: the jack threads out of the
        * leg, the plate sits under it, the mudsill under that. Drawn as one
        * block they read as a slab, which is not what a crew sets.
        */}
-      {[legX + legW / 2, legX + deckW - legW / 2].map((x) => (
+      {groundLegs.map((x) => (
         <g key={x}>
           {/* Screw jack thread */}
           <line x1={x} y1={baseY} x2={x} y2={baseY + 6} stroke="#d4d4d8" strokeWidth="1.1" />
@@ -1694,20 +2025,23 @@ function SectionDiagram({
           ))}
           {/* Base plate */}
           <rect x={x - 4.5} y={baseY + 6} width="9" height="1.8" fill="none" stroke="#d4d4d8" strokeWidth="0.55" />
+          {/*
+            * A mudsill under each plate, not one plank under both.
+            * A crew sets a pad where a leg lands; the span between two legs
+            * carries nothing, and drawing it joined reads as a grade beam.
+            */}
+          <rect x={x - 6.5} y={baseY + 10} width="13" height="3.2"
+                fill="none" stroke="#d4d4d8" strokeWidth="0.55" />
+          <line x1={x - 6.5} y1={baseY + 11.6} x2={x + 6.5} y2={baseY + 11.6}
+                stroke="#52525b" strokeWidth="0.35" strokeDasharray="1.5,1.5" />
         </g>
       ))}
 
-      {/* Timber mudsill, clear of the plates above it */}
-      <rect
-        x={legX - 7} y={baseY + 10}
-        width={deckW + 14} height="3.2"
-        fill="none" stroke="#d4d4d8" strokeWidth="0.55"
-      />
-      <line x1={legX - 7} y1={baseY + 11.6} x2={legX + deckW + 7} y2={baseY + 11.6} stroke="#52525b" strokeWidth="0.35" strokeDasharray="1.5,1.5" />
-
-      {/* Grade, below everything */}
-      <line x1={legX - 20} y1={baseY + 15} x2={wallX + wallW + 6} y2={baseY + 15} stroke="#a1a1aa" strokeWidth="0.8" />
-      <rect x={legX - 20} y={baseY + 15} width={deckW + wallW + 32} height="6" fill="url(#qbGround)" />
+      {/* Grade, below everything and reaching past whatever stands furthest out */}
+      <line x1={groundLeft - 14} y1={baseY + 15} x2={wallX + wallW + 6} y2={baseY + 15}
+            stroke="#a1a1aa" strokeWidth="0.8" />
+      <rect x={groundLeft - 14} y={baseY + 15}
+            width={wallX + wallW + 20 - groundLeft} height="6" fill="url(#qbGround)" />
 
       {/* Overall height, with extension lines and arrows */}
       <line x1={dimX - 5} y1={topY} x2={legX - 6} y2={topY} stroke="#3f3f46" strokeWidth="0.4" />
@@ -1753,7 +2087,7 @@ function SectionDiagram({
       {leader(wallX + wallW * 0.5, topY - 8, topY - 10)}
       {label(topY - 12, "FACE OF (E) BUILDING", "STRUCTURE (TYP)")}
 
-      {leader(legX + deckW * 0.5, baseY - (jumps - 1) * jumpH - 3, topY + 30)}
+      {leader(legX + deckW * 0.5, stackBaseY - (jumps - 1) * jumpH - 3, topY + 30)}
       {label(
         topY + 28,
         `${widthFt === 3.5 ? '42"' : `${widthFt}'-0"`} WIDE x 6'-4" TALL`,

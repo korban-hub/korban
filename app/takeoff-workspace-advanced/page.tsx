@@ -9,7 +9,7 @@ import {
   courtyardQuantities,
   createProject,
   updateActiveProject,
-  parseFeetInches, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
+  parseFeetInches, alignElevationTier, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { clearPlanSheet, loadPlanSheet, savePlanPage, savePlanSheet } from "@/lib/planStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
@@ -313,6 +313,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
     try {
       setProjectName(getActiveProject().projectName||"");
       const depth = getEstimateDepth();
+      /*
+       * Put the elevation's tier right before anything can write to it.
+       *
+       * The tab opens on whatever tier the project says, but the elevation
+       * only ever learned its tier from a CLICK on that tab - so a job worked
+       * at the tab it already opened on filed every measurement under the
+       * wrong tier. Reconciling here, on load, means the Quick Bid form and
+       * every drawing tool below write into the tier the estimator is
+       * actually in.
+       */
+      try {
+        const current = getActiveElevation();
+        const aligned = alignElevationTier(current, depth);
+        if (aligned !== current) saveActiveElevation(aligned);
+      } catch { /* no elevation to align yet */ }
       setEstimateDepthState(depth);
       setDepthTab(depth as DepthTab);
       try{ setGuideHidden(localStorage.getItem("korbanGuideHidden")==="1"); }catch{}
@@ -1558,7 +1573,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
     }
   }
 
-  const currentElevData=activeFaces.find(e=>e.direction===selectedElev)??activeFaces[0];
+  /*
+   * There is always a face to render, even for the instant before there is.
+   *
+   * activeFaces is the highlight list on a Full Bid, and a job arriving from
+   * Quick Bid has no strokes - so the list is empty, find() misses, and the
+   * fallback to activeFaces[0] lands on undefined. Reading .areas off that is
+   * what crashed the page on switching tabs.
+   *
+   * The effect that seeds the first highlight runs AFTER render, so it cannot
+   * help the render that does the switching: for one frame the page holds the
+   * new tier and the old tier's empty data. An estimator changing their mind
+   * about how to bid a job is the most ordinary thing there is, and it has to
+   * survive the frame in between.
+   *
+   * A stable id on the placeholder, so React does not remount it each render
+   * in the rare case the list stays empty.
+   */
+  const currentElevData =
+    activeFaces.find(e => e.direction === selectedElev)
+    ?? activeFaces[0]
+    ?? { direction: selectedElev, areas: [{ ...newElevArea(1, selectedElev), id: `pending-${selectedElev}` }] };
   const liveGrip=gripStart&&gripCurrent?{ x:Math.min(gripStart.x,gripCurrent.x), y:Math.min(gripStart.y,gripCurrent.y), w:Math.abs(gripCurrent.x-gripStart.x), h:Math.abs(gripCurrent.y-gripStart.y) }:null;
   const allLevelPoints=floorLevels.filter(l=>l.tracePoints.length>=2);
   const activeLvl=floorLevels.find(l=>l.id===activeLevel);

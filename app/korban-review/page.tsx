@@ -227,7 +227,7 @@ export default function KorbanReviewPage() {
         * did not look like the rest of it.
         */}
       <KorbanHeader
-        title="Review"
+        title="Overview"
         subtitle="The same job read three ways"
         actionsAlwaysVisible
         actions={

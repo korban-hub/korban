@@ -1455,7 +1455,17 @@ export default function SetScaffoldV2Inner() {
   const bayLengthFt       = parseFt(bayLength) || 10;
   const ppb               = planksPerBay(scaffoldWidth);
   const isAerial = elevation?.overlayGeometry?.fullOverlayRows?.some((r: any) => r.overlayType === "Aerial") ?? false;
-  const puf      = elevation?.scale?.pageUnitsPerFoot ?? (isAerial ? 4 : null);
+  /*
+   * A typed job carries its own scale.
+   *
+   * Quick Bid has no plan sheet, so there is nothing to have locked a scale
+   * against - the outline is built from the lengths themselves, one unit to
+   * the foot. The form writes that scale down, but the drawing should not
+   * hang on one write landing: a tier whose outline came from arithmetic
+   * knows its own scale by construction.
+   */
+  const typedTier = (elevation?.activeTier ?? estimateDepth) === "quick-bid";
+  const puf      = elevation?.scale?.pageUnitsPerFoot ?? (isAerial ? 4 : typedTier ? 1 : null);
   const scaleOk  = (puf != null && puf > 0) || isAerial;
   const effPuf   = puf ?? 4;
 
@@ -2248,7 +2258,7 @@ export default function SetScaffoldV2Inner() {
 
   useEffect(() => {
     if (!mounted || !elevation) return;
-    const next = writeScaffoldLedger(elevation);
+    const next = writeTunnelLedger(writeFreestandingLedger(writeScaffoldLedger(elevation)));
     /*
      * Compared by content, not by how many lines came out.
      *
@@ -2521,8 +2531,38 @@ export default function SetScaffoldV2Inner() {
     // Set Scaffold is where width, bay length and frame configuration are
     // decided, so it is the only page that can say which parts those are.
     // Writing them here is what stops the load list guessing downstream.
-    const next = writeScaffoldLedger(withEngine);
+    const next = writeTunnelLedger(writeFreestandingLedger(writeScaffoldLedger(withEngine)));
     setElevation(next); saveActiveElevation(next);
+  }
+
+  /**
+   * The rear runs of a freestanding scaffold, as parts.
+   *
+   * A freestanding job is two structures: the one being worked off, and the
+   * buttress holding it up. The second was being worked out in full on the
+   * Quick Bid panel - frames, braces, jacks, tubes, clamps - and written down
+   * nowhere, so it reached the yard as though the scaffold were tied to a
+   * building. A crew would arrive to build a run with nothing to tie it to.
+   *
+   * Its own source, so it sits beside the scaffold rather than inside it: the
+   * material list can show it apart, and switching a job back to tie-in clears
+   * it without disturbing anything else. Parts come resolved from wherever the
+   * plan was worked out - this page knows nothing about the base rule, and
+   * should not have to.
+   */
+  function writeFreestandingLedger(el: ProjectElevation): ProjectElevation {
+    return writeLedgerEntries(el, "freestanding", el.freestanding?.parts ?? []);
+  }
+
+  /**
+   * Canopy frames, where a tunnel runs under the scaffold.
+   *
+   * Its own source for the same reason the free stand has one: it is a
+   * decision that can be taken back, and a tunnel switched off should take
+   * its frames with it without disturbing a single other line.
+   */
+  function writeTunnelLedger(el: ProjectElevation): ProjectElevation {
+    return writeLedgerEntries(el, "tunnel", el.tunnel?.parts ?? []);
   }
 
   /**
@@ -3400,31 +3440,29 @@ export default function SetScaffoldV2Inner() {
               </div>
             </div>
 
-            {/* Phase report — what this covers, and what it doesn't */}
+            {/*
+              * Where this stands - a summary, and a way on.
+              *
+              * This used to list what Korban did not know and finish with a
+              * button to Move to Full Bid. An estimator on a tier chose that
+              * tier, usually because a budget number is what was asked for,
+              * and a page that answers the work by listing its shortcomings
+              * and pointing at a deeper tier is not advising - it is
+              * second-guessing the person using it. The caveats still have a
+              * home on Overview, where the three rounds are read side by side
+              * and the comparison is the point.
+              */}
             <div className="mt-4 rounded-xl border border-zinc-800 bg-[#0b0b0b] p-5">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Where this stands</p>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Where this stands</p>
+                <a
+                  href="/korban-review"
+                  className="rounded-xl bg-orange-500 px-4 py-1.5 text-[11px] font-bold text-black transition hover:bg-orange-400"
+                >
+                  Overview &rarr;
+                </a>
+              </div>
               <p className="mt-2.5 text-[13px] leading-relaxed text-zinc-300">{phaseReport.covered}</p>
-              {phaseReport.gaps.length > 0 && (
-                <>
-                  <p className="mt-4 text-[12px] text-zinc-400">What I don&apos;t know yet:</p>
-                  <ul className="mt-1.5 space-y-1.5">
-                    {phaseReport.gaps.map((g, i) => (
-                      <li key={i} className="flex gap-2 text-[12.5px] leading-relaxed text-zinc-400">
-                        <span className="mt-[7px] h-1 w-1 flex-shrink-0 rounded-full bg-yellow-500/70" />
-                        {g}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {phaseReport.nextStep && (
-                <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-zinc-800 pt-3.5">
-                  <p className="flex-1 text-[12.5px] leading-relaxed text-zinc-400">{phaseReport.nextStep}</p>
-                  <a href="/estimate-depth" className="rounded-xl bg-orange-500 px-4 py-2 text-[11px] font-bold text-black transition hover:bg-orange-400">
-                    Move to Full Bid
-                  </a>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -3531,7 +3569,16 @@ export default function SetScaffoldV2Inner() {
 
             {/* SVG canvas */}
             <div className="flex-1 relative overflow-hidden bg-black">
-              {mounted && scaleOk && !hasPlan && drawnRuns.length === 0 && (
+              {/*
+                * Neither prompt belongs on a typed job.
+                *
+                * "Trace a level in Takeoff" and "lock a scale" are both
+                * instructions a Quick Bid estimator cannot act on - there is
+                * no plan sheet to trace or measure against. Telling someone to
+                * do an impossible thing reads as a broken page, not a next
+                * step.
+                */}
+              {mounted && !typedTier && scaleOk && !hasPlan && drawnRuns.length === 0 && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
                 <div className="rounded-2xl border border-zinc-700 bg-zinc-900/60 p-6 text-center">
                   <p className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-300">No floor plan traced</p>
@@ -3543,7 +3590,7 @@ export default function SetScaffoldV2Inner() {
                 </div>
               </div>
             )}
-              {mounted && !scaleOk && (
+              {mounted && !typedTier && !scaleOk && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/85 backdrop-blur-sm">
                 <div className="rounded-2xl border border-yellow-500/40 bg-yellow-500/10 p-6 text-center">
                   <p className="text-xs font-bold uppercase tracking-[0.2em] text-yellow-300">⚠ Scale Not Set</p>

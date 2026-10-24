@@ -303,6 +303,8 @@ export type TierSnapshot = {
   includeCourtyards: boolean;
   /** Walls this tier set interior - see ProjectElevation.interiorWalls. */
   interiorWalls: number[];
+  /** The Quick Bid form as typed - this tier's takeoff, in its own words. */
+  quickBid?: Record<string, unknown> | null;
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -418,6 +420,30 @@ export type ProjectElevation = {
    * normal - the scaffold gets built to the most demanding of them.
    */
   finishes?: string[];
+  /**
+   * The freestanding plan, when this scaffold stands on its own.
+   *
+   * Null on a tied job, which is most of them. Set Scaffold reads the parts
+   * off this and writes them to the ledger under their own source, so they
+   * reach the material list and the load list as their own lines.
+   */
+  freestanding?: FreestandingPlan | null;
+  /** Canopy frames under a pedestrian tunnel. Null when there is none. */
+  tunnel?: TunnelPlan | null;
+  /**
+   * The Quick Bid form exactly as it was typed.
+   *
+   * The form kept its answers in component state and wrote out only what it
+   * worked out from them, so reopening the page - or reloading it, or coming
+   * back from Set Scaffold - showed a blank form on a job that had been fully
+   * bid. The numbers were saved; the questions were not, and nobody could see
+   * what had been answered.
+   *
+   * Kept as an opaque bag on purpose. These are one screen's inputs, and
+   * restating their shape here would mean two definitions of one form drifting
+   * apart. The form validates it on the way back in, where the shape lives.
+   */
+  quickBid?: Record<string, unknown> | null;
   /*
    * The tiers, declared where they live.
    *
@@ -575,6 +601,52 @@ export type LedgerEntry = {
   qty: number;
   /** Optional note for anything a part number alone doesn't explain. */
   note?: string;
+};
+
+/**
+ * A freestanding run, and what it costs in steel.
+ *
+ * A scaffold with nothing to tie to has to hold itself up, and the rule is
+ * unforgiving: the base must be a third of the height. Below ten feet of base
+ * that is extra runs shoulder to shoulder; above it the runs stand apart and
+ * tubes tie them together. Either way it is a second structure standing behind
+ * the first, and it was being worked out, displayed, and then forgotten - the
+ * Quick Bid panel listed every piece of it and not one reached the yard.
+ *
+ * The parts are resolved where the plan is worked out rather than re-derived
+ * downstream. An adjacent base can be several different frame widths at once,
+ * and two places deriving part numbers from the same geometry is how a load
+ * list and a panel come to disagree.
+ */
+export type FreestandingPlan = {
+  /** "none", "adjacent", "spaced", or "unreachable" - nothing on the yard reaches. */
+  mode: string;
+  /** Total runs including the face one. */
+  runs: number;
+  /** How tall the rear runs stand, as a buttress. */
+  rearHeightFt: number;
+  /** Base the height demands, front face to back face. */
+  requiredBaseFt: number;
+  /** Space between runs when they stand apart. Zero when shoulder to shoulder. */
+  gapFt: number;
+  /** Everything the rear runs need, ready for the ledger. No planks - nobody works off them. */
+  parts: { partNo: string; qty: number; note?: string }[];
+};
+
+/**
+ * A pedestrian tunnel running under the scaffold.
+ *
+ * Where a walkway has to stay open, the base of every leg it passes is a
+ * canopy frame - 6' wide to span the path, 7'-6" tall to clear a person -
+ * rather than a standard one. The coverage question decided how many legs
+ * that is; until now it decided nothing at all.
+ */
+export type TunnelPlan = {
+  /** Legs the tunnel passes, which is how many canopy frames it takes. */
+  legs: number;
+  /** "lineal", "elevation" or "full" - how the run was described. */
+  coverage: string;
+  parts: { partNo: string; qty: number; note?: string }[];
 };
 
 export type ProjectData = Record<string, ProjectRecord>;
@@ -1100,8 +1172,22 @@ function createEmptyElevation(): ProjectElevation {
     interiorWalls: [],
     includeCourtyards: true,
     finishes: [],
+    freestanding: null,
+    tunnel: null,
+    quickBid: null,
     tierSnapshots: {},
-    activeTier: "korban-bid",
+    /*
+     * A new elevation starts where a new project starts.
+     *
+     * This said korban-bid while createEmptyProject said quick-bid, so every
+     * job was born with its two records of one decision disagreeing - and
+     * since activeTier only moves when a depth tab is CLICKED, a job worked
+     * at the tab it already opened on never reconciled. The work went into
+     * the live fields labelled korban-bid: Review found Korban holding a
+     * Quick Bid and Quick Bid holding nothing, and the Estimate priced the
+     * wrong one.
+     */
+    activeTier: "quick-bid",
   };
 }
 
@@ -1145,6 +1231,9 @@ function createDemoElevation(): ProjectElevation {
     interiorWalls: [],
     includeCourtyards: true,
     finishes: [],
+    freestanding: null,
+    tunnel: null,
+    quickBid: null,
     tierSnapshots: {},
     activeTier: "korban-bid",
   };
@@ -1334,6 +1423,42 @@ function normalizeElevation(value: unknown): ProjectElevation {
     finishes: asArray<unknown>(record.finishes).filter(
       (name): name is string => typeof name === "string" && name.trim() !== ""
     ),
+    quickBid: isRecord(record.quickBid) ? record.quickBid : null,
+    tunnel: (() => {
+      const t = record.tunnel;
+      if (!isRecord(t)) return null;
+      const parts = asArray<unknown>(t.parts)
+        .map((row) => {
+          if (!isRecord(row)) return null;
+          const partNo = asString(row.partNo, "");
+          const qty = asNumber(row.qty, 0);
+          if (!partNo || qty <= 0) return null;
+          return { partNo, qty, note: typeof row.note === "string" ? row.note : undefined };
+        })
+        .filter((row): row is { partNo: string; qty: number; note?: string } => Boolean(row));
+      return { legs: asNumber(t.legs, 0), coverage: asString(t.coverage, "full"), parts };
+    })(),
+    freestanding: (() => {
+      const fs = record.freestanding;
+      if (!isRecord(fs)) return null;
+      const parts = asArray<unknown>(fs.parts)
+        .map((row) => {
+          if (!isRecord(row)) return null;
+          const partNo = asString(row.partNo, "");
+          const qty = asNumber(row.qty, 0);
+          if (!partNo || qty <= 0) return null;
+          return { partNo, qty, note: typeof row.note === "string" ? row.note : undefined };
+        })
+        .filter((row): row is { partNo: string; qty: number; note?: string } => Boolean(row));
+      return {
+        mode: asString(fs.mode, "none"),
+        runs: asNumber(fs.runs, 0),
+        rearHeightFt: asNumber(fs.rearHeightFt, 0),
+        requiredBaseFt: asNumber(fs.requiredBaseFt, 0),
+        gapFt: asNumber(fs.gapFt, 0),
+        parts,
+      };
+    })(),
     /*
      * Which tier this record belongs to.
      *
@@ -2241,11 +2366,24 @@ export function setEstimateDepth(depth: EstimateDepth) {
   saveActiveProject({ ...project, estimateDepth: depth });
 }
 
+/**
+ * The tier this job is being bid at, with a usable answer either way.
+ *
+ * Falls back to quick-bid, not korban-bid. A job with no tier on record has
+ * either just been created or just been reset, and in both cases the next
+ * thing that happens is somebody starting a bid - which starts at the
+ * shallowest tier and goes deeper as the information improves, never the
+ * reverse. Opening Takeoff on Korban Bid after a reset put an estimator in
+ * the one tier that needs a drawing they have not got.
+ *
+ * Jobs made before the tiers existed are unaffected: the normalizer keeps any
+ * real value it finds, so only a genuinely absent tier reaches this line.
+ */
 export function getEstimateDepth(): EstimateDepth {
   try {
-    return getActiveProject().estimateDepth ?? "korban-bid";
+    return getActiveProject().estimateDepth ?? "quick-bid";
   } catch {
-    return "korban-bid";
+    return "quick-bid";
   }
 }
 
@@ -2388,20 +2526,37 @@ export function buildPhaseReport(elevation: ProjectElevation | null, depth: Esti
   const courtyardCount = elevation?.courtyards?.length ?? 0;
 
   if (depth === "quick-bid") {
-    const covered = t.areaCount > 0
-      ? `${t.areaCount} area${t.areaCount === 1 ? "" : "s"} gripped, ${t.linearFeet.toLocaleString()} LF total, averaging ${t.avgHeightFt}' tall${courtyardCount ? `, including ${courtyardCount} courtyard${courtyardCount === 1 ? "" : "s"}` : ""}. That's enough for a budget number.`
-      : `Nothing's gripped yet, so there's no number to give you. Grip the areas that need coverage on each elevation and this fills in.`;
+    /*
+     * Quick Bid is typed, so it is described in the words of typing.
+     *
+     * This spoke of areas gripped and told the estimator to grip the areas
+     * that need coverage - a gesture this tier does not have and a screen it
+     * never visits. Reporting work in the language of a different tier reads
+     * as software that does not know which of its own screens you are on.
+     */
+    const sides = t.areaCount;
+    const covered = sides > 0
+      ? `${sides} side${sides === 1 ? "" : "s"} entered, ${t.linearFeet.toLocaleString()} LF total, averaging ${t.avgHeightFt}' tall${courtyardCount ? `, including ${courtyardCount} courtyard${courtyardCount === 1 ? "" : "s"}` : ""}. That's enough for a budget number.`
+      : `No dimensions yet, so there's no number to give you. Give each side a length and a height and this fills in.`;
     return {
       headline: "Quick Bid",
       covered,
-      gaps: t.areaCount > 0 ? [
-        "How these walls actually connect at the corners — inside and outside corners carry different material.",
-        "Whether any walls step back at height, which would mean brackets or a second run.",
-        "Where legs land in plan, so there's no layout drawing to hand a foreman.",
+      /*
+       * What a typed bid genuinely cannot know. The old list claimed there
+       * was no layout drawing to hand a foreman, which stopped being true
+       * the day Quick Bid started drawing the building from its own lengths.
+       */
+      gaps: sides > 0 ? [
+        "How these walls actually connect at the corners - inside and outside corners carry different material.",
+        "Whether any wall steps back at height, which would mean brackets or a second run.",
+        "Anything the plans show that the four lengths do not - setbacks, pop-outs, courtyards.",
       ] : [],
-      nextStep: t.areaCount > 0
-        ? "Full Bid sorts that out. It needs a floor plan traced — the elevation work you've already done carries straight over."
-        : "",
+      /*
+       * No nudge toward Full Bid. An estimator on this tier chose it, usually
+       * because a budget number is what was asked for - and being told to go
+       * and do the job properly is not advice, it is a reprimand.
+       */
+      nextStep: "",
     };
   }
 
@@ -2553,6 +2708,7 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     highlights: elevation.highlights,
     includeCourtyards: elevation.includeCourtyards,
     interiorWalls: elevation.interiorWalls,
+    quickBid: elevation.quickBid,
   };
 }
 
@@ -2627,12 +2783,81 @@ export function switchElevationTier(elevation: ProjectElevation, next: EstimateD
    * Korban Bid kept a set of strokes it never drew and Full Bid kept a trace it
    * never made. Each tier is put away holding only its own kind of work.
    */
-  const cleaned: TierSnapshot = current === "korban-bid"
+  /*
+   * Which kind of work a tier is allowed to keep is a property of the tier,
+   * not a name checked by hand.
+   *
+   * This asked "is it korban-bid", written when Korban was the only tier with
+   * geometry. Quick Bid now draws its outline from the typed lengths - and
+   * elevationHeights, every tier's coverage, lives inside overlayGeometry too
+   * - so leaving Quick Bid put it away with its geometry nulled and took the
+   * whole typed takeoff with it. Asking the capability table instead means a
+   * tier that gains or loses a kind of work is handled by changing one row.
+   */
+  const caps = TIER_CAPABILITIES[current] ?? TIER_CAPABILITIES["korban-bid"];
+  const cleaned: TierSnapshot = caps.overlayFrom === "traced"
     ? { ...outgoing, highlights: [] }
     : { ...outgoing, overlayGeometry: null, sectionViews: [], sectionView: blankTier().sectionView };
   const snapshots = { ...(elevation.tierSnapshots ?? {}), [current]: cleaned };
   const incoming = snapshots[next] ?? blankTier();
   return { ...elevation, ...incoming, tierSnapshots: snapshots, activeTier: next };
+}
+
+/**
+ * Brings the elevation's tier into line with the project's.
+ *
+ * Two records of one decision - the project says which tier is being bid, the
+ * elevation says which tier its measured work belongs to - and only a click on
+ * a depth tab ever moved the second. Anything that set the first another way,
+ * including simply creating the job, left them disagreeing with no way back.
+ *
+ * Two cases:
+ *
+ *   a snapshot exists    the estimator has measured in the target tier before,
+ *                        so this is a real switch: put the current work away
+ *                        and bring that tier's back out.
+ *
+ *   no snapshot          there is nothing to bring out, so switching would
+ *                        only hide the work that IS here behind a blank tier.
+ *                        The label was wrong, not the work. Relabel it.
+ *
+ * The second case is the one that matters, and it is worth being exact about
+ * why. On a job that has been bid at the tab it opened on, the live fields
+ * hold a real takeoff under a label nobody chose. Stashing that away would
+ * take a finished Quick Bid, file it under Korban, and hand back an empty
+ * screen - making the fault worse at the moment it was meant to be fixed.
+ * The work was done while the project said this tier. Say so.
+ */
+export function alignElevationTier(
+  elevation: ProjectElevation,
+  depth: EstimateDepth,
+): ProjectElevation {
+  const current = elevation.activeTier ?? "korban-bid";
+  if (current === depth) return elevation;
+  if (elevation.tierSnapshots?.[depth]) return switchElevationTier(elevation, depth);
+
+  /*
+   * Relabel only when there is nothing to mislabel.
+   *
+   * Relabelling live work is how a Quick Bid ends up filed as a Full Bid: the
+   * next switch puts it away under that label, and from then on the Full Bid
+   * tab prices a takeoff nobody measured there. Residue like that cannot be
+   * cleaned afterwards, because coverage has the same shape at every tier -
+   * there is nothing in the record to say which round measured it.
+   *
+   * So an empty elevation gets relabelled, which is safe and is the ordinary
+   * case; one holding real work gets a proper switch, which puts that work
+   * away under the label it was done under. Honest either way.
+   */
+  const measured =
+    (elevation.overlayGeometry?.fullOverlayRows?.length ?? 0) > 0 ||
+    (elevation.overlayGeometry?.elevationHeights?.length ?? 0) > 0 ||
+    (elevation.highlights?.length ?? 0) > 0 ||
+    (elevation.linearFeet ?? 0) > 0;
+
+  return measured
+    ? switchElevationTier(elevation, depth)
+    : { ...elevation, activeTier: depth };
 }
 
 export function courtyardQuantities(elevation: ProjectElevation | null) {

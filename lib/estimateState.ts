@@ -98,7 +98,15 @@ export const DEFAULT_CONSUMABLES: ConsumableLine[] = [
 ];
 
 export const DEFAULT_ESTIMATE_STATE: EstimateState = {
-  bidLevel: "korban-bid",
+  /*
+   * A bid opens at the shallowest round.
+   *
+   * This defaulted to korban-bid, the deepest - so the Estimate opened on the
+   * one round most jobs have never been bid at, showing nothing, on a page
+   * whose job is to show a price. A bid starts shallow and goes deeper as the
+   * information improves, and the page should open where the work starts.
+   */
+  bidLevel: "quick-bid",
 
   rentalDays: 30,
   frameRate: 2.0,

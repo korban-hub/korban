@@ -7,7 +7,7 @@ import {
   KorbanManagementShell,
   type KorbanMenuLink,
 } from "@/components/korban";
-import { getActiveElevation, getActiveProject } from "@/lib/projectStore";
+import { DEPTH_ORDER, getActiveElevation, getActiveProject, readTier } from "@/lib/projectStore";
 import { computeTravel, getBackendSettings, getPieceRate, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
 import { buildPresentationUrl } from "@/lib/presentationLink";
@@ -334,9 +334,34 @@ export default function EstimateReviewPage() {
 
   // -- Hydration --------------------------------------------------------------
   useEffect(() => {
-    function loadStoredEstimate() {
+    /*
+     * Loads the estimate for one bid level.
+     *
+     * A bid level is a round, not a view. The same job is bid for a budget
+     * number on typed dimensions, bid again on highlighted runs when better
+     * plans arrive, and traced in full when the GMP set lands - sometimes a
+     * year apart. All three are worth keeping and worth pricing.
+     *
+     * This read the live elevation, which only ever holds the tier currently
+     * being worked in, so every tab on the selector priced the same takeoff
+     * and the three rounds were indistinguishable. Reading the chosen tier's
+     * own record is what makes the selector mean anything.
+     *
+     * Called with no level on hydration, where the saved choice decides;
+     * called with one when the estimator picks a different round, which must
+     * not write the choice back or the two would chase each other.
+     */
+    function loadStoredEstimate(level?: BidLevel) {
       const project = getActiveProject();
-      const elevation = getActiveElevation();
+      const live = getActiveElevation();
+      const saved = loadEstimateState();
+      const chosen = level ?? saved.bidLevel;
+      /*
+       * The tier's own work. Configuration - frame width, bay length - stays
+       * on the live elevation, because it belongs to the job rather than to
+       * any one round of bidding it.
+       */
+      const elevation = readTier(live, chosen);
       const quantityEngine = elevation.quantityEngine;
       const backendSettings = getBackendSettings();
       setStoredEstimate({
@@ -371,9 +396,9 @@ export default function EstimateReviewPage() {
       setElevationBreakdownRows(coveredRows);
       setAllElevationRows(elevation.elevationBreakdown || []);
 
-      const width = elevation.scaffoldInput?.scaffoldWidth ?? 3;
+      const width = live.scaffoldInput?.scaffoldWidth ?? 3;
       setScaffoldWidth(width);
-      setBayLength(elevation.scaffoldInput?.standardBayLength ?? 10);
+      setBayLength(live.scaffoldInput?.standardBayLength ?? 10);
       setPlanksPerDeck(width >= 5 ? 5 : width >= 3.5 ? 4 : 3);
       setWallHeight(elevation.wallHeight ?? 0);
 
@@ -395,7 +420,6 @@ export default function EstimateReviewPage() {
           : keyFloor?.alignedPoints ?? anyFloor?.alignedPoints ?? []
       );
 
-      const saved = loadEstimateState();
       setBackend(backendSettings);
 
       setPartialExteriorMarkupPercent(backendSettings.pricing.partialExteriorMarkupPercent);
@@ -414,7 +438,21 @@ export default function EstimateReviewPage() {
       setDismantlePercent(backendSettings.labor.dismantlePercentOfErect);
       setLaborMarkupPercent(backendSettings.pricing.laborMarkupPercent);
 
-      setBidLevel(saved.bidLevel);
+      /*
+       * Only hydration decides the round; a pick must not be written back
+       * over the picker, or the two chase each other.
+       *
+       * And it opens on the round this job was actually bid at. The saved
+       * level is one value for the whole app rather than per project, so
+       * restoring it carried the last job's choice into the next one - a job
+       * bid at Quick opening on Korban and showing nothing.
+       */
+      if (!level) {
+        const bidAt = (DEPTH_ORDER as BidLevel[]).find(
+          (lvl) => (readTier(live, lvl).linearFeet ?? 0) > 0,
+        );
+        setBidLevel(bidAt ?? saved.bidLevel);
+      }
       setRentalDays(saved.rentalDays);
       setConsumables(saved.consumables);
       setSiteMiles(saved.siteMiles);
@@ -440,6 +478,56 @@ export default function EstimateReviewPage() {
       window.removeEventListener("pageshow", loadStoredEstimate);
     };
   }, []);
+
+  /*
+   * Changing the round re-reads that round.
+   *
+   * Kept apart from hydration on purpose: hydration sets the level from what
+   * was saved, so an effect that both set the level and depended on it would
+   * run forever. This one only reads.
+   */
+  useEffect(() => {
+    if (!isHydrated) return;
+    const live = getActiveElevation();
+    const tier = readTier(live, bidLevel);
+    const qe = tier.quantityEngine;
+    setStoredEstimate((prev) =>
+      prev
+        ? {
+            ...prev,
+            totalLinearFeet: tier.linearFeet ?? 0,
+            bays: qe?.bayCount ?? 0,
+            legs: qe?.legCount ?? 0,
+            jumps: qe?.jumps ?? 0,
+            frames: qe?.frameCount ?? 0,
+            planks: qe?.plankCount ?? 0,
+            crossBraces: qe?.crossBraceCount ?? 0,
+            guardrails: qe?.guardrailCount ?? 0,
+            basePlates: qe?.basePlateCount ?? 0,
+            screwJacks: qe?.screwJackCount ?? 0,
+            couplingPins: qe?.couplingPinCount ?? 0,
+          }
+        : prev,
+    );
+    const covered = (tier.elevationBreakdown || []).filter((row) => row.approxLinearFeet > 0);
+    setElevationBreakdownRows(covered);
+    setAllElevationRows(tier.elevationBreakdown || []);
+    setWallHeight(tier.wallHeight ?? 0);
+    const traced = (tier.overlayGeometry?.fullOverlayRows ?? []).filter(
+      (row) => row.points.length >= 3,
+    ).length;
+    setBuildingLevels(traced > 0 ? traced : Math.max(1, Math.round((tier.wallHeight ?? 0) / 12)));
+    const geometry = tier.overlayGeometry;
+    const keyFloor = geometry?.fullOverlayRows?.find(
+      (row) => row.isKeyFloor && row.alignedPoints.length >= 3,
+    );
+    const anyFloor = geometry?.fullOverlayRows?.find((row) => row.alignedPoints.length >= 3);
+    setPlanOutline(
+      (geometry?.tracedPerimeter?.length ?? 0) >= 3
+        ? geometry!.tracedPerimeter
+        : keyFloor?.alignedPoints ?? anyFloor?.alignedPoints ?? [],
+    );
+  }, [bidLevel, isHydrated]);
 
   const estimate = storedEstimate ?? EMPTY_ESTIMATE;
 
@@ -469,6 +557,26 @@ export default function EstimateReviewPage() {
   const selectedProduction =
     PRODUCTION_TYPES.find((type) => type.key === productionKey) ?? PRODUCTION_TYPES[1];
   const selectedLevel = BID_LEVELS.find((depth) => depth.key === bidLevel) ?? BID_LEVELS[2];
+
+  /*
+   * Which rounds this job has actually been bid at.
+   *
+   * Read per tier, because the live elevation only ever holds the one being
+   * worked in - asking it three times gives one answer three times, which is
+   * the whole fault this page had.
+   */
+  const roundsBid = useMemo(() => {
+    const live = (() => { try { return getActiveElevation(); } catch { return null; } })();
+    const bid = (level: BidLevel) => {
+      const tier = readTier(live, level);
+      return (tier.linearFeet ?? 0) > 0 || (tier.highlights?.length ?? 0) > 0;
+    };
+    return {
+      "quick-bid": bid("quick-bid"),
+      "full-bid": bid("full-bid"),
+      "korban-bid": bid("korban-bid"),
+    } as Record<BidLevel, boolean>;
+  }, [storedEstimate, bidLevel]);
 
   // -- Math -------------------------------------------------------------------
   const totals = useMemo(() => {
@@ -711,7 +819,13 @@ export default function EstimateReviewPage() {
 
       {activeTab === "breakdown" ? (
         <Workspace>
-          <LevelSelector bidLevel={bidLevel} setBidLevel={setBidLevel} selectedLevel={selectedLevel} />
+          <LevelSelector
+            bidLevel={bidLevel}
+            setBidLevel={setBidLevel}
+            selectedLevel={selectedLevel}
+            rounds={roundsBid}
+            empty={isHydrated && (estimate.totalLinearFeet ?? 0) <= 0}
+          />
 
           <div className="mt-3 grid items-start gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
             <RentalPanel
@@ -1081,11 +1195,15 @@ function TextField({
 // ----------------------------------------------------------------------
 
 function LevelSelector({
-  bidLevel, setBidLevel, selectedLevel,
+  bidLevel, setBidLevel, selectedLevel, rounds, empty,
 }: {
   bidLevel: BidLevel;
   setBidLevel: (depth: BidLevel) => void;
   selectedLevel: (typeof BID_LEVELS)[number];
+  /** Which rounds carry a takeoff, so a tab can say whether there is one. */
+  rounds: Record<BidLevel, boolean>;
+  /** True when the round on screen was never measured. */
+  empty: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-800 bg-korban-raised px-3 py-1.5">
@@ -1095,20 +1213,39 @@ function LevelSelector({
         </span>
         {BID_LEVELS.map((depth) => {
           const active = depth.key === bidLevel;
+          const bid = rounds[depth.key];
           return (
             <button
               key={depth.key}
               onClick={() => setBidLevel(depth.key)}
+              /* A round that was never measured is still selectable - looking
+                 at it is how an estimator decides to go and measure it. */
+              title={bid ? `${depth.title} - priced from its own takeoff` : `${depth.title} - not bid yet`}
               className={`rounded border px-3 py-1 font-mono text-[10px] font-medium transition ${
                 active
                   ? "border-orange-500/60 bg-orange-500/10 text-orange-300"
-                  : "border-zinc-800 bg-black text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                  : bid
+                    ? "border-zinc-800 bg-black text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                    : "border-zinc-900 bg-black text-zinc-700 hover:border-zinc-700 hover:text-zinc-500"
               }`}
             >
               {depth.title}
             </button>
           );
         })}
+        {/*
+          * Say when there is nothing here, rather than showing zeros.
+          *
+          * Every tab used to price the same takeoff, so an empty round was
+          * indistinguishable from a measured one. Now that they are genuinely
+          * separate, a round nobody has measured has to say so - otherwise it
+          * reads as a job that came to nothing.
+          */}
+        {empty && (
+          <span className="ml-1 font-mono text-[9px] text-amber-200/70">
+            not bid yet &mdash; measure it in Takeoff
+          </span>
+        )}
       </div>
       {/*
         * What the tier serves, not a percentage.
