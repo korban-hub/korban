@@ -1793,6 +1793,7 @@ export default function SetScaffoldV2Inner() {
     return (g.fullOverlayRows || []).filter((r: any) => r.points?.length >= 2).map((r: any, i: number) => ({
       id: r.id ?? i, level: r.level, isKeyFloor: Boolean(r.isKeyFloor),
       closed: Boolean(r.closed), color: r.color || (i === 0 ? "#2563eb" : "#22c55e"),
+      fromRoofPlan: Boolean(r.fromRoofPlan),
       points: r.points.filter(isFinitePoint),
     })).filter((r: any) => r.points.length >= 2);
   }, [elevation]);
@@ -3866,23 +3867,37 @@ export default function SetScaffoldV2Inner() {
                     : "grab",
               }}>
 
-              {/* Overlay */}
-              {showOverlay && (rawOverlayRows.length > 0 ? (
+              {/*
+                * Overlay.
+                *
+                * There used to be an else branch here: with no overlay rows
+                * to draw, it drew a hardcoded C-shaped building - a blue
+                * outline with a tinted fill and a green one inside it, at
+                * fixed coordinates owing nothing to any job.
+                *
+                * It was left over from before there was anything real to
+                * draw. On a Full Bid, whose outline comes from its strokes,
+                * fullOverlayRows is empty BY DESIGN - so the placeholder drew
+                * every single time, at a scale and an offset belonging to
+                * nothing, across the runs the strokes had actually measured.
+                *
+                * It survived clearing the job, switching rounds and re-doing
+                * the takeoff, because there was no data behind it to clear.
+                * Nothing to draw now draws nothing.
+                */}
+              {showOverlay && rawOverlayRows.length > 0 && (
                 <g>
                   {rawOverlayRows.map((r: any, i: number) => (
                     <path key={i}
                       d={`M${r.points[0]?.x} ${r.points[0]?.y} ${r.points.slice(1).map((p: any) => `L${p.x} ${p.y}`).join(" ")}${r.closed ? " Z" : ""}`}
-                      fill="transparent" stroke={r.isKeyFloor ? "#2563eb" : r.color} strokeWidth={r.isKeyFloor ? "1" : "0.7"} />
+                      fill="transparent" stroke={r.isKeyFloor ? "#2563eb" : r.color}
+                      strokeWidth={r.isKeyFloor ? "1" : "0.7"}
+                      /* The line above, dashed - a roof plan's perimeter
+                         carries the overhang, not the wall at grade. */
+                      strokeDasharray={r.fromRoofPlan ? "6 4" : undefined} />
                   ))}
                 </g>
-              ) : (
-                <g>
-                  <path d="M160 120 L880 120 L880 300 L700 300 L700 480 L880 480 L880 600 L160 600 Z"
-                    fill="rgba(37,99,235,0.06)" stroke="#2563eb" strokeWidth="1.2" />
-                  <path d="M172 132 L868 132 L868 312 L712 312 L712 468 L868 468 L868 588 L172 588 Z"
-                    fill="transparent" stroke="#22c55e" strokeWidth="0.8" opacity="0.8" />
-                </g>
-              ))}
+              )}
 
               {/* Scaffold ticks */}
               {/* Runs on levels that deviate from the key line. Drawn in the

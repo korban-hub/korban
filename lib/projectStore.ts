@@ -97,6 +97,20 @@ export type StoredFullOverlayRow = {
   color: string;
   pageNumber: number;
   /**
+   * Traced from a roof plan rather than a floor plan.
+   *
+   * A roof plan's perimeter is the line ABOVE - it carries the overhang, not
+   * the wall at grade. Useful, because the roof plan is often the cleanest
+   * outline in the set, and dangerous for the same reason: read as a wall
+   * line it puts the scaffold out past the building by whatever the eave
+   * projects.
+   *
+   * So an outline taken from one draws dashed, everywhere it is drawn. That
+   * is what a drafter would put on paper for a line above, and it means
+   * nobody has to remember which sheet it came off.
+   */
+  fromRoofPlan?: boolean;
+  /**
    * Per-level reference/anchor point picked on the plan — a fixed
    * feature (column, corner, grid intersection) that appears on every
    * level's sheet. All levels' outlines are shifted so their reference

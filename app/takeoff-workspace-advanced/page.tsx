@@ -12,11 +12,14 @@ import {
   parseFeetInches, alignElevationTier, alignOverlayRows, readTier,
   assignStrokeFaces, groupStrokesByFace, strokeDisplayName, FACE_ORDER, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { clearPlanSheet, loadPlanSheet, savePlanPage, savePlanSheet } from "@/lib/planStore";
+import { classifySheet, isPlanTag, usefulSheets, type SheetGuess } from "@/lib/sheetIndex";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
 
 // -- Types --------------------------------------------------------------------
-type PageTag        = "Floor Plan" | "Elevation View" | "Section View";
+/* Roof Plan sits with the plans: it is often the cleanest perimeter in the
+   set, and anything traced off it draws dashed because it is a line above. */
+type PageTag        = "Floor Plan" | "Roof Plan" | "Elevation View" | "Section View";
 type ActiveTab      = "floor" | "elevation" | "section";
 /** Top-level tabs are now bid depths; tools live as panels inside each. */
 type DepthTab       = "quick-bid" | "full-bid" | "korban-bid";
@@ -33,6 +36,8 @@ type ExtractedPage = { id: string; pageNumber: number; tag: PageTag; thumbnail: 
 type FloorLevel = {
   id: string; levelName: string; isKeyFloor: boolean;
   linealFeet: number; color: string;
+  /** Traced off a roof plan - the line above, so it draws dashed. */
+  fromRoofPlan?: boolean;
   tracePoints: Pt[]; traceClosed: boolean; traceMode: boolean; stored: boolean;
   /**
    * Per-level anchor point - a fixed feature (column, corner, grid
@@ -152,6 +157,10 @@ function makeCourtyard(index: number): Courtyard {
 }
 
 const TAB_TAGS: Record<ActiveTab,PageTag> = { floor:"Floor Plan", elevation:"Elevation View", section:"Section View" };
+/** Which sheet kinds a tab will show. The floor tab takes roof plans too. */
+function tabAccepts(tab:ActiveTab, tag:PageTag) {
+  return tab==="floor" ? isPlanTag(tag) : tag===TAB_TAGS[tab];
+}
 
 const menuLinks: KorbanMenuLink[] = [
   { href:"/takeoff-workspace",        label:"Standard Takeoff"  },
@@ -248,6 +257,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [walkthroughHidden, setWalkthroughHidden] = useState(false);
   const [readsItHidden,     setReadsItHidden]     = useState(false);
   const [extractedPages, setExtractedPages] = useState<ExtractedPage[]>([]);
+  /** What the set says its own sheets are, read out of the title blocks. */
+  const [sheetGuesses, setSheetGuesses] = useState<SheetGuess[]>([]);
+  const [scanningSheets, setScanningSheets] = useState(false);
+  const [sheetIndexOpen, setSheetIndexOpen] = useState(false);
   const [activeExtracted,setActiveExtracted]= useState<ExtractedPage|null>(null);
 
   const [tabScales, setTabScales] = useState<Record<ActiveTab,ScaleState>>({
@@ -425,6 +438,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           color: row.color || LEVEL_COLORS[i % LEVEL_COLORS.length],
           tracePoints: (row.points ?? []) as Pt[],
           traceClosed: Boolean(row.closed),
+          fromRoofPlan: Boolean(row.fromRoofPlan),
           traceMode: false,
           stored: true,
           refPoint: ((row as unknown as { refPoint?: Pt | null }).refPoint ?? null),
@@ -620,6 +634,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         // and the original stays intact for storing.
         const pdf = await lib.getDocument({ data: buf.slice(0) }).promise;
         setPdfDoc(pdf); setTotalPages(pdf.numPages);
+        void scanSheets(pdf);
         const wanted = Math.min(Math.max(1, page), pdf.numPages);
         setCurrentPageNo(wanted); setPageNoInput(String(wanted));
         setViewerUrl(await renderPage(pdf, wanted, 1.2));
@@ -699,6 +714,78 @@ export default function TakeoffWorkspaceAdvancedPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [pdfDoc, totalPages, currentPageNo, renderingPage]);
+
+  /**
+   * Reads the set's own index out of its title blocks.
+   *
+   * Runs once when a PDF is opened. Every page's text layer goes through the
+   * classifier, which looks at the sheet number and the sheet title and says
+   * what it thinks each page is. Nothing is applied: the result is a list the
+   * estimator glances at and accepts, because a sheet tagged wrong silently
+   * is worse than one not tagged at all.
+   *
+   * Text only. Architectural PDFs come out of CAD as vector, so the title
+   * block is real text and this costs almost nothing. A scanned set has no
+   * text layer, finds nothing, and the panel says so rather than guessing
+   * from the drawing - which would be wrong often and wrong confidently.
+   */
+  const scanSheets = useCallback(async (pdf: any) => {
+    if (!pdf) return;
+    setScanningSheets(true);
+    try {
+      const found: SheetGuess[] = [];
+      for (let n = 1; n <= pdf.numPages; n++) {
+        try {
+          const page = await pdf.getPage(n);
+          const content = await page.getTextContent();
+          const items = (content.items ?? [])
+            .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
+            .filter(Boolean);
+          found.push(classifySheet(n, items));
+        } catch {
+          /* One unreadable page is not a reason to abandon the set. */
+        }
+      }
+      setSheetGuesses(found);
+      setSheetIndexOpen(usefulSheets(found).length > 0);
+    } finally {
+      setScanningSheets(false);
+    }
+  }, []);
+
+  /**
+   * Takes a page the index identified and files it under its tab.
+   *
+   * The same thing the estimator does by hand with Extract, done from the
+   * list - including the scale the title block printed, offered rather than
+   * locked, because a printed scale only holds if the PDF is at the size it
+   * was drawn to.
+   */
+  async function acceptSheet(guess: SheetGuess) {
+    if (!pdfDoc) return;
+    if (extractedPages.some(pg=>pg.pageNumber===guess.pageNumber&&pg.tag===guess.tag)) return;
+    const thumb = await renderPage(pdfDoc, guess.pageNumber, 0.18);
+    setExtractedPages(prev=>[...prev,{
+      id:`idx-${guess.tag}-${guess.pageNumber}`,
+      pageNumber:guess.pageNumber,
+      tag:guess.tag,
+      thumbnail:thumb,
+      scale: guess.pageUnitsPerFootHint
+        ? { locked:false, label:`${guess.scaleLabel} (from title block)`, pageUnitsPerFoot:guess.pageUnitsPerFootHint }
+        : { locked:false, label:"", pageUnitsPerFoot:null },
+    }]);
+  }
+
+  /**
+   * Whether the sheet on screen is a roof plan.
+   *
+   * Taken from whichever page was filed for this page number - by the sheet
+   * index or by hand - so a trace knows what it was drawn over without the
+   * estimator having to remember.
+   */
+  function currentPageIsRoofPlan() {
+    return extractedPages.some(pg=>pg.pageNumber===currentPageNo&&pg.tag==="Roof Plan");
+  }
 
   async function extractCurrentPage() {
     if (!viewerUrl) return;
@@ -1152,7 +1239,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
       e.preventDefault();
       const puf=tabScales.floor.pageUnitsPerFoot;
       const lf=puf?calcPerimeterFt(lvl.tracePoints,puf):0;
-      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,traceClosed:true,traceMode:false,linealFeet:lf}:l));
+      /* Marked at the moment it closes, from the sheet it was drawn over. */
+      const roof=currentPageIsRoofPlan();
+      setFloorLevels(prev=>prev.map(l=>l.id===activeLevel?{...l,traceClosed:true,traceMode:false,linealFeet:lf,fromRoofPlan:roof}:l));
     }
   }
 
@@ -1193,6 +1282,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         linealFeet: level.linealFeet,
         color: level.color,
         pageNumber: currentPageNo,
+        fromRoofPlan: Boolean(level.fromRoofPlan),
         refPoint: level.refPoint,
         alignedPoints: level.tracePoints,
       }));
@@ -1616,7 +1706,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     );
   })();
 
-  const tabPages=extractedPages.filter(p=>p.tag===TAB_TAGS[activeTab]);
+  const tabPages=extractedPages.filter(p=>tabAccepts(activeTab,p.tag));
   const activeSec=sections.find(s=>s.id===activeSection)??sections[0];
   // Zone-aware face list: either the building's elevations or the active
   // courtyard's faces. Everything downstream (grips, tagging, rendering)
@@ -1839,7 +1929,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           })
           .map(tool=>{
           const active = activeTab===tool.id;
-          const count = extractedPages.filter(p=>p.tag===TAB_TAGS[tool.id]).length;
+          const count = extractedPages.filter(p=>tabAccepts(tool.id,p.tag)).length;
           return (
           <button key={tool.id} onClick={()=>setActiveTab(tool.id)}
             className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[10px] font-bold transition ${active?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
@@ -1967,11 +2057,108 @@ export default function TakeoffWorkspaceAdvancedPage() {
         </aside>
 
         {/* Center viewer */}
-        <section className="flex flex-1 flex-col overflow-hidden">
+        <section className="relative flex flex-1 flex-col overflow-hidden">
+
+          {/*
+            * The sheet index.
+            *
+            * What the set says about itself, read out of the title blocks when
+            * the PDF was opened. Offered, never applied - every row says what
+            * it read and why it landed where it did, so the glance is quick
+            * and a wrong one is a click to fix. A sheet filed wrong silently
+            * is the fault this is trying to avoid, not commit.
+            */}
+          {sheetIndexOpen&&sheetGuesses.length>0&&(() => {
+            const rows = usefulSheets(sheetGuesses);
+            return (
+              <div className="absolute left-3 top-14 z-30 w-[380px] max-h-[70%] overflow-y-auto rounded-xl border border-zinc-800 bg-[#0b0b0b]/95 p-3 shadow-2xl backdrop-blur">
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-300">Sheet index</p>
+                    <p className="mt-0.5 text-[9px] leading-4 text-zinc-500">
+                      Read from the title blocks. Nothing is applied until you take it.
+                    </p>
+                  </div>
+                  <button onClick={()=>setSheetIndexOpen(false)}
+                    className="text-[11px] text-zinc-600 hover:text-zinc-300">&times;</button>
+                </div>
+
+                {rows.length===0 ? (
+                  <p className="py-3 text-[10px] leading-4 text-zinc-500">
+                    Nothing readable in this set&apos;s title blocks. That usually means scanned
+                    sheets rather than vector &mdash; tag the pages by hand with Extract.
+                  </p>
+                ) : (
+                  <>
+                    <button
+                      onClick={()=>{ void (async()=>{ for(const row of rows) await acceptSheet(row); })(); }}
+                      className="mb-2 w-full rounded-lg border border-orange-500/50 bg-orange-500/10 py-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-orange-300 hover:bg-orange-500/20">
+                      Take all {rows.length}
+                    </button>
+                    <div className="space-y-1">
+                      {rows.map(row=>{
+                        const taken = extractedPages.some(pg=>pg.pageNumber===row.pageNumber&&pg.tag===row.tag);
+                        return (
+                          <div key={`${row.tag}-${row.pageNumber}`}
+                            className="rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-[9px] text-zinc-600">p{row.pageNumber}</span>
+                              <span className="font-mono text-[10px] font-bold text-zinc-300">
+                                {row.sheetNumber||"\u2014"}
+                              </span>
+                              <span className={`flex-1 truncate font-mono text-[9px] uppercase tracking-[0.06em] ${
+                                row.confidence==="high"?"text-zinc-400":"text-zinc-600"}`}>
+                                {row.title||row.reason}
+                              </span>
+                              <button
+                                onClick={()=>{ if(!taken) void acceptSheet(row); }}
+                                disabled={taken}
+                                className={`rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-[0.08em] transition ${
+                                  taken
+                                    ? "border-zinc-900 text-zinc-700"
+                                    : "border-zinc-700 text-zinc-400 hover:border-orange-500/50 hover:text-orange-300"}`}>
+                                {taken?"taken":"take"}
+                              </button>
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-2 pl-7">
+                              <span className={`font-mono text-[8px] uppercase tracking-[0.1em] ${
+                                row.tag==="Roof Plan"?"text-sky-400/80":"text-orange-400/70"}`}>
+                                {row.tag}
+                              </span>
+                              {row.face&&<span className="font-mono text-[8px] text-zinc-600">{row.face.toUpperCase()}</span>}
+                              {row.scaleLabel&&<span className="font-mono text-[8px] text-zinc-600">{row.scaleLabel}</span>}
+                              <span className="font-mono text-[8px] text-zinc-700">
+                                {row.confidence==="high"?"\u2713 "+row.reason:row.reason}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-2 text-[8px] leading-4 text-zinc-600">
+                      A printed scale is a proposal, not a lock &mdash; it only holds if the PDF is
+                      at the size it was drawn to. Check it against a known dimension before counting
+                      off it.
+                    </p>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Toolbar */}
           <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0b0b0b] px-3 py-2 flex-wrap">
             <button data-guide="upload" onClick={()=>fileRef.current?.click()} className={`rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-white/30 hover:text-white ${currentGuide==="upload"?"korban-guide-glow":""}`}>{pdfLoading?"Loading...":"Upload Plans"}</button>
             <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
+
+            {/* The set's own index, once it has been read. */}
+            {(scanningSheets||sheetGuesses.length>0)&&(
+              <button onClick={()=>setSheetIndexOpen(open=>!open)}
+                className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${
+                  sheetIndexOpen?"border-orange-500 bg-orange-500/15 text-orange-300":"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-white/30"}`}>
+                {scanningSheets ? "Reading sheets..." : `Sheet index (${usefulSheets(sheetGuesses).length})`}
+              </button>
+            )}
 
             {totalPages>1&&(
               <div className="flex items-center gap-1">
@@ -2335,8 +2522,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     const mk=1/viewerZoom; // markers are in page units, so counter-scale to stay a constant on-screen size
                     return (
                       <g key={lvl.id}>
+                        {/* A roof plan's perimeter is the line above - it
+                            carries the overhang, not the wall at grade - so it
+                            draws dashed wherever it is drawn, the way a
+                            drafter would put it on paper. */}
                         {lvl.tracePoints.length>=2&&(
-                          <polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")} fill={lvl.traceClosed?"rgba(249,115,22,0.08)":"none"} stroke={lvl.color} strokeWidth={1.5*mk} strokeDasharray={lvl.traceClosed?"none":`${4*mk},${3*mk}`}/>
+                          <polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")}
+                            fill={lvl.traceClosed&&!lvl.fromRoofPlan?"rgba(249,115,22,0.08)":"none"}
+                            stroke={lvl.color} strokeWidth={1.5*mk}
+                            strokeDasharray={lvl.fromRoofPlan?`${9*mk},${5*mk}`:lvl.traceClosed?"none":`${4*mk},${3*mk}`}/>
                         )}
                         {lvl.id===activeLevel&&lvl.tracePoints.map((pt,i)=>(
                           <g key={i}>
