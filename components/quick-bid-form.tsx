@@ -20,7 +20,11 @@ import {
   calculateQuantityEngine, getActiveElevation, partsForConfiguration,
   planksPerBayForWidth, saveActiveElevation,
 } from "@/lib/projectStore";
-import { getBackendSettings, getFinishRule, getObstructionFactor } from "@/lib/backendStore";
+import {
+  getBackendSettings,
+  getObstructionFactor,
+  governingFinishRule,
+} from "@/lib/backendStore";
 import { crewForJumps } from "@/lib/estimateState";
 import { KorbanGuidance } from "@/components/korban";
 
@@ -107,50 +111,6 @@ const BLANK: Form = {
   mirrorEastWest: false,
 };
 
-/**
- * What a scaffold several trades share has to be built to.
- *
- * The scaffold is one structure. If a mason and a painter both work off it, it
- * gets built for the mason - five foot frames and a six board deck - because
- * the painter can work off that and the mason cannot work off the painter's.
- * So the governing rule is the most demanding of those selected, taken field
- * by field: the widest frame, the deepest deck, and the bracket that carries
- * the most boards among any that call for one.
- *
- * `finish` on the returned rule names whichever selection set the width, so
- * the screen can say which trade is driving it rather than leaving an
- * estimator to guess why a 3' job came back at 5'.
- *
- * Lives here because the Quick Bid is its only caller. It belongs in
- * backendStore beside getFinishRule the moment a second tier needs it.
- */
-function governingFinishRule(finishes: string[], settings: ReturnType<typeof getBackendSettings>) {
-  const rules = finishes
-    .map((finish) => getFinishRule(finish, settings))
-    .filter((rule): rule is NonNullable<typeof rule> => Boolean(rule));
-  if (!rules.length) return undefined;
-
-  const widest = rules.reduce((best, rule) => (rule.scaffoldWidth > best.scaffoldWidth ? rule : best));
-  const planksPerJump = Math.max(...rules.map((rule) => rule.planksPerJump));
-
-  // The bracket that carries the most boards, among those that want one.
-  const bracketed = rules.filter((rule) => rule.bracketPartNo);
-  const capacity = (partNo: string) =>
-    settings.material.stock.find((row) => row.partNo === partNo)?.plankCapacity ?? 0;
-  const bracketPartNo = bracketed.length
-    ? bracketed.reduce((best, rule) =>
-        capacity(rule.bracketPartNo) > capacity(best.bracketPartNo) ? rule : best
-      ).bracketPartNo
-    : "";
-
-  return {
-    finish: widest.finish,
-    scaffoldWidth: widest.scaffoldWidth,
-    planksPerJump,
-    bracketPartNo,
-  };
-}
-
 // -- Small building blocks ----------------------------------------------------
 
 function Group({ step, title, children }: { step: string; title: string; children: React.ReactNode }) {
@@ -236,10 +196,15 @@ function NumField({ value, onChange, unit, placeholder, dim, width = "w-24" }: {
  * runs stand apart and tubes tie them together every other deck - which is
  * why a tall freestanding tower costs so much more than its face suggests.
  *
- * The rear runs carry no planks. Nobody works off them; they exist to stop
- * the front run falling over.
+ * The rear runs are planked three boards wide. They are not a work deck -
+ * nobody lays block off a buttress - but a man has to get along them to set
+ * the ties, and on a cladding job material is passed up through the base
+ * rather than lifted past a finished face. Three boards is a passage.
  */
 const FRAME_WIDTHS = [5, 3.5, 3];
+
+/** Boards across each rear run: a passage to walk and pass material, not a deck. */
+const INNER_RUN_PLANKS = 3;
 const TUBE_SIZES: { ft: number; partNo: string }[] = [
   { ft: 4, partNo: "ST4SG" },
   { ft: 6, partNo: "ST6SG" },
@@ -275,7 +240,7 @@ function planFreestanding(
     mode: "none" as const,
     runs: 1, rearWidth: 0, gapFt: 0,
     tube: null as { ft: number; partNo: string } | null,
-    tubes: 0, clamps: 0, rearLegs: 0, rearFrames: 0, rearBraces: 0,
+    tubes: 0, clamps: 0, rearLegs: 0, rearFrames: 0, rearBraces: 0, rearPlanks: 0,
   };
 
   if (mainWidthFt >= requiredBase) return empty;
@@ -300,6 +265,7 @@ function planFreestanding(
       rearLegs,
       rearFrames: rearLegs * rearJumps,
       rearBraces: bays * added.length * rearJumps * 2,
+      rearPlanks: bays * added.length * rearJumps * INNER_RUN_PLANKS,
     };
   }
 
@@ -363,6 +329,7 @@ function planFreestanding(
     rearLegs,
     rearFrames: rearLegs * rearJumps,
     rearBraces: bays * rearRuns * rearJumps * 2,
+    rearPlanks: bays * rearRuns * rearJumps * INNER_RUN_PLANKS,
   };
 }
 
@@ -380,7 +347,9 @@ function planFreestanding(
  * numbers from the same geometry is how a load list and a panel come to
  * disagree about the same scaffold.
  *
- * No planks. The rear runs are a buttress - nobody works off them.
+ * Planked three wide, per rear run per jump. Not a work deck - a passage to
+ * walk and to pass material up, which on a cladding job is the only way it
+ * goes up at all.
  */
 function freestandingParts(
   free: NonNullable<ReturnType<typeof planFreestanding>>,
@@ -429,6 +398,14 @@ function freestandingParts(
     rows.push({ partNo: "BP1", qty: free.rearLegs, note: "Free Stand rear leg" });
     const pins = free.rearLegs * Math.max(0, free.rearJumps - 1) * 2;
     if (pins > 0) rows.push({ partNo: "CPS", qty: pins, note: "Free Stand rear run" });
+  }
+
+  if (free.rearPlanks > 0) {
+    rows.push({
+      partNo: partsForConfiguration(free.rearWidth || 3, bayFt).plank,
+      qty: free.rearPlanks,
+      note: `Free Stand rear run, ${INNER_RUN_PLANKS} wide`,
+    });
   }
 
   // The tubes that bridge the gaps, and the clamps at both ends of each.
@@ -519,10 +496,21 @@ export default function QuickBidForm() {
         ? f.finishes.filter((name) => name !== finish)
         : [...f.finishes, finish];
       const rule = governingFinishRule(finishes, getBackendSettings());
+      /*
+       * A finish that cannot be tied sets the erection, not a warning about it.
+       *
+       * Terra cotta has nowhere to tie - the cladding is the wall. Leaving the
+       * estimator a note to go and change Erection himself means a run that
+       * cannot be built that way gets priced as though it can, every time the
+       * note is missed. So the selection does it, and the flag says what
+       * happened and why. Switching back to Tie-in afterwards is his to make;
+       * the flag turns into a warning if he does.
+       */
       return {
         ...f,
         finishes,
         widthFt: rule && !f.widthOverridden ? rule.scaffoldWidth : f.widthFt,
+        erection: rule?.requiresFreestanding ? "freestanding" : f.erection,
       };
     });
   }
@@ -551,7 +539,18 @@ export default function QuickBidForm() {
     // the width rule takes over - that is what an override means.
     const planksPerJump =
       rule && !form.widthOverridden ? rule.planksPerJump : planksPerBayForWidth(form.widthFt);
-    const bracketPartNo = rule && !form.widthOverridden ? rule.bracketPartNo : "";
+    /*
+     * No brackets on a freestanding run.
+     *
+     * A side bracket hangs a loaded deck outside the frame line, which moves
+     * the center of gravity past the base the whole third-of-the-height rule
+     * exists to establish. The deck falls back to what the frame itself
+     * carries - which is why a freestanding job wants a wider frame rather
+     * than a bracket on a narrow one.
+     */
+    const freestanding = form.erection === "freestanding";
+    const bracketPartNo =
+      rule && !form.widthOverridden && !freestanding ? rule.bracketPartNo : "";
     const bracketPlanks = bracketPartNo
       ? backend.material.stock.find((row) => row.partNo === bracketPartNo)?.plankCapacity ?? 0
       : 0;
@@ -841,6 +840,34 @@ export default function QuickBidForm() {
         text: "Sloped floor means screw jack range varies leg to leg. Base heights need field adjustment.",
       });
     }
+    /*
+     * A finish that cannot be tied.
+     *
+     * Terra cotta is the cladding, so there is nothing to tie to that will not
+     * later be a patched hole in finished work. The scaffold stands on its own
+     * or it does not stand, and that is not a detail to discover after the
+     * panels are on site - it changes the base width, the material and the
+     * price. Said at the top of the flags, where it is read before anything
+     * else gets typed.
+     */
+    if (rule?.requiresFreestanding) {
+      const names = rule.freestandingFinishes.join(" and ");
+      const base = free
+        ? ` Base is ${Math.floor(free.requiredBase)}'-${Math.round((free.requiredBase % 1) * 12)}" at ${Math.round(height)}' - a third of the height - and the rear runs are planked ${INNER_RUN_PLANKS} wide so a man can get along them and pass material up.`
+        : "";
+      flags.push(
+        form.erection === "freestanding"
+          ? {
+              tone: "note",
+              text: `${names} cannot be tied, so Korban has put this run on its own feet.${base} No brackets either - a bracket would hang the deck outside the base the third was built for.`,
+            }
+          : {
+              tone: "warn",
+              text: `${names} cannot be tied - the cladding is the wall, and a tie through it is a hole in finished work somebody has to patch and warrant. Erection is back on Tie-in, which is a run that cannot be built the way it is priced. Put it on Freestanding.`,
+            },
+      );
+    }
+
     if (lf > 0 && height > 0 && !form.finishes.length) {
       flags.push({
         tone: "note",

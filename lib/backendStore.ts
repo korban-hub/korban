@@ -139,6 +139,16 @@ export type FinishRule = {
   planksPerJump: number;
   /** Bracket hung at every jump to widen the deck. Blank for none. */
   bracketPartNo: string;
+  /**
+   * The finish leaves nowhere to tie.
+   *
+   * Terra cotta is the case that forced this. The rainscreen IS the wall, and
+   * a tie through it is a hole through finished cladding that somebody has to
+   * patch and warrant - so the scaffold stands on its own or it does not
+   * stand. An estimator who prices it tied has priced a job that cannot be
+   * built that way, and nobody finds out until the panels arrive.
+   */
+  requiresFreestanding?: boolean;
 };
 
 export type ObstructionRules = {
@@ -523,6 +533,16 @@ function buildDefaultStock(): StockItem[] {
   }));
 }
 
+/**
+ * What each trade needs underfoot.
+ *
+ * One list, read by every tier. The Quick Bid builds its buttons from it, Set
+ * Scaffold picks from it on a Full or Korban Bid, and the proposal says what
+ * the scaffold is for from the same selection - so "work being performed" on
+ * the sheet a customer signs is the trade the steel was actually sized for.
+ *
+ * A company can edit these; what follows is the trade's own convention.
+ */
 export const DEFAULT_FINISH_RULES: FinishRule[] = [
   { finish: "Plaster / Stucco", scaffoldWidth: 3, planksPerJump: 3, bracketPartNo: "" },
   { finish: "Paint", scaffoldWidth: 3, planksPerJump: 3, bracketPartNo: "" },
@@ -532,6 +552,35 @@ export const DEFAULT_FINISH_RULES: FinishRule[] = [
   { finish: "Inspection / Access", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
   // Six on the frame plus two on a 20" bracket makes an eight-plank deck.
   { finish: "Masonry", scaffoldWidth: 5, planksPerJump: 6, bracketPartNo: "BR20S" },
+  /*
+   * CMU block is masonry. Same block, same mortar, same man laying it from
+   * the same deck, so it reads as its own trade on the screen and resolves to
+   * the identical steel - 5' frames, six boards and a 20" bracket.
+   */
+  { finish: "CMU Block", scaffoldWidth: 5, planksPerJump: 6, bracketPartNo: "BR20S" },
+  /*
+   * Terra cotta cannot be tied, so it does not stand like anything else.
+   *
+   * The cladding is the wall, and a tie through it is a hole in finished work.
+   * So the run freestands: the base has to be a third of the height, and the
+   * rear runs that make up that base are planked three boards wide as a
+   * passage. No brackets either - a bracket hangs load outside the base and
+   * undoes the third it was built for.
+   *
+   * Panels are heavy and staged on the deck, so the working run is sized like
+   * masonry: 5' frames, six boards, on the frame itself.
+   */
+  { finish: "Terra Cotta", scaffoldWidth: 5, planksPerJump: 6, bracketPartNo: "", requiresFreestanding: true },
+  /*
+   * Thin brick veneer. Four boards, because the man needs his mortar, his
+   * brick and somewhere to stand, but the units are thin and the course goes
+   * up fast - it does not earn the 5' frame that full-bed masonry does.
+   */
+  { finish: "Thin Brick Veneer", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
+  // Cement panel: large, heavy sheets, carried flat and lifted into place.
+  { finish: "Cement Panel", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
+  // Acoustic panel is handled like cement panel - same sheet, same deck.
+  { finish: "Acoustic Panel", scaffoldWidth: 3.5, planksPerJump: 4, bracketPartNo: "" },
 ];
 
 export const DEFAULT_PRODUCTION_RATES: ProductionRates = {
@@ -904,18 +953,48 @@ function normalizeStock(value: unknown): StockItem[] {
   return [...merged, ...custom];
 }
 
+/**
+ * Stored rules merged over the defaults, never swapped for them.
+ *
+ * This used to return the stored list whole, which meant a company that had
+ * saved its settings once was frozen at that day's list of trades. Five new
+ * finishes shipped and nobody who had ever opened Backend could see them -
+ * the list looked like a bug in the new build rather than old data winning.
+ *
+ * A company's edits still win, finish by finish, and its own invented
+ * finishes are kept on the end.
+ */
 function normalizeFinishRules(value: unknown): FinishRule[] {
-  if (!Array.isArray(value) || value.length === 0) return DEFAULT_FINISH_RULES;
-  const rows = value
+  const stored = (Array.isArray(value) ? value : [])
     .filter(isRecord)
     .map((row) => ({
       finish: asString(row.finish, ""),
       scaffoldWidth: asNumber(row.scaffoldWidth, 3),
       planksPerJump: asNumber(row.planksPerJump, 3),
       bracketPartNo: asString(row.bracketPartNo, ""),
+      requiresFreestanding: row.requiresFreestanding === true,
     }))
     .filter((row) => row.finish !== "");
-  return rows.length ? rows : DEFAULT_FINISH_RULES;
+  if (stored.length === 0) return DEFAULT_FINISH_RULES;
+
+  const key = (finish: string) => finish.trim().toLowerCase();
+  const byFinish = new Map(stored.map((row) => [key(row.finish), row]));
+
+  const merged = DEFAULT_FINISH_RULES.map((fallback) => {
+    const saved = byFinish.get(key(fallback.finish));
+    if (!saved) return fallback;
+    /*
+     * requiresFreestanding is the default's to keep. It is not a preference
+     * about how a company likes to work - it is a fact about the cladding,
+     * and an older saved row simply predates the field.
+     */
+    return { ...saved, requiresFreestanding: fallback.requiresFreestanding === true };
+  });
+
+  const defaultKeys = new Set(DEFAULT_FINISH_RULES.map((row) => key(row.finish)));
+  const custom = stored.filter((row) => !defaultKeys.has(key(row.finish)));
+
+  return [...merged, ...custom];
 }
 
 function normalizeObstructions(value: unknown): ObstructionRules {
@@ -1212,6 +1291,72 @@ export function getFinishRule(
   return settings.material.finishRules.find(
     (rule) => rule.finish.toLowerCase() === finish.toLowerCase()
   );
+}
+
+/**
+ * One steel configuration for several trades on the same scaffold.
+ *
+ * Three trades can work off one run, and the scaffold has to suit the worst
+ * of them: the widest frame any of them needs, the deepest deck any of them
+ * needs, and the bracket that carries the most boards. A plasterer on a 5'
+ * masonry deck is merely comfortable; a mason on a 3' plaster deck has
+ * nowhere to put his block.
+ *
+ * Each dimension is taken independently, because the trade that wants the
+ * widest frame is not always the one that wants the most boards.
+ *
+ * `finish` names whichever selection set the width, so a screen can say which
+ * trade is driving it rather than leaving an estimator to wonder why a 3' job
+ * came back at 5'. `requiresFreestanding` is true when any selection cannot be
+ * tied - one such trade decides it for the whole run.
+ *
+ * Lived in the Quick Bid form while the Quick Bid was its only caller. Set
+ * Scaffold now picks finishes on a Full or Korban Bid, and the proposal reads
+ * the same selection, so it belongs here with the rules it reads.
+ */
+export function governingFinishRule(
+  finishes: string[],
+  settings: BackendSettings = getBackendSettings(),
+):
+  | {
+      finish: string;
+      scaffoldWidth: number;
+      planksPerJump: number;
+      bracketPartNo: string;
+      requiresFreestanding: boolean;
+      freestandingFinishes: string[];
+    }
+  | undefined {
+  const rules = finishes
+    .map((finish) => getFinishRule(finish, settings))
+    .filter((rule): rule is FinishRule => Boolean(rule));
+  if (!rules.length) return undefined;
+
+  const widest = rules.reduce((best, rule) => (rule.scaffoldWidth > best.scaffoldWidth ? rule : best));
+  const planksPerJump = Math.max(...rules.map((rule) => rule.planksPerJump));
+
+  // The bracket that carries the most boards, among those that want one.
+  const bracketed = rules.filter((rule) => rule.bracketPartNo);
+  const capacity = (partNo: string) =>
+    settings.material.stock.find((row) => row.partNo === partNo)?.plankCapacity ?? 0;
+  const bracketPartNo = bracketed.length
+    ? bracketed.reduce((best, rule) =>
+        capacity(rule.bracketPartNo) > capacity(best.bracketPartNo) ? rule : best
+      ).bracketPartNo
+    : "";
+
+  const freestandingFinishes = rules
+    .filter((rule) => rule.requiresFreestanding)
+    .map((rule) => rule.finish);
+
+  return {
+    finish: widest.finish,
+    scaffoldWidth: widest.scaffoldWidth,
+    planksPerJump,
+    bracketPartNo,
+    requiresFreestanding: freestandingFinishes.length > 0,
+    freestandingFinishes,
+  };
 }
 
 /** Labor and material uplift for a level of obstruction, as multipliers. */

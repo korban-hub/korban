@@ -2,12 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  KorbanButton,
   KorbanHeader,
   KorbanManagementShell,
   type KorbanMenuLink,
 } from "@/components/korban";
-import { DEPTH_ORDER, getActiveElevation, getActiveProject, readTier } from "@/lib/projectStore";
+import {
+  DEPTH_ORDER,
+  getActiveElevation,
+  getActiveProject,
+  readTier,
+  saveActiveElevation,
+} from "@/lib/projectStore";
 import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
 import { buildPresentationUrl } from "@/lib/presentationLink";
@@ -112,19 +117,17 @@ const estimateMenuLinks: KorbanMenuLink[] = [
 const HOURS_PER_DAY = 8;
 
 /**
- * What the scaffold is actually for. Drives the proposal description, since
- * "scaffold for exterior plaster" reads to a client and "1,240 LF" doesn't.
- * Mirrors the finish list in the Quick Bid form.
+ * How several trades read on a line a customer signs.
+ *
+ * "plaster / stucco and paint", not "Plaster / Stucco, Paint" - the proposal
+ * is a sentence, so the list has to behave like one.
  */
-const FINISHES = [
-  "Plaster / stucco",
-  "Paint",
-  "Siding",
-  "Masonry",
-  "Roofing",
-  "Waterproofing",
-  "Inspection / access",
-] as const;
+function tradePhrase(finishes: string[]): string {
+  const names = finishes.map((name) => name.toLowerCase().trim()).filter(Boolean);
+  if (names.length === 0) return "general access";
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 // ----------------------------------------------------------------------
 // Motion helpers
@@ -370,7 +373,20 @@ export default function EstimateReviewPage() {
   const [laborMarkupPercent, setLaborMarkupPercent] = useState(DEFAULT_ESTIMATE_STATE.laborMarkupPercent);
   const [miscRevenue, setMiscRevenue] = useState(DEFAULT_ESTIMATE_STATE.miscRevenue);
 
-  const [finish, setFinish] = useState<string>("Plaster / stucco");
+  /*
+   * What the scaffold is for, read from the takeoff rather than chosen again.
+   *
+   * This page used to keep its own finish, picked from its own hardcoded list
+   * of seven, defaulting to plaster whether or not anyone had said so. A job
+   * selected as masonry and thin brick in the Quick Bid reached the customer's
+   * sheet as "scaffold for plaster / stucco" - a sentence nobody wrote, in a
+   * document somebody signs.
+   *
+   * It is the elevation's field now. The Quick Bid form writes it, Set
+   * Scaffold writes it on a Full or Korban Bid, and the picker on the proposal
+   * tab writes the same place. One record, three doors into it.
+   */
+  const [finishes, setFinishes] = useState<string[]>([]);
   const [proposalStatus, setProposalStatus] = useState<ProposalStatus>("Draft");
   const [bidRoundPhase, setBidRoundPhase] = useState<BidRoundPhase>("Final Round");
   const [approvedAlternates, setApprovedAlternates] = useState<AlternateId[]>([]);
@@ -452,6 +468,7 @@ export default function EstimateReviewPage() {
       setObstructionHours(elevation.obstruction?.hours ?? 0);
       setObstructionLevel(elevation.obstruction?.level ?? "none");
       setObstructionMaterialPercent(elevation.obstruction?.materialPercent ?? 0);
+      setFinishes(elevation.finishes ?? []);
       setJumps(quantityEngine.jumps ?? 0);
 
       const tracedLevels = (elevation.overlayGeometry?.fullOverlayRows ?? []).filter(
@@ -590,6 +607,7 @@ export default function EstimateReviewPage() {
     setObstructionHours(tier.obstruction?.hours ?? 0);
     setObstructionLevel(tier.obstruction?.level ?? "none");
     setObstructionMaterialPercent(tier.obstruction?.materialPercent ?? 0);
+    setFinishes(tier.finishes ?? []);
     setJumps(qe?.jumps ?? 0);
     const traced = (tier.overlayGeometry?.fullOverlayRows ?? []).filter(
       (row) => row.points.length >= 3,
@@ -946,6 +964,23 @@ export default function EstimateReviewPage() {
     );
   }
 
+  /**
+   * Picking a trade here writes the takeoff, not a copy of it.
+   *
+   * An estimator who realises on the proposal tab that the glazier is on this
+   * scaffold too should be able to say so without walking back to Takeoff -
+   * but what he says has to land in the one place that holds it, or the next
+   * screen to read the elevation will disagree with this one.
+   */
+  function toggleFinish(name: string) {
+    const next = finishes.includes(name)
+      ? finishes.filter((item) => item !== name)
+      : [...finishes, name];
+    setFinishes(next);
+    const live = getActiveElevation();
+    if (live) saveActiveElevation({ ...live, finishes: next });
+  }
+
   function updateAlternateSettings(patch: Partial<AlternateSettings>) {
     setAlternateSettings((current) => ({ ...current, ...patch }));
   }
@@ -969,6 +1004,24 @@ export default function EstimateReviewPage() {
           actionsClassName="gap-2.5"
           actions={
             <>
+              {/*
+                * Back out of the proposal, left of the price.
+                *
+                * This was a Submit price button that set a status flag the
+                * proposal tab already sets with its own three buttons - so it
+                * appeared to do nothing, which is worse than not being there.
+                * The way back from the sheet is the thing that was missing.
+                */}
+              {activeTab === "proposal" && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("breakdown")}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-400/[0.06] px-3 py-2 font-mono text-[11px] font-bold text-zinc-300 transition hover:border-zinc-500 hover:bg-zinc-400/[0.1]"
+                >
+                  <span aria-hidden className="text-[13px] leading-none">&larr;</span>
+                  Bid review
+                </button>
+              )}
               <HeaderBid value={totals.finalBid} />
               <a
                 href="/margin-review"
@@ -976,9 +1029,6 @@ export default function EstimateReviewPage() {
               >
                 Review margins ↗
               </a>
-              <KorbanButton variant="primary" onClick={() => setProposalStatus("Submitted")}>
-                Submit price
-              </KorbanButton>
             </>
           }
         />
@@ -1127,8 +1177,8 @@ export default function EstimateReviewPage() {
           updateAlternateSettings={updateAlternateSettings}
           proposalNotes={proposalNotes}
           setProposalNotes={setProposalNotes}
-          finish={finish}
-          setFinish={setFinish}
+          finishes={finishes}
+          toggleFinish={toggleFinish}
           proposalStatus={proposalStatus}
           setProposalStatus={setProposalStatus}
           bidRoundPhase={bidRoundPhase}
@@ -2267,7 +2317,7 @@ function ProposalTab({
   company, backend, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
   miscRevenue, setMiscRevenue, alternateRevenue, finalBid,
   approvedAlternates, toggleAlternate, alternatePricing, alternateSettings,
-  updateAlternateSettings, proposalNotes, setProposalNotes, finish, setFinish, proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
+  updateAlternateSettings, proposalNotes, setProposalNotes, finishes, toggleFinish, proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
 }: {
   estimate: EstimateData;
   bidLevel: BidLevel;
@@ -2299,8 +2349,8 @@ function ProposalTab({
   updateAlternateSettings: (patch: Partial<AlternateSettings>) => void;
   proposalNotes: string;
   setProposalNotes: (notes: string) => void;
-  finish: string;
-  setFinish: (finish: string) => void;
+  finishes: string[];
+  toggleFinish: (name: string) => void;
   proposalStatus: ProposalStatus;
   setProposalStatus: (status: ProposalStatus) => void;
   bidRoundPhase: BidRoundPhase;
@@ -2434,20 +2484,29 @@ function ProposalTab({
             </div>
           </AlternatesPanel>
 
+          {/*
+            * The same trades, from the same record.
+            *
+            * The buttons are the company's own finish list out of Backend, not
+            * a list typed into this file - add a finish there and it appears
+            * here, in the Quick Bid and in Set Scaffold at once. Several can be
+            * on at a time, because several trades share one scaffold.
+            */}
           <Panel title="Work being performed" scan={false}>
             <p className="mb-2 text-[10px] leading-4 text-zinc-500">
-              What the scaffold is for. This drives the proposal description.
+              What the scaffold is for, from the takeoff. Changing it here changes the takeoff.
             </p>
             <div className="flex flex-wrap gap-1.5">
-              {FINISHES.map((option) => {
-                const active = finish === option;
+              {getBackendSettings().material.finishRules.map((rule) => {
+                const active = finishes.includes(rule.finish);
                 return (
                   <button
-                    key={option}
+                    key={rule.finish}
                     onClick={() => {
-                      setFinish(option);
+                      toggleFinish(rule.finish);
                       setActiveField("finish");
                     }}
+                    aria-pressed={active}
                     onMouseEnter={() => setActiveField("finish")}
                     onMouseLeave={() =>
                       setActiveField((current) => (current === "finish" ? null : current))
@@ -2458,11 +2517,16 @@ function ProposalTab({
                         : "border-zinc-900 bg-korban-raised text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
                     }`}
                   >
-                    {option}
+                    {rule.finish}
                   </button>
                 );
               })}
             </div>
+            {finishes.length === 0 && (
+              <p className="mt-2 text-[10px] leading-4 text-amber-200/70">
+                Nothing selected &mdash; line 01 will read &ldquo;for general access&rdquo;.
+              </p>
+            )}
           </Panel>
 
           <Panel title="Additional proposal notes" scan={false}>
@@ -2617,7 +2681,7 @@ function ProposalTab({
             alternatePricing={alternatePricing}
             backend={backend}
             proposalNotes={proposalNotes}
-            finish={finish}
+            finish={tradePhrase(finishes)}
             proposalStatus={proposalStatus}
             activeField={activeField}
           />
@@ -3209,7 +3273,7 @@ function ProposalSheet({
                         : "text-orange-600"
                     }`}
                   >
-                    {finish.toLowerCase()}
+                    {finish}
                   </span>{" "}
                   &mdash;{" "}
                   <span className="font-mono text-orange-600">

@@ -163,6 +163,23 @@ export type StoredHighlight = {
   heightFt: number;
   /** The estimator's own words - "back alley", "over the canopy". */
   note: string;
+  /**
+   * Which way this stroke faces: "North", "East", "South", "West".
+   *
+   * Worked out from the stroke's own bearing against project north, not
+   * assigned by hand. Blank until the stroke has been swiped, since a stroke
+   * with no length has no direction.
+   */
+  face?: string;
+  /**
+   * Set when the estimator corrects the face by hand.
+   *
+   * The outward side is inferred from where the rest of the strokes sit, which
+   * is right on an ordinary building and can be wrong on a courtyard or a
+   * re-entrant corner. One click flips it, and this says so - so a later
+   * re-derivation does not quietly undo him.
+   */
+  faceLocked?: boolean;
 };
 
 export type StoredCourtyardFace = {
@@ -275,6 +292,18 @@ export type TakeoffOverlayGeometry = {
   elevationRefs: StoredElevationReference[];
   elevationHeights: StoredElevationHeight[];
   scale: unknown;
+  /**
+   * Project north, in degrees clockwise from the top of the sheet.
+   *
+   * The plan's own north arrow, not true north - a set is drawn to project
+   * north and the elevations are named from it, so that is the only north
+   * Korban should ever know about.
+   *
+   * Sits here beside the scale because it is a fact about the drawing rather
+   * than a measurement: every round reads the same sheet, so every round reads
+   * the same north, and switching rounds must not disturb it.
+   */
+  projectNorthDeg?: number;
 };
 
 /**
@@ -2890,6 +2919,208 @@ export function clearElevationTakeoff(elevation: ProjectElevation): ProjectEleva
   };
 }
 
+/* -- Which way a stroke faces ------------------------------------------- */
+
+/**
+ * The four faces, in the order a drawing set lists them.
+ */
+export const FACE_ORDER = ["North", "East", "South", "West"] as const;
+export type FaceName = (typeof FACE_ORDER)[number];
+
+/**
+ * The letter a face carries on the plan, drafting-style.
+ *
+ * North is A and it runs clockwise, which is how a set is keyed and therefore
+ * what an estimator expects to see in the bubble.
+ */
+export function faceLetter(face: string): string {
+  const i = FACE_ORDER.indexOf(face as FaceName);
+  return i >= 0 ? "ABCD"[i] : "?";
+}
+
+/**
+ * Where the building sits, as far as the strokes know.
+ *
+ * Used to decide which side of a wall is outside. A stroke on its own cannot
+ * say - a wall running east to west faces north or south and the line is
+ * identical either way - so the outward side is taken as the side away from
+ * everything else that has been swiped. On an ordinary building that is right.
+ * On a courtyard it is backwards, which is why a face can be flipped by hand
+ * and why doing so locks it.
+ */
+export function strokeCentroid(
+  strokes: { a: StoredPoint; b: StoredPoint; lf: number }[],
+): StoredPoint {
+  const drawn = strokes.filter((s) => s.lf > 0);
+  if (drawn.length === 0) return { x: 0, y: 0 };
+  let x = 0;
+  let y = 0;
+  for (const s of drawn) {
+    x += (s.a.x + s.b.x) / 2;
+    y += (s.a.y + s.b.y) / 2;
+  }
+  return { x: x / drawn.length, y: y / drawn.length };
+}
+
+/**
+ * Which way a stroke faces, from its own bearing.
+ *
+ * The correspondence problem in one function. Eight strokes named in the order
+ * they were drawn carry nothing that says which elevation sheet they belong
+ * to, so the estimator holds that mapping in his head and it does not survive
+ * the trip between tabs. A stroke's geometry already knows: the wall's
+ * direction gives two possible faces, the side away from the rest of the job
+ * picks between them, and project north turns that into a name.
+ *
+ * Page coordinates run with y downwards, so north is negative y before project
+ * north is applied.
+ */
+export function faceForStroke(
+  a: StoredPoint,
+  b: StoredPoint,
+  centroid: StoredPoint,
+  projectNorthDeg = 0,
+): FaceName | "" {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (dx === 0 && dy === 0) return "";
+
+  // Both normals to the wall; the outward one points away from the job.
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const away = { x: mid.x - centroid.x, y: mid.y - centroid.y };
+  let nx = dy;
+  let ny = -dx;
+  if (nx * away.x + ny * away.y < 0) {
+    nx = -nx;
+    ny = -ny;
+  }
+
+  // Clockwise from the top of the sheet, then rotated onto project north.
+  const fromTop = (Math.atan2(nx, -ny) * 180) / Math.PI;
+  const bearing = ((fromTop - projectNorthDeg) % 360 + 360) % 360;
+
+  // Each face owns the 90 degrees centred on its own direction.
+  const quarter = Math.round(bearing / 90) % 4;
+  return FACE_ORDER[quarter];
+}
+
+/**
+ * Gives every swiped stroke its face.
+ *
+ * Re-derived whenever the strokes change, because moving one wall can move the
+ * centroid and so change which side of another wall is outside. A face the
+ * estimator set by hand is left exactly as he set it.
+ */
+export function assignStrokeFaces<T extends StoredHighlight>(
+  strokes: T[],
+  projectNorthDeg = 0,
+): T[] {
+  const centroid = strokeCentroid(strokes);
+  return strokes.map((stroke) =>
+    stroke.lf > 0 && !stroke.faceLocked
+      ? { ...stroke, face: faceForStroke(stroke.a, stroke.b, centroid, projectNorthDeg) }
+      : stroke,
+  );
+}
+
+/**
+ * What a stroke is called on screen.
+ *
+ * "NORTH 46'" rather than "HIGHLIGHT 6 - 46'". The first can be matched
+ * against the sheet on the table without thinking; the second is a number
+ * recording nothing but the order somebody happened to swipe in.
+ *
+ * Shaped so a grid reference drops in later without the record changing:
+ * NORTH 46' becomes NORTH GRID 1-5 46' and nothing downstream moves.
+ */
+export function strokeDisplayName(stroke: StoredHighlight): string {
+  const face = stroke.face ? stroke.face.toUpperCase() : "UNPLACED";
+  const run = stroke.lf > 0 ? ` \u00b7 ${stroke.lf}'` : "";
+  return `${face}${run}`;
+}
+
+/**
+ * The strokes gathered into the faces an estimator actually grips.
+ *
+ * Three swipes along the north wall are one elevation drawing, so they should
+ * be one thing to grip. Faces come back in drawing-set order and carry what
+ * the page needs to show its state: the footage swiped, and whether every
+ * stroke in the face has a height yet.
+ */
+export function groupStrokesByFace(strokes: StoredHighlight[]): {
+  face: FaceName;
+  letter: string;
+  strokes: StoredHighlight[];
+  linearFeet: number;
+  heightFt: number;
+  gripped: number;
+  stepped: boolean;
+}[] {
+  return FACE_ORDER.map((face) => {
+    const mine = strokes.filter((s) => s.lf > 0 && s.face === face);
+    const heights = mine.map((s) => s.heightFt).filter((h) => h > 0);
+    return {
+      face,
+      letter: faceLetter(face),
+      strokes: mine,
+      linearFeet: Math.round(mine.reduce((sum, s) => sum + s.lf, 0) * 10) / 10,
+      heightFt: heights.length ? Math.max(...heights) : 0,
+      gripped: heights.length,
+      /* One wall at two heights is two runs, and averaging them is how a
+         stepped building gets priced as a flat one. */
+      stepped: heights.length > 1 && Math.max(...heights) - Math.min(...heights) > 0.5,
+    };
+  }).filter((row) => row.strokes.length > 0);
+}
+
+/**
+ * A tier served only the kind of work it can actually do.
+ *
+ * This rule used to be applied once, on the way in - a snapshot was filtered
+ * as it was put away and then handed back verbatim forever after. Two things
+ * follow from that, and both of them were happening.
+ *
+ * A record written before the rule existed, or by any path that did not go
+ * through the switch, keeps its contamination permanently: the filter never
+ * runs on it again, so a Full Bid holding a traced outline from some earlier
+ * state hands that outline back every single time it is opened. Clearing and
+ * re-measuring does not help, because the snapshot is restored on top. That is
+ * the "old data that will not go away".
+ *
+ * And the filter itself was too blunt in the other direction. For a tier that
+ * does not trace it nulled overlayGeometry whole - but elevationHeights lives
+ * in there, and that is every tier's coverage, not traced work. So leaving
+ * Full Bid threw away the gripped heights, and coming back to it found none:
+ * every leg one frame tall on a building measured at forty-seven feet.
+ *
+ * So: filter on read, filter on write, and filter inside overlayGeometry
+ * rather than at it. Scale and coverage are facts about the round and survive
+ * everything. The outline, the strokes and the sections are kinds of work, and
+ * a tier is handed only its own.
+ *
+ * Filtering on read is also what repairs the existing records. The first time
+ * a bad snapshot is opened it comes back clean, and the next save writes it
+ * clean - no migration, no reset, nothing for the estimator to do.
+ */
+export function tierWork(snapshot: TierSnapshot, tier: EstimateDepth): TierSnapshot {
+  const caps = TIER_CAPABILITIES[tier] ?? TIER_CAPABILITIES["korban-bid"];
+  const geo = snapshot.overlayGeometry;
+
+  return {
+    ...snapshot,
+    overlayGeometry:
+      !geo || caps.overlayFrom === "traced"
+        ? geo
+        : /* Coverage and scale stay. The traced outline goes - this tier never
+             drew one, and drawing it is how a Full Bid came to show a plan
+             shape that has nothing to do with its strokes. */
+          { ...geo, fullOverlayRows: [], tracedPerimeter: [], overlayPoints: [] },
+    highlights: caps.overlayFrom === "highlights" ? snapshot.highlights : [],
+    sectionViews: caps.sectionView ? snapshot.sectionViews : [],
+    sectionView: caps.sectionView ? snapshot.sectionView : createEmptyElevation().sectionView,
+  };
+}
+
 /**
  * What one tier measured, whether or not it is the tier on screen.
  *
@@ -2900,8 +3131,8 @@ export function clearElevationTakeoff(elevation: ProjectElevation): ProjectEleva
  */
 export function readTier(elevation: ProjectElevation | null, tier: EstimateDepth): TierSnapshot {
   if (!elevation) return blankTier();
-  if ((elevation.activeTier ?? "korban-bid") === tier) return captureTier(elevation);
-  return elevation.tierSnapshots?.[tier] ?? blankTier();
+  if ((elevation.activeTier ?? "korban-bid") === tier) return tierWork(captureTier(elevation), tier);
+  return tierWork(elevation.tierSnapshots?.[tier] ?? blankTier(), tier);
 }
 
 export function switchElevationTier(elevation: ProjectElevation, next: EstimateDepth): ProjectElevation {
@@ -2926,12 +3157,16 @@ export function switchElevationTier(elevation: ProjectElevation, next: EstimateD
    * whole typed takeoff with it. Asking the capability table instead means a
    * tier that gains or loses a kind of work is handled by changing one row.
    */
-  const caps = TIER_CAPABILITIES[current] ?? TIER_CAPABILITIES["korban-bid"];
-  const cleaned: TierSnapshot = caps.overlayFrom === "traced"
-    ? { ...outgoing, highlights: [] }
-    : { ...outgoing, overlayGeometry: null, sectionViews: [], sectionView: blankTier().sectionView };
-  const snapshots = { ...(elevation.tierSnapshots ?? {}), [current]: cleaned };
-  const incoming = snapshots[next] ?? blankTier();
+  const snapshots = { ...(elevation.tierSnapshots ?? {}), [current]: tierWork(outgoing, current) };
+  /*
+   * The incoming tier is filtered too.
+   *
+   * Filtering only what was put away left every record written before this
+   * rule - or by any path that never went through here - handing its
+   * contamination straight back. A Full Bid that once held a traced outline
+   * restored it on arrival, every time, forever.
+   */
+  const incoming = tierWork(snapshots[next] ?? blankTier(), next);
   return { ...elevation, ...incoming, tierSnapshots: snapshots, activeTier: next };
 }
 

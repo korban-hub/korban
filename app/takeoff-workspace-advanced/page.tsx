@@ -9,7 +9,8 @@ import {
   courtyardQuantities,
   createProject,
   updateActiveProject,
-  parseFeetInches, alignElevationTier, alignOverlayRows, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
+  parseFeetInches, alignElevationTier, alignOverlayRows, readTier,
+  assignStrokeFaces, groupStrokesByFace, strokeDisplayName, FACE_ORDER, computeFrameMakeup, DEPTH_ORDER, getActiveElevation, getActiveProject, getEstimateDepth, planksPerBayForWidth, saveActiveElevation, setEstimateDepth, type EstimateDepth } from "@/lib/projectStore";
 import { clearPlanSheet, loadPlanSheet, savePlanPage, savePlanSheet } from "@/lib/planStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import QuickBidForm from "@/components/quick-bid-form";
@@ -278,6 +279,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
   /** True while the line being drawn is being held square. */
   const [orthoActive, setOrthoActive] = useState(false);
   const [highlights,    setHighlights]    = useState<StoredHighlight[]>([]);
+  /**
+   * Project north, in degrees clockwise from the top of the sheet.
+   *
+   * The plan's own north arrow. Everything about which elevation a stroke
+   * belongs to hangs off this one number, and it is set once per sheet.
+   */
+  const [projectNorthDeg, setProjectNorthDeg] = useState(0);
+  /** The face being gripped, when the estimator is working a face rather than one stroke. */
+  const [selectedFace, setSelectedFace] = useState<string>("");
   /** One elevation tile per stroke, kept in step with them. */
   const [highlightElev, setHighlightElev] = useState<ElevationData[]>([]);
   /** The tile a swipe will fill. Tiles come first; the stroke measures one. */
@@ -389,11 +399,20 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * browser storage, and the drawn grip rectangles, which are not stored -
    * only the numbers they produced. So the sheet needs re-uploading, but
    * nothing needs re-tracing or re-measuring.
+   *
+   * Read through the tier, not off the elevation.
+   *
+   * This took whatever geometry the record happened to hold and drew it, with
+   * no regard for which round was open - so a Full Bid, whose outline comes
+   * from its own strokes, came back wearing a traced floor plan left over from
+   * another round. On screen that is a green outline and a blue box sitting at
+   * an offset from every run, describing a building the strokes never
+   * measured.
    */
   useEffect(() => {
     try {
       const elev = getActiveElevation();
-      const geo = elev?.overlayGeometry;
+      const geo = elev ? readTier(elev, getEstimateDepth()).overlayGeometry : null;
       if (!geo) return;
 
       const rows = geo.fullOverlayRows ?? [];
@@ -432,7 +451,13 @@ export default function TakeoffWorkspaceAdvancedPage() {
        */
       const grippedHeight = elev.wallHeight ?? 0;
       // Highlighter strokes come back with everything else.
-      if ((elev.highlights ?? []).length > 0) setHighlights(elev.highlights);
+      setProjectNorthDeg(geo.projectNorthDeg ?? 0);
+      if ((elev.highlights ?? []).length > 0) {
+        /* Re-derived on load as well as on change: a record written before
+           faces existed arrives with none, and should not have to be
+           re-swiped to get them. */
+        setHighlights(assignStrokeFaces(elev.highlights, geo.projectNorthDeg ?? 0));
+      }
 
       // Traced sections come back the same as everything else does.
       const storedSections = elev.sectionViews ?? [];
@@ -1091,8 +1116,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
      * with no height, and every page reading the strokes showed nothing. The
      * stroke is what the rest of the app reads; write it where it is read.
      */
+    /*
+     * One grip, the whole face.
+     *
+     * Three swipes along the north wall are one elevation drawing, and
+     * gripping the same height three times off the same sheet is work that
+     * exists only because the strokes were never grouped. So a grip taken
+     * with a face selected lands on every stroke in that face; drill into a
+     * single stroke and it lands on that one alone, which is what a stepped
+     * wall needs.
+     */
     if (stroke && calc.heightFt > 0) {
-      setHighlights(prev=>prev.map(h=>h.id===stroke.id?{ ...h, heightFt: calc.heightFt }:h));
+      const face = selectedFace;
+      setHighlights(prev=>prev.map(h=>
+        h.id===stroke.id || (face && h.face===face && h.lf>0)
+          ? { ...h, heightFt: calc.heightFt }
+          : h));
+      if (face) {
+        updateActiveFaces(prev=>prev.map(ed=>{
+          const row=highlights.find(h=>h.label===ed.direction);
+          return row && row.face===face && row.lf>0
+            ? { ...ed, areas: ed.areas.map(a=>a.areaIndex===1
+                ? { ...a, ...calcGripArea(row.lf*puf, h, puf) }
+                : a) }
+            : ed;
+        }));
+      }
     }
     setGripStart(null); setGripCurrent(null); setGripMode(false);
   }
@@ -1273,7 +1322,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
         wallHeight:hasHighlights
           ? parseFloat((highlightTotals.heightSum / highlightTotals.lf).toFixed(1))
           : src.find(e=>e.direction==="North")?.areas.filter(a=>a.heightFt>0).reduce((s,a,_,arr)=>s+a.heightFt/arr.length,0)||elev.wallHeight,
-        overlayGeometry:{ ...existing, elevationHeights, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
+        overlayGeometry:{ ...existing, elevationHeights, projectNorthDeg, scale:puf?{ pageUnitsPerFoot:puf }:existing.scale },
         /*
          * Courtyards counted in with the rest. They are gripped like any other
          * face, and leaving them out priced a building with a light well short
@@ -1587,6 +1636,24 @@ export default function TakeoffWorkspaceAdvancedPage() {
   useEffect(() => {
     if (!activeHighlight && highlights.length > 0) setActiveHighlight(highlights[0].id);
   }, [highlights, activeHighlight]);
+
+  /*
+   * Faces follow the strokes.
+   *
+   * Which side of a wall is outside is judged against where the rest of the
+   * job sits, so moving one wall can change the answer for another. Derived
+   * from the whole set every time any of it changes, rather than fixed at the
+   * moment a stroke happened to be drawn.
+   *
+   * A face the estimator corrected by hand is left alone - assignStrokeFaces
+   * skips anything locked.
+   */
+  useEffect(() => {
+    setHighlights(prev => {
+      const next = assignStrokeFaces(prev, projectNorthDeg);
+      return next.some((row, i) => row.face !== prev[i]?.face) ? next : prev;
+    });
+  }, [projectNorthDeg, highlights]);
 
   /*
    * In Full Bid the selected face is a highlight, not a compass point. Left on
@@ -2166,17 +2233,71 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 <svg className="pointer-events-none absolute left-0 top-0 h-full w-full overflow-visible"
                   viewBox={naturalSize.w ? `0 0 ${naturalSize.w} ${naturalSize.h}` : undefined}>
 
+                  {/*
+                    * Elevation markers, the way a drawing set keys them.
+                    *
+                    * A circle with a letter and an arrow pointing the way you
+                    * are looking. Nobody has to learn it - it is the
+                    * convention already printed on every set - and it is what
+                    * ties the face on screen to the sheet on the table.
+                    *
+                    * One per face rather than one per stroke, because one
+                    * elevation drawing covers the whole face however many
+                    * swipes it took.
+                    */}
+                  {activeTab==="floor"&&groupStrokesByFace(highlights).map(group=>{
+                    const drawn=group.strokes;
+                    if(drawn.length===0) return null;
+                    // Out from the middle of the face, along its outward side.
+                    const mid=drawn.reduce((acc,h)=>({
+                      x: acc.x+(h.a.x+h.b.x)/2/drawn.length,
+                      y: acc.y+(h.a.y+h.b.y)/2/drawn.length,
+                    }),{x:0,y:0});
+                    const centre=highlights.filter(h=>h.lf>0).reduce((acc,h,_,arr)=>({
+                      x: acc.x+(h.a.x+h.b.x)/2/arr.length,
+                      y: acc.y+(h.a.y+h.b.y)/2/arr.length,
+                    }),{x:0,y:0});
+                    let ox=mid.x-centre.x, oy=mid.y-centre.y;
+                    const len=Math.hypot(ox,oy)||1;
+                    ox/=len; oy/=len;
+                    const mk=1/viewerZoom;
+                    const at={ x: mid.x+ox*46*mk, y: mid.y+oy*46*mk };
+                    const tip={ x: at.x-ox*14*mk, y: at.y-oy*14*mk };
+                    const lit=selectedFace===group.face;
+                    const ink=lit?"#f97316":group.gripped===group.strokes.length?"#52525b":"#a16207";
+                    return (
+                      <g key={`mk-${group.face}`} opacity={lit?1:0.75}>
+                        <line x1={at.x} y1={at.y} x2={tip.x} y2={tip.y} stroke={ink} strokeWidth={1.4*mk}/>
+                        <polygon
+                          points={`${tip.x},${tip.y} ${tip.x+oy*4*mk-ox*6*mk},${tip.y-ox*4*mk-oy*6*mk} ${tip.x-oy*4*mk-ox*6*mk},${tip.y+ox*4*mk-oy*6*mk}`}
+                          fill={ink}/>
+                        <circle cx={at.x} cy={at.y} r={11*mk} fill="#0a0a0a" stroke={ink} strokeWidth={1.4*mk}/>
+                        <text x={at.x} y={at.y+4*mk} textAnchor="middle" fontSize={12*mk} fill={ink}
+                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontWeight="bold">
+                          {group.letter}
+                        </text>
+                      </g>
+                    );
+                  })}
+
                   {/* Floor traces */}
                   {/*
                     * Highlighter strokes. They stay lit, labelled with what
                     * they cover, so the plan reads like a marked-up set.
                     */}
-                  {activeTab==="floor"&&highlights.filter(h=>h.lf>0).map((h,i)=>(
-                    <g key={h.id}>
+                  {activeTab==="floor"&&highlights.filter(h=>h.lf>0).map((h,i)=>{
+                    /* With a face selected, the rest go quiet. Same idea as
+                       the key plan: you can see what you are working on. */
+                    const dim = selectedFace !== "" && h.face !== selectedFace;
+                    return (
+                    <g key={h.id} opacity={dim?0.28:1}>
                       <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
-                        stroke="#fbbf24" strokeWidth={14/viewerZoom} strokeLinecap="round" opacity="0.32" />
+                        stroke={h.heightFt>0?"#fbbf24":"#f59e0b"} strokeWidth={14/viewerZoom} strokeLinecap="round"
+                        opacity={h.heightFt>0?0.32:0.18} />
                       <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
-                        stroke="#fbbf24" strokeWidth={2/viewerZoom} strokeLinecap="round" opacity="0.9" />
+                        stroke="#fbbf24" strokeWidth={2/viewerZoom} strokeLinecap="round"
+                        strokeDasharray={h.heightFt>0?undefined:`${6/viewerZoom},${4/viewerZoom}`}
+                        opacity="0.9" />
                       {(() => {
                         // Along its own line, off to one side, in the same
                         // drawing type the layout uses.
@@ -2195,13 +2316,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                             fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                             fontWeight="500" letterSpacing={0.6/viewerZoom}
                             transform={`rotate(${ang} ${at.x} ${at.y})`}>
-                            {h.label.toUpperCase()} &middot; {h.lf}&apos;
+                            {strokeDisplayName(h)}
+                            {h.heightFt > 0 ? ` \u00b7 ${h.heightFt}' TALL` : " \u00b7 NO HEIGHT"}
                             {h.note ? ` \u00b7 ${h.note.toUpperCase()}` : ""}
                           </text>
                         );
                       })()}
                     </g>
-                  ))}
+                    );
+                  })}
                   {activeTab==="floor"&&strokeFrom&&strokeTo&&(
                     <line x1={strokeFrom.x} y1={strokeFrom.y} x2={strokeTo.x} y2={strokeTo.y}
                       stroke="#fbbf24" strokeWidth={14/viewerZoom} strokeLinecap="round" opacity="0.45" />
@@ -2379,6 +2502,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   {highlights.reduce((sum,h)=>sum+h.lf,0).toFixed(1)} LF
                 </span>
               </div>
+
+              {/*
+                * Project north, set once per sheet.
+                *
+                * Not true north - a set is drawn to project north and its
+                * elevations are named from it, so this is the only north
+                * Korban needs. Every stroke's face hangs off this number, so
+                * it sits at the top of the strokes rather than buried in a
+                * toolbar.
+                */}
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-zinc-800 bg-black px-2 py-1.5">
+                <svg viewBox="0 0 24 24" className="h-5 w-5 flex-shrink-0"
+                  style={{ transform:`rotate(${projectNorthDeg}deg)` }}>
+                  <path d="M12 3 L15 13 L12 11 L9 13 Z" fill="#fbbf24" />
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="#3f3f46" strokeWidth="1" />
+                </svg>
+                <span className="flex-1 font-mono text-[9px] uppercase tracking-[0.1em] text-zinc-500">
+                  Project north {projectNorthDeg === 0 ? "up the sheet" : `${projectNorthDeg}\u00b0`}
+                </span>
+                <button
+                  onClick={()=>setProjectNorthDeg(deg=>(deg+90)%360)}
+                  title="Rotate project north a quarter turn"
+                  className="rounded border border-zinc-800 px-1.5 py-0.5 font-mono text-[9px] text-zinc-500 transition hover:border-yellow-400/40 hover:text-yellow-300">
+                  ROTATE
+                </button>
+              </div>
               <div className="space-y-1">
                 {highlights.map(h=>{
                   const selected = (activeHighlight ?? highlights[0]?.id) === h.id;
@@ -2388,10 +2537,42 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     className={`cursor-pointer rounded-lg border px-2 py-1.5 transition ${selected?"border-yellow-500/60 bg-yellow-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                     <div className="flex items-center gap-2">
                       <span className={`h-2 w-2 flex-shrink-0 rounded-full ${h.lf>0?"bg-yellow-400":"border border-zinc-700"}`} />
-                      <span className="flex-1 truncate font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-300">{h.label}</span>
+                      {/*
+                        * Named for where it is, not when it was drawn.
+                        *
+                        * "HIGHLIGHT 6" records only the order somebody
+                        * happened to swipe in; "NORTH 46'" can be matched
+                        * against the sheet on the table without thinking,
+                        * which is the whole of the problem this solves.
+                        */}
+                      <span className="flex-1 truncate font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-300">
+                        {h.lf>0 ? strokeDisplayName(h) : h.label}
+                      </span>
                       <span className={`font-mono text-[10px] ${h.lf>0?"text-yellow-300":"text-zinc-600"}`}>
                         {h.lf>0?`${h.lf}'`:"\u2014"}
                       </span>
+                      {/*
+                        * Flip the face.
+                        *
+                        * Which side of a wall is outside is inferred from
+                        * where the rest of the job sits. That is right on an
+                        * ordinary building and backwards on a courtyard, so
+                        * one click turns it round - and locks it, because a
+                        * correction the estimator made should not be quietly
+                        * re-derived away the next time he moves a wall.
+                        */}
+                      {h.lf>0&&h.face&&(
+                        <button onClick={(e)=>{
+                          e.stopPropagation();
+                          const i=FACE_ORDER.indexOf(h.face as typeof FACE_ORDER[number]);
+                          const flipped=FACE_ORDER[(i+2)%4];
+                          setHighlights(prev=>prev.map(row=>row.id===h.id?{...row,face:flipped,faceLocked:true}:row));
+                        }}
+                          title={`Faces ${h.face} - click to flip`}
+                          className={`font-mono text-[9px] transition ${h.faceLocked?"text-yellow-400":"text-zinc-600 hover:text-yellow-300"}`}>
+                          {h.faceLocked ? "\u21bb SET" : "\u21bb"}
+                        </button>
+                      )}
                       {highlights.length>1&&(
                         <button onClick={(e)=>{e.stopPropagation();setHighlights(prev=>prev.filter(row=>row.id!==h.id));}}
                           title="Remove this highlight"
@@ -2726,14 +2907,184 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </label>
                 </div>
 
-                <div className={usingHighlights&&activeZone==="building" ? "space-y-0.5 rounded-lg border border-zinc-900 bg-black p-1" : "flex gap-1 flex-wrap"}>
-                  {/*
-                    * The tiles are the strokes in Full Bid, the compass faces
-                    * otherwise - each stroke carries the footage it claimed.
-                    */}
-                  {(usingHighlights&&activeZone==="building"
-                      ? highlights.map(h=>h.label)
-                      : ELEVATION_DIRS).map(dir=>{
+                {/*
+                  * Full Bid grips faces, not strokes.
+                  *
+                  * The list used to be every stroke in the order it was drawn
+                  * - HIGHLIGHT 1 through 8 - and matching one of those to the
+                  * elevation sheet on the table was a thing the estimator did
+                  * in his head, repeatedly, across two tabs. Strokes gather
+                  * into the four faces a set is drawn to, each carrying the
+                  * footage swiped and whether it still owes a height. Drill
+                  * into a face to grip one stroke of it on a stepped wall.
+                  */}
+                {usingHighlights&&activeZone==="building" ? (() => {
+                  const faces = groupStrokesByFace(highlights);
+                  const swiped = highlights.filter(h=>h.lf>0);
+                  const gripped = swiped.filter(h=>h.heightFt>0).length;
+                  return (
+                    <div className="space-y-1">
+                      {/*
+                        * The key plan.
+                        *
+                        * An elevation sheet carries one in its corner for
+                        * exactly this reason: you are looking at a wall and
+                        * you need to know which wall. Drawn from the strokes
+                        * themselves, so it needs no sheet and no scale - the
+                        * face being gripped is lit and the rest go quiet,
+                        * which is the whole of "which one am I on".
+                        */}
+                      {swiped.length>0&&(() => {
+                        const xs=swiped.flatMap(h=>[h.a.x,h.b.x]);
+                        const ys=swiped.flatMap(h=>[h.a.y,h.b.y]);
+                        const pad=Math.max(12,(Math.max(...xs)-Math.min(...xs))*0.08);
+                        const vb=`${Math.min(...xs)-pad} ${Math.min(...ys)-pad} ${Math.max(...xs)-Math.min(...xs)+pad*2} ${Math.max(...ys)-Math.min(...ys)+pad*2}`;
+                        const span=Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys))||1;
+                        const w=span/70;
+                        return (
+                          <div className="rounded-lg border border-zinc-800 bg-black p-2">
+                            <div className="mb-1 flex items-center justify-between">
+                              <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">Key plan</span>
+                              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5"
+                                style={{ transform:`rotate(${projectNorthDeg}deg)` }}>
+                                <path d="M12 4 L15 14 L12 12 L9 14 Z" fill="#52525b" />
+                              </svg>
+                            </div>
+                            <svg viewBox={vb} className="h-28 w-full">
+                              {swiped.map(h=>{
+                                const lit=h.face===selectedFace;
+                                return (
+                                  <line key={h.id} x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
+                                    stroke={lit?"#f97316":h.heightFt>0?"#3f3f46":"#78350f"}
+                                    strokeWidth={lit?w*3:w*1.6}
+                                    strokeLinecap="round"
+                                    style={{ cursor:"pointer" }}
+                                    onClick={()=>{
+                                      if(!h.face) return;
+                                      setSelectedFace(h.face);
+                                      setSelectedElev(highlights.find(row=>row.face===h.face&&row.lf>0)?.label ?? h.label);
+                                      setSelectedArea(1);
+                                      setGripMode(false);
+                                    }}/>
+                                );
+                              })}
+                            </svg>
+                            <p className="mt-1 font-mono text-[8px] uppercase tracking-[0.1em] text-zinc-700">
+                              Amber &mdash; no height yet &middot; click a wall to grip it
+                            </p>
+                          </div>
+                        );
+                      })()}
+
+                      {/* The standing prompt. On screen the whole time, rather
+                          than a message fired once and dismissed. */}
+                      <div className={`rounded-lg border px-2.5 py-1.5 ${
+                        swiped.length>0&&gripped===swiped.length
+                          ? "border-emerald-500/30 bg-emerald-500/[0.06]"
+                          : "border-amber-500/30 bg-amber-500/[0.06]"}`}>
+                        <p className={`font-mono text-[9px] uppercase tracking-[0.14em] ${
+                          swiped.length>0&&gripped===swiped.length ? "text-emerald-300/80" : "text-amber-300/80"}`}>
+                          {swiped.length===0
+                            ? "Nothing swiped yet"
+                            : gripped===swiped.length
+                              ? `All ${swiped.length} swiped faces have a height`
+                              : `${gripped} of ${swiped.length} swiped faces have a height`}
+                        </p>
+                        {swiped.length>0&&gripped<swiped.length&&(
+                          <p className="mt-0.5 text-[9px] leading-4 text-zinc-500">
+                            A face with no height is no run and no material. It will not reach Set
+                            Scaffold until it has one.
+                          </p>
+                        )}
+                      </div>
+
+                      {faces.map(group=>{
+                        const open = selectedFace===group.face;
+                        return (
+                        <div key={group.face} className={`rounded-lg border ${open?"border-orange-500/50 bg-orange-500/[0.05]":"border-zinc-800 bg-black"}`}>
+                          <button
+                            onClick={()=>{
+                              setSelectedFace(group.face);
+                              setSelectedElev(group.strokes[0]?.label ?? "");
+                              setSelectedArea(1);
+                              setGripMode(false);
+                            }}
+                            className="flex w-full items-center gap-2 px-2 py-1.5 text-left">
+                            {/* The drafting bubble, same letter as the marker
+                                drawn on the plan. */}
+                            <span className={`grid h-5 w-5 flex-shrink-0 place-items-center rounded-full border font-mono text-[9px] font-bold ${
+                              open?"border-orange-400 text-orange-300":"border-zinc-700 text-zinc-500"}`}>
+                              {group.letter}
+                            </span>
+                            <span className="flex-1 font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-300">
+                              {group.face}
+                              <span className="ml-1.5 text-zinc-600">
+                                {group.strokes.length} stroke{group.strokes.length===1?"":"s"}
+                              </span>
+                            </span>
+                            <span className="font-mono text-[10px] text-yellow-300">{group.linearFeet}&apos;</span>
+                            <span className={`font-mono text-[10px] ${
+                              group.gripped===0 ? "text-zinc-600"
+                                : group.gripped<group.strokes.length ? "text-amber-300"
+                                : "text-emerald-300"}`}>
+                              {group.gripped===0 ? "\u2014" : `${group.heightFt}'`}
+                            </span>
+                          </button>
+
+                          {open&&(
+                            <div className="border-t border-zinc-900 px-2 py-1.5 space-y-1">
+                              {group.stepped&&(
+                                <p className="text-[9px] leading-4 text-amber-300/80">
+                                  This face carries two heights. That is two runs, not an average
+                                  &mdash; grip each stroke on its own below.
+                                </p>
+                              )}
+                              <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-zinc-600">
+                                {selectedFace ? "Gripping the whole face" : "Gripping one stroke"}
+                              </p>
+                              {group.strokes.map(stroke=>(
+                                <button key={stroke.id}
+                                  onClick={()=>{
+                                    setSelectedFace("");
+                                    setSelectedElev(stroke.label);
+                                    setSelectedArea(1);
+                                    setGripMode(false);
+                                  }}
+                                  className={`flex w-full items-center justify-between rounded px-1.5 py-1 text-left font-mono text-[9px] transition ${
+                                    !selectedFace&&selectedElev===stroke.label
+                                      ? "bg-zinc-800 text-zinc-100"
+                                      : "text-zinc-500 hover:text-zinc-300"}`}>
+                                  <span>{stroke.lf}&apos; {stroke.note ? `\u00b7 ${stroke.note.toUpperCase()}` : ""}</span>
+                                  <span className={stroke.heightFt>0?"text-emerald-300":"text-zinc-700"}>
+                                    {stroke.heightFt>0?`${stroke.heightFt}'`:"no height"}
+                                  </span>
+                                </button>
+                              ))}
+                              {selectedFace===""&&(
+                                <button onClick={()=>{setSelectedFace(group.face);setSelectedElev(group.strokes[0]?.label ?? "");}}
+                                  className="w-full rounded border border-zinc-800 py-1 font-mono text-[9px] text-zinc-500 hover:border-orange-500/40 hover:text-orange-300">
+                                  BACK TO WHOLE FACE
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        );
+                      })}
+
+                      {/* Swiped but with no face - nothing to group it under. */}
+                      {swiped.some(h=>!h.face)&&(
+                        <p className="px-1 text-[9px] leading-4 text-zinc-600">
+                          {swiped.filter(h=>!h.face).length} stroke(s) have no face yet. Set project
+                          north on the Floor Plan tab.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })() : (
+                <div className="flex gap-1 flex-wrap">
+                  {/* Compass faces: courtyards, and the tiers that do not swipe. */}
+                  {ELEVATION_DIRS.map(dir=>{
                     // A face counts as "in use" once something's gripped on
                     // it - courtyards often have an open side that never is.
                     const face=activeFaces.find(f=>f.direction===dir);
@@ -2751,6 +3102,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     );
                   })}
                 </div>
+                )}
 
                 {/* Duplicate toggles - North to South, East to West */}
                 {activeZone==="building"&&!usingHighlights&&selectedElev==="North"&&(
@@ -2770,7 +3122,19 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   </div>
                 )}
 
-                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">{selectedElev}{depthTab==="korban-bid" ? " - Coverage Areas" : usingHighlights ? " - height only" : " Elevation"}</p>
+                {/* What the grip is about to land on, said plainly. */}
+                <p className="text-[9px] text-zinc-500 uppercase tracking-wider">
+                  {usingHighlights
+                    ? (() => {
+                        const stroke=highlights.find(h=>h.label===selectedElev);
+                        return selectedFace
+                          ? `${selectedFace} \u2014 all ${highlights.filter(h=>h.face===selectedFace&&h.lf>0).length} strokes, height only`
+                          : stroke
+                            ? `${strokeDisplayName(stroke)} \u2014 this stroke only, height only`
+                            : "Swipe a face first";
+                      })()
+                    : `${selectedElev}${depthTab==="korban-bid" ? " - Coverage Areas" : " Elevation"}`}
+                </p>
 
                 {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
                   const hasData=area.rect&&area.lf>0;
@@ -2780,10 +3144,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       className={`rounded-xl border p-3 cursor-pointer transition ${hasData?"border-orange-500/40 bg-orange-500/5":isSelected?"border-zinc-600 bg-zinc-900":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                       <div className="flex items-center justify-between mb-2">
                         <span className={`text-[10px] font-bold ${isSelected?"text-orange-300":"text-zinc-400"}`}>
-                          {depthTab==="korban-bid" ? `Area ${area.areaIndex}` : usingHighlights ? selectedElev : `${selectedElev} Elevation`}
+                          {depthTab==="korban-bid" ? `Area ${area.areaIndex}` : usingHighlights ? (selectedFace || selectedElev) : `${selectedElev} Elevation`}
                           {usingHighlights&&(()=>{
-                            const stroke=highlights.find(h=>h.label===selectedElev);
-                            return stroke ? <span className="ml-2 font-mono text-[10px] font-normal text-yellow-300">{stroke.lf}&apos; lineal</span> : null;
+                            const lf = selectedFace
+                              ? highlights.filter(h=>h.face===selectedFace&&h.lf>0).reduce((sum,h)=>sum+h.lf,0)
+                              : highlights.find(h=>h.label===selectedElev)?.lf ?? 0;
+                            return lf > 0 ? <span className="ml-2 font-mono text-[10px] font-normal text-yellow-300">{Math.round(lf*10)/10}&apos; lineal</span> : null;
                           })()}
                         </span>
                         {hasData&&<button onClick={e=>{e.stopPropagation();updateActiveFaces(prev=>prev.map(ed=>ed.direction===selectedElev?{...ed,areas:ed.areas.map(a=>a.areaIndex===area.areaIndex?{...a,rect:null,lf:0,heightFt:0,frameTall:0,legs:0,bayCount:0}:a)}:ed));}} className="text-[9px] text-zinc-600 hover:text-red-400">Clear</button>}
@@ -2910,7 +3276,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   <p className="text-[9px] text-zinc-500 uppercase tracking-wider mb-2">
                     {usingHighlights ? "All Highlights to Set Scaffold" : "All Elevations to Set Scaffold"}
                   </p>
-                  {(usingHighlights ? highlights.map(h=>h.label) : ELEVATION_DIRS).map(dir=>{
+                  {(usingHighlights ? highlights.filter(h=>h.lf>0).map(h=>h.label) : ELEVATION_DIRS).map(dir=>{
                     const ed=activeFaces.find(e=>e.direction===dir);
                     const stroke=highlights.find(h=>h.label===dir);
                     const filled=ed?.areas.filter(a=>a.rect&&a.lf>0)??[];

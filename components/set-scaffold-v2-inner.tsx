@@ -6,8 +6,9 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
-import { getBackendSettings, getStockItem } from "@/lib/backendStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
+import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1385,6 +1386,8 @@ export default function SetScaffoldV2Inner() {
   const [pendingRun,     setPendingRun]     = useState<{ a: PlanPoint; b: PlanPoint }|null>(null);
   const [pendingHeight,  setPendingHeight]  = useState("");
   const [drawnRuns,      setDrawnRuns]      = useState<{ id: string; a: PlanPoint; b: PlanPoint; heightFt: number; sitsInterior: boolean }[]>([]);
+  /** Strokes swiped on the plan that nobody has gripped a height for yet. */
+  const [ungripped,      setUngripped]      = useState<StoredHighlight[]>([]);
   /** Off, a run goes exactly where it is drawn. On, it lines up. */
   const [snapAngle,      setSnapAngle]      = useState(true);
   const [activeMainTab,  setActiveMainTab]  = useState<"overlay" | "section">("overlay");
@@ -1465,6 +1468,8 @@ export default function SetScaffoldV2Inner() {
    * knows its own scale by construction.
    */
   const typedTier = (elevation?.activeTier ?? estimateDepth) === "quick-bid";
+  /** The steel the selected trades call for - the worst of them, field by field. */
+  const finishRule = governingFinishRule(elevation?.finishes ?? [], getBackendSettings());
   const puf      = elevation?.scale?.pageUnitsPerFoot ?? (isAerial ? 4 : typedTier ? 1 : null);
   const scaleOk  = (puf != null && puf > 0) || isAerial;
   const effPuf   = puf ?? 4;
@@ -1806,7 +1811,16 @@ export default function SetScaffoldV2Inner() {
          * blank defaults showing "no project", and nothing anywhere said why.
          * Takeoff and the store were both fine; this page simply never got told.
          */
-        setElevation(raw);
+        /*
+         * Through the tier, not straight off the record.
+         *
+         * This page draws whatever outline the elevation holds. Taken raw,
+         * that meant a Full Bid could be laid out over a traced floor plan
+         * belonging to another round - a shape at a different scale and
+         * offset, sitting across the runs the strokes actually measured.
+         * readTier hands back only the work this round did.
+         */
+        setElevation(raw ? { ...raw, ...readTier(raw, raw.activeTier ?? getEstimateDepth()) } : raw);
         setProjectName(p.projectName || "");
 
         /*
@@ -1821,7 +1835,22 @@ export default function SetScaffoldV2Inner() {
          */
         // Only a tier built on strokes lays runs from them.
         const strokeTier = (TIER_CAPABILITIES[raw.activeTier] ?? TIER_CAPABILITIES["korban-bid"]).overlayFrom === "highlights";
-        const strokes = strokeTier ? (raw.highlights ?? []) : [];
+        const allStrokes = strokeTier ? (raw.highlights ?? []) : [];
+        /*
+         * A stroke with no height is not a run.
+         *
+         * This took every stroke as a run and handed the engine whatever
+         * height it had, which for an ungripped one is zero - and zero comes
+         * back as a single frame. So eight swipes on a forty-seven foot
+         * building laid eight runs one frame tall, priced them, and said
+         * nothing. A half-measured face looked exactly like a measured one.
+         *
+         * Only gripped strokes become runs now. The rest are counted and
+         * named, so the page can say which faces are still owed a height
+         * rather than quietly pricing them at six foot four.
+         */
+        const strokes = allStrokes.filter(h => h.lf > 0 && h.heightFt > 0);
+        setUngripped(allStrokes.filter(h => h.lf > 0 && h.heightFt <= 0));
         if (strokes.length > 0) {
           const strokeIds = new Set(strokes.map(h => h.id));
           setDrawnRuns(prev => [
@@ -2306,6 +2335,30 @@ export default function SetScaffoldV2Inner() {
       sectionViews: (elevation.sectionViews ?? []).map(sv =>
         sv.id === sectionId ? { ...sv, scaffoldSide: side } : sv,
       ),
+    };
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+
+  /**
+   * What the scaffold is for, on a Full or Korban Bid.
+   *
+   * The Quick Bid has always asked. A Full or Korban Bid never did, so a job
+   * measured by tracing a plan reached the proposal with no trade attached and
+   * the sheet said whatever the proposal tab's own dropdown happened to be set
+   * to - a second record of something only the takeoff knows.
+   *
+   * Written to the elevation, which is the one record. The Quick Bid form, this
+   * panel and the proposal all read and write the same field.
+   */
+  function toggleFinish(finish: string) {
+    if (!elevation) return;
+    const current = elevation.finishes ?? [];
+    const next = {
+      ...elevation,
+      finishes: current.includes(finish)
+        ? current.filter((name) => name !== finish)
+        : [...current, finish],
     };
     setElevation(next);
     saveActiveElevation(next);
@@ -3391,6 +3444,26 @@ export default function SetScaffoldV2Inner() {
               ))}
             </div>
 
+            {/*
+              * Faces that are drawn but not measured.
+              *
+              * Said here rather than left to be noticed, because the counts
+              * below are honest only about what was gripped - and a bid that
+              * is three quarters measured should say so on the screen where
+              * the layout is read, not come out looking complete.
+              */}
+            {ungripped.length > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5">
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-amber-300/80">
+                  {ungripped.length} face{ungripped.length === 1 ? "" : "s"} swiped, not gripped
+                </p>
+                <p className="mt-1 text-[10px] leading-4 text-zinc-500">
+                  {ungripped.map(strokeDisplayName).join(", ")} &mdash; no height, so no run and no
+                  material. Grip them on the Elevations tab in Takeoff and they appear here.
+                </p>
+              </div>
+            )}
+
             <div className="mt-4 flex flex-wrap gap-4 text-[11px] text-zinc-500">
               <span>{quickTotals.linearFeet.toLocaleString()} LF gripped</span>
               <span>·</span>
@@ -3399,6 +3472,69 @@ export default function SetScaffoldV2Inner() {
               <span>avg {quickTotals.avgHeightFt}&apos; tall</span>
               {courtyardTotals.courtyardCount > 0 && (<><span>·</span><span>{courtyardTotals.courtyardCount} courtyard{courtyardTotals.courtyardCount === 1 ? "" : "s"}</span></>)}
             </div>
+
+            {/*
+              * Work being performed.
+              *
+              * Reads before the frame configuration it drives, because the
+              * trade is the reason the steel is the width it is.
+              */}
+            {!typedTier && (
+              <div className="mt-6 rounded-xl border border-zinc-900 bg-[#0b0b0b] p-4">
+                <div className="flex items-baseline justify-between">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">
+                    Work Being Performed
+                  </p>
+                  <span className="font-mono text-[9px] text-zinc-600">
+                    carries to the proposal
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {getBackendSettings().material.finishRules.map((rule) => {
+                    const picked = (elevation?.finishes ?? []).includes(rule.finish);
+                    return (
+                      <button
+                        key={rule.finish}
+                        type="button"
+                        onClick={() => toggleFinish(rule.finish)}
+                        aria-pressed={picked}
+                        title={`${rule.scaffoldWidth === 3.5 ? "3'-6\"" : `${rule.scaffoldWidth}'`} frame, ${rule.planksPerJump} planks per jump${rule.bracketPartNo ? ` plus ${rule.bracketPartNo}` : ""}`}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
+                          picked
+                            ? "border-orange-500 bg-orange-500/15 text-orange-300"
+                            : "border-white/10 text-zinc-500 hover:border-white/25 hover:text-zinc-300"
+                        }`}
+                      >
+                        {rule.finish}
+                      </button>
+                    );
+                  })}
+                </div>
+                {finishRule ? (
+                  <p className="mt-2.5 text-[10px] leading-4 text-zinc-600">
+                    Built to{" "}
+                    <span className="text-amber-200/80">{finishRule.finish}</span>, the most
+                    demanding of {(elevation?.finishes ?? []).length} selected &mdash;{" "}
+                    {finishRule.scaffoldWidth === 3.5 ? "3'-6\"" : `${finishRule.scaffoldWidth}'`}{" "}
+                    frame, {finishRule.planksPerJump} planks per jump
+                    {finishRule.bracketPartNo ? ` plus ${finishRule.bracketPartNo}` : ""}.
+                  </p>
+                ) : (
+                  <p className="mt-2.5 text-[10px] leading-4 text-zinc-600">
+                    Nothing selected, so the proposal cannot say what the scaffold is for.
+                  </p>
+                )}
+                {finishRule?.requiresFreestanding && (
+                  <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-2 text-[10px] leading-4 text-amber-200/80">
+                    {finishRule.freestandingFinishes.join(" and ")} cannot be tied &mdash; the
+                    cladding is the wall, and a tie through it is a hole in finished work. This run
+                    stands freestanding: the base has to be a third of the height, the rear runs are
+                    planked three wide as a passage, and no brackets &mdash; a bracket hangs the deck
+                    outside the base the third was built for.
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               {/* Frame configuration — needs only a height, so it works here */}
