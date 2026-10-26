@@ -654,22 +654,35 @@ export type TunnelPlan = {
 };
 
 /**
- * What working around obstructions costs in hours.
+ * What working around obstructions costs - carried, not buried.
  *
- * Trees, canopies, utilities, anything a crew has to build around. The
- * material uplift for this was being applied and the labor was not - the
- * factor was calculated, returned, and dropped on the floor, while the screen
- * said "labor up 15%, already in these counts". It was not in the counts, and
- * the Estimate had no idea obstructions existed.
+ * Trees, canopies, utilities, anything a crew has to build around. This used
+ * to be two wrongs. The material uplift was multiplied straight into the part
+ * counts, so the load list asked the yard for 246 frames on a job that needs
+ * 224 and nobody could say which 22 were the allowance. The labor factor was
+ * calculated, returned, and dropped on the floor, while the screen claimed
+ * both were "already in these counts".
  *
- * Counted per elevation and rounded up, because a crew mobilising to an
- * awkward face pays the setup whether that face is forty feet or a hundred.
+ * Both halves now travel as themselves. The counts stay the true geometric
+ * counts, the two figures here reach the Estimate as a contingency an
+ * estimator can keep or strike, and a project manager who finds a way around
+ * the trees can see exactly what he saved.
+ *
+ * Hours are counted per elevation and rounded up, because a crew mobilising
+ * to an awkward face pays the setup whether that face is forty feet or a
+ * hundred.
  */
 export type ObstructionLabor = {
   /** "none", "moderate" or "heavy". */
   level: string;
   /** Additional man-hours, on top of the production rate. */
   hours: number;
+  /**
+   * Percentage to add to the material allowance - 10 on moderate, 15 on
+   * heavy, from the company's own settings. A percentage and not a count,
+   * because the counts are the counts.
+   */
+  materialPercent?: number;
 };
 
 export type ProjectData = Record<string, ProjectRecord>;
@@ -1453,7 +1466,9 @@ function normalizeElevation(value: unknown): ProjectElevation {
       const o = record.obstruction;
       if (!isRecord(o)) return null;
       const hours = asNumber(o.hours, 0);
-      return hours > 0 ? { level: asString(o.level, "none"), hours } : null;
+      const materialPercent = Math.max(0, asNumber(o.materialPercent, 0));
+      if (hours <= 0 && materialPercent <= 0) return null;
+      return { level: asString(o.level, "none"), hours, materialPercent };
     })(),
     tunnel: (() => {
       const t = record.tunnel;
@@ -2521,7 +2536,22 @@ export type ElevationOnlyTotals = {
  */
 export function computeElevationOnlyTotals(
   elevation: ProjectElevation | null,
-  opts?: { bayLengthFt?: number; workerReachHeight?: number; plankCountPerBay?: number; screwJackMaxExtensionIn?: number; includeCourtyards?: boolean },
+  opts?: {
+    bayLengthFt?: number;
+    workerReachHeight?: number;
+    plankCountPerBay?: number;
+    screwJackMaxExtensionIn?: number;
+    includeCourtyards?: boolean;
+    /**
+     * The company's own material rules.
+     *
+     * This path used the hardcoded defaults while calculateQuantityEngine
+     * took the company's, so a yard that braces every other bay saw its rule
+     * honoured on one screen and ignored on the next. Passed through now, and
+     * the defaults still apply when a caller has none to give.
+     */
+    materialRules?: Partial<typeof MATERIAL_RULE_DEFAULTS>;
+  },
 ): ElevationOnlyTotals {
   const bayLen = Math.max(1, opts?.bayLengthFt ?? elevation?.scaffoldInput?.standardBayLength ?? 10);
   const reach = Math.max(0, opts?.workerReachHeight ?? 6);
@@ -2553,20 +2583,46 @@ export function computeElevationOnlyTotals(
   let crossBraceCount = 0, guardrailCount = 0, couplingPinCount = 0;
   let maxFrameTall = 0;
 
+  /*
+   * Every run goes through the one engine.
+   *
+   * This counted bays, legs, frames, planks, braces, rails and pins itself -
+   * the same arithmetic calculateQuantityEngine already does, written a
+   * second time a few hundred lines away. Identical today, as it happens;
+   * the danger was never that they disagreed but that nothing stopped them
+   * from starting to. A rule changed in one and not the other, and a job
+   * would price one way on the Estimate and another on the load list with
+   * no way to see which was right.
+   *
+   * One run at a time, because each face has its own height - a stepped
+   * building measured at its tallest wall is a building measured wrong.
+   */
   for (const run of runs) {
-    const bays = Math.max(1, Math.ceil(run.lf / bayLen));
-    const legs = bays + 1;
-    const makeup = computeFrameMakeup(Math.max(0, run.heightFt - reach), jackMax);
-    const tall = Math.max(1, makeup.frameTall);
+    const engine = calculateQuantityEngine({
+      linearFeet: run.lf,
+      wallHeight: run.heightFt,
+      standardBayLength: bayLen,
+      scaffoldWidth: elevation?.scaffoldInput?.scaffoldWidth ?? 3,
+      frameHeight: elevation?.scaffoldInput?.frameHeight ?? 6.333,
+      plankCountPerBay: ppb,
+      bracePattern: elevation?.scaffoldInput?.bracePattern ?? "Every Bay",
+      wallOffset: elevation?.scaffoldInput?.wallOffset ?? 1,
+      workerReachHeight: reach,
+      screwJackMaxExtensionIn: jackMax,
+      crossBracesPerBayPerLift: opts?.materialRules?.crossBracesPerBayPerLift,
+      guardrailTopPerBay: opts?.materialRules?.guardrailTopPerBay,
+      guardrailIntermediatePerBay: opts?.materialRules?.guardrailIntermediatePerBay,
+      couplingPinsPerFrame: opts?.materialRules?.couplingPinsPerFrame,
+    });
+    const tall = Math.max(1, engine.frameTall);
     linearFeet += run.lf;
-    bayCount += bays;
-    legCount += legs;
-    frameCount += legs * tall;
-    plankCount += bays * ppb * tall;
-    // These repeat at every lift, same as on the plan-geometry path.
-    crossBraceCount += bays * tall * MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
-    guardrailCount += bays * (MATERIAL_RULE_DEFAULTS.guardrailTopPerBay + Math.max(0, tall - 1) * MATERIAL_RULE_DEFAULTS.guardrailIntermediatePerBay);
-    couplingPinCount += legs * Math.max(0, tall - 1) * MATERIAL_RULE_DEFAULTS.couplingPinsPerFrame;
+    bayCount += engine.bayCount;
+    legCount += engine.legCount;
+    frameCount += engine.frameCount;
+    plankCount += engine.plankCount;
+    crossBraceCount += engine.crossBraceCount;
+    guardrailCount += engine.guardrailCount;
+    couplingPinCount += engine.couplingPinCount;
     heightSum += run.heightFt;
     if (tall > maxFrameTall) maxFrameTall = tall;
   }

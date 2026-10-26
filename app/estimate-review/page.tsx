@@ -351,6 +351,19 @@ export default function EstimateReviewPage() {
    */
   const [obstructionHours, setObstructionHours] = useState(0);
   const [obstructionLevel, setObstructionLevel] = useState("none");
+  /**
+   * The material allowance, as a percentage rather than parts.
+   *
+   * It used to be multiplied straight into the frame and plank counts in the
+   * takeoff, so the load list asked the yard for stock the job does not need
+   * and no one could separate the allowance from the count. It arrives here
+   * as a percentage now and is priced here, which is the only place it
+   * belongs.
+   */
+  const [obstructionMaterialPercent, setObstructionMaterialPercent] = useState(0);
+  const [contingencyIncluded, setContingencyIncluded] = useState(
+    DEFAULT_ESTIMATE_STATE.contingencyIncluded,
+  );
   const [phaseModeOn, setPhaseModeOn] = useState(DEFAULT_ESTIMATE_STATE.phaseModeOn);
   const [phases, setPhases] = useState<ProductionPhase[]>(DEFAULT_ESTIMATE_STATE.phases);
 
@@ -438,6 +451,7 @@ export default function EstimateReviewPage() {
       setWallHeight(elevation.wallHeight ?? 0);
       setObstructionHours(elevation.obstruction?.hours ?? 0);
       setObstructionLevel(elevation.obstruction?.level ?? "none");
+      setObstructionMaterialPercent(elevation.obstruction?.materialPercent ?? 0);
       setJumps(quantityEngine.jumps ?? 0);
 
       const tracedLevels = (elevation.overlayGeometry?.fullOverlayRows ?? []).filter(
@@ -502,6 +516,7 @@ export default function EstimateReviewPage() {
 
       setApprovedAlternates(saved.approvedAlternates);
       setAlternateSettings(saved.alternateSettings);
+      setContingencyIncluded(saved.contingencyIncluded);
 
       setIsHydrated(true);
     }
@@ -574,6 +589,7 @@ export default function EstimateReviewPage() {
     setWallHeight(tier.wallHeight ?? 0);
     setObstructionHours(tier.obstruction?.hours ?? 0);
     setObstructionLevel(tier.obstruction?.level ?? "none");
+    setObstructionMaterialPercent(tier.obstruction?.materialPercent ?? 0);
     setJumps(qe?.jumps ?? 0);
     const traced = (tier.overlayGeometry?.fullOverlayRows ?? []).filter(
       (row) => row.points.length >= 3,
@@ -715,29 +731,52 @@ export default function EstimateReviewPage() {
     // Travel follows the loads this job actually ships.
     const travel = computeTravel(estimate.planks, siteMiles);
     const travelCost = travel.cost;
+    const laborCost = erectCost + dismantleCost + travelCost;
+    const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
+
     /*
-     * Obstructions, at last.
+     * The contingency - carried, not hidden.
      *
-     * The takeoff counted the hours - so many per hundred feet of each
-     * elevation - and until now nothing on this page knew they existed. A
-     * crew working around trees and live utilities was priced as though the
-     * site were clear.
+     * Obstructions used to be two wrongs. The material uplift was multiplied
+     * into the part counts back in the takeoff, so the yard was asked for
+     * stock the job does not need. The labor factor was worked out, returned,
+     * and dropped - the site was priced as though it were clear.
      *
-     * Added on top of the production rate rather than folded into it: the
-     * production level is a judgement about how the work goes, the
-     * obstructions are a fact about where it happens, and an estimator should
-     * be able to see the two apart.
+     * Now both halves stand here, in their own panel, at their own figures.
+     * The reason they are separate is the PM: a good one may well find a way
+     * around the trees, and he cannot do that with an allowance smeared
+     * invisibly across a thousand frames. He can see what he is being given
+     * and what he saves by beating it.
+     *
+     * Priced the same way as the work it stands in for - the hours take the
+     * labor markup, the material takes its percentage of the rental - so
+     * including it is arithmetic and not a guess.
      */
     const obstructionCost = obstructionHours * erectRate;
-    const laborCost = erectCost + dismantleCost + travelCost + obstructionCost;
+    const contingencyLaborRevenue = Math.round(obstructionCost * (1 + laborMarkupPercent / 100));
+    const contingencyMaterialRevenue = Math.round(
+      rentalsRevenue * (obstructionMaterialPercent / 100),
+    );
+    const contingencyTotal = contingencyLaborRevenue + contingencyMaterialRevenue;
 
-    const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
     const alternateRevenue = approvedAlternates.reduce(
       (sum, id) => sum + (alternatePricing[id]?.value ?? 0),
       0
     );
 
-    const finalBid = Math.round(rentalsRevenue + laborRevenue + miscRevenue + alternateRevenue);
+    /*
+     * The one place the contingency joins everything else.
+     *
+     * Included, it is absorbed into the rental and labor lines that make the
+     * base bid, so it lands in the first line item - before any alternate or
+     * add item - and the customer sees one price for the work rather than a
+     * line asking him to pay for trees. Unticked, it is still worked out and
+     * still shown; it just stops reaching the price.
+     */
+    const billedRentals = rentalsRevenue + (contingencyIncluded ? contingencyMaterialRevenue : 0);
+    const billedLabor = laborRevenue + (contingencyIncluded ? contingencyLaborRevenue : 0);
+
+    const finalBid = Math.round(billedRentals + billedLabor + miscRevenue + alternateRevenue);
 
     const totalPieces =
       estimate.frames + estimate.planks + estimate.crossBraces + estimate.guardrails +
@@ -748,11 +787,13 @@ export default function EstimateReviewPage() {
       productionDays, phaseDays, erectHours, dismantleHours,
       erectCost, dismantleCost, travelCost, laborCost, travel,
       obstructionHours, obstructionCost, obstructionLevel,
+      contingencyLaborRevenue, contingencyMaterialRevenue, contingencyTotal,
+      billedRentals, billedLabor,
       laborRevenue, alternateRevenue, finalBid, totalPieces,
     };
   }, [
     alternatePricing, approvedAlternates, consumables, crewSize, dismantlePercent, erectRate, estimate,
-    obstructionHours, obstructionLevel,
+    obstructionHours, obstructionLevel, obstructionMaterialPercent, contingencyIncluded,
     frameRate, laborMarkupPercent, miscRevenue, phaseModeOn, phases, plankRate,
     rentalDays, plan, jumps, siteMiles, travelRate,
   ]);
@@ -767,6 +808,7 @@ export default function EstimateReviewPage() {
       productionKey, crewSize, phaseModeOn, phases,
       approvedAlternates,
       alternateSettings,
+      contingencyIncluded,
       derived: {
         frames: estimate.frames,
         planks: estimate.planks,
@@ -790,9 +832,9 @@ export default function EstimateReviewPage() {
       },
     });
   }, [
-    alternateSettings, approvedAlternates, bidLevel, consumables, crewSize, dismantlePercent,
-    erectRate, estimate, frameRate, isHydrated, phaseModeOn, phases, plankRate, productionKey,
-    rentalDays, totals, siteMiles, travelRate,
+    alternateSettings, approvedAlternates, bidLevel, consumables, contingencyIncluded, crewSize,
+    dismantlePercent, erectRate, estimate, frameRate, isHydrated, phaseModeOn, phases, plankRate,
+    productionKey, rentalDays, totals, siteMiles, travelRate,
   ]);
 
   /**
@@ -989,11 +1031,19 @@ export default function EstimateReviewPage() {
                 erectCost={totals.erectCost}
                 dismantleCost={totals.dismantleCost}
                 travelCost={totals.travelCost}
-                obstructionHours={totals.obstructionHours}
-                obstructionCost={totals.obstructionCost}
-                obstructionLevel={totals.obstructionLevel}
                 laborCost={totals.laborCost}
                 dismantlePercent={dismantlePercent}
+              />
+
+              <ContingencyPanel
+                level={totals.obstructionLevel}
+                hours={totals.obstructionHours}
+                laborValue={totals.contingencyLaborRevenue}
+                materialPercent={obstructionMaterialPercent}
+                materialValue={totals.contingencyMaterialRevenue}
+                total={totals.contingencyTotal}
+                included={contingencyIncluded}
+                setIncluded={setContingencyIncluded}
               />
 
               <ProductionPanel
@@ -1056,8 +1106,16 @@ export default function EstimateReviewPage() {
           backend={backend}
           rentalDays={rentalDays}
           rentalMonths={totals.rentalMonths}
-          rentalsRevenue={totals.rentalsRevenue}
-          laborRevenue={totals.laborRevenue}
+          /*
+           * The billed figures, with the contingency already inside them.
+           *
+           * The customer gets one price for the work. An allowance for trees
+           * and live utilities is the contractor's business, not a line item
+           * to defend across a table - and a separate line invites the GC to
+           * strike the only part of the bid that covers the unknown.
+           */
+          rentalsRevenue={totals.billedRentals}
+          laborRevenue={totals.billedLabor}
           miscRevenue={miscRevenue}
           setMiscRevenue={setMiscRevenue}
           alternateRevenue={totals.alternateRevenue}
@@ -1585,7 +1643,6 @@ function LaborPanel({
   erectHours, dismantleHours, travel, siteMiles, setSiteMiles,
   erectRate, setErectRate, travelRate, setTravelRate,
   erectCost, dismantleCost, travelCost, laborCost, dismantlePercent,
-  obstructionHours, obstructionCost, obstructionLevel,
 }: {
   erectHours: number; dismantleHours: number;
   travel: { loads: number; legs: number; legHours: number; hours: number; cost: number };
@@ -1594,7 +1651,6 @@ function LaborPanel({
   erectRate: number; setErectRate: (rate: number) => void;
   travelRate: number; setTravelRate: (rate: number) => void;
   erectCost: number; dismantleCost: number; travelCost: number; laborCost: number;
-  obstructionHours: number; obstructionCost: number; obstructionLevel: string;
   dismantlePercent: number;
 }) {
   return (
@@ -1665,30 +1721,120 @@ function LaborPanel({
       </div>
 
       {/*
-        * Obstructions on their own line.
+        * Obstructions are not here any more.
         *
-        * Shown apart from the production rate because they answer a different
-        * question: production is a judgement about how the work goes,
-        * obstructions are a fact about where it happens. Folded together, an
-        * estimator defending a number cannot say which part is which.
+        * They sat on this panel's bottom line, which made the labor cost of a
+        * clear site and an awkward one the same figure with different
+        * contents. They now stand in Contingency, where an estimator can see
+        * them, price them, and strike them.
         */}
-      {obstructionHours > 0 && (
-        <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1">
-          <div>
-            <span className="text-[11px] text-zinc-300">Obstructions</span>
-            <p className="font-mono text-[9px] text-zinc-700">
-              {obstructionLevel === "heavy" ? "Heavy" : "Moderate"} site &middot;{" "}
-              {obstructionHours.toLocaleString()} hrs from the takeoff
-            </p>
-          </div>
-          <span />
-          <span className="text-right font-mono text-[12px] font-bold text-zinc-200">
-            {formatMoney(obstructionCost)}
-          </span>
-        </div>
-      )}
-
       <TotalBox label="Labor cost" value={laborCost} />
+    </Panel>
+  );
+}
+
+// ----------------------------------------------------------------------
+// Contingency
+// ----------------------------------------------------------------------
+
+/**
+ * What the obstructions are worth, where it can be seen.
+ *
+ * The site is described once, in the takeoff: clear, moderate or heavy. From
+ * that came two figures that used to go two wrong ways. The material uplift
+ * was multiplied into the part counts, so a job needing 224 frames shipped a
+ * load list for 246 and no one could say which 22 were the allowance. The
+ * labor was calculated and thrown away, so a crew working around live
+ * utilities was priced as though the yard were empty.
+ *
+ * Both now stand here as themselves, and the tick decides whether they reach
+ * the price. That tick exists because of the project manager: a good one often
+ * does find a way around the trees, and he is owed the chance to see what the
+ * bid carries for them. Struck, the figures stay on the screen - the estimator
+ * has said he will take the risk, not that the risk went away.
+ */
+function ContingencyPanel({
+  level, hours, laborValue, materialPercent, materialValue, total, included, setIncluded,
+}: {
+  level: string;
+  hours: number;
+  laborValue: number;
+  materialPercent: number;
+  materialValue: number;
+  total: number;
+  included: boolean;
+  setIncluded: (on: boolean) => void;
+}) {
+  const siteName = level === "heavy" ? "Heavy" : level === "moderate" ? "Moderate" : "Clear";
+
+  return (
+    <Panel
+      title="Contingency"
+      right={
+        total > 0 ? (
+          <button
+            type="button"
+            onClick={() => setIncluded(!included)}
+            className={`flex items-center gap-1.5 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] transition ${
+              included
+                ? "border-amber-600/60 bg-amber-500/10 text-amber-300"
+                : "border-zinc-700 text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <span
+              className={`grid h-2.5 w-2.5 place-items-center rounded-sm border text-[7px] leading-none ${
+                included ? "border-amber-500 bg-amber-500 text-black" : "border-zinc-600"
+              }`}
+            >
+              {included ? "\u2713" : ""}
+            </span>
+            {included ? "in the bid" : "not in the bid"}
+          </button>
+        ) : null
+      }
+    >
+      {total === 0 ? (
+        <p className="px-1 py-2 text-[11px] leading-5 text-zinc-600">
+          Clear site &mdash; nothing carried. Set the obstructions in the takeoff and the hours
+          and material allowance appear here.
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1">
+            <div>
+              <span className="text-[11px] text-zinc-300">Obstruction labor</span>
+              <p className="font-mono text-[9px] text-zinc-700">
+                {siteName} site &middot; {hours.toLocaleString()} hrs from the takeoff
+              </p>
+            </div>
+            <span />
+            <span className="text-right font-mono text-[12px] font-bold text-zinc-200">
+              {formatMoney(laborValue)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1">
+            <div>
+              <span className="text-[11px] text-zinc-300">Obstruction material</span>
+              <p className="font-mono text-[9px] text-zinc-700">
+                {materialPercent}% allowance &middot; counts stay true
+              </p>
+            </div>
+            <span />
+            <span className="text-right font-mono text-[12px] font-bold text-zinc-200">
+              {formatMoney(materialValue)}
+            </span>
+          </div>
+
+          <TotalBox label={included ? "Carried in base bid" : "Carried, not billed"} value={total} />
+
+          <p className="px-1 pt-1.5 font-mono text-[9px] leading-4 text-zinc-700">
+            {included
+              ? "Inside the base bid - absorbed into rental and labor, before any alternate. Nothing separate reaches the proposal."
+              : "Shown here only. The PM can see what the job is up against; the bid does not carry it."}
+          </p>
+        </>
+      )}
     </Panel>
   );
 }

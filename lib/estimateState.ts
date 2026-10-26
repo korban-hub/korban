@@ -76,6 +76,16 @@ export type EstimateState = {
   phaseModeOn: boolean;
   phases: ProductionPhase[];
 
+  /**
+   * Whether the obstruction contingency rides in the base bid.
+   *
+   * On by default, because the obstructions are real and the bid should cover
+   * them. Unticked, the contingency is still worked out and still shown - it
+   * simply stops reaching the price, which is the estimator saying he backs
+   * the PM to find a way around the trees.
+   */
+  contingencyIncluded: boolean;
+
   // Add alternates
   approvedAlternates: AlternateId[];
   alternateSettings: AlternateSettings;
@@ -132,6 +142,8 @@ export const DEFAULT_ESTIMATE_STATE: EstimateState = {
     { id: 4, phase: "West", days: 0, crews: 1, menPerCrew: 4 },
   ],
 
+  contingencyIncluded: true,
+
   approvedAlternates: [],
   alternateSettings: DEFAULT_ALTERNATE_SETTINGS,
 
@@ -159,6 +171,8 @@ export function loadEstimateState(): EstimateState {
       consumables: parsed.consumables?.length ? parsed.consumables : DEFAULT_CONSUMABLES,
       phases: parsed.phases?.length ? parsed.phases : DEFAULT_ESTIMATE_STATE.phases,
       approvedAlternates: Array.isArray(parsed.approvedAlternates) ? parsed.approvedAlternates : [],
+      contingencyIncluded:
+        typeof parsed.contingencyIncluded === "boolean" ? parsed.contingencyIncluded : true,
       alternateSettings: { ...DEFAULT_ALTERNATE_SETTINGS, ...(parsed.alternateSettings ?? {}) },
     };
   } catch {

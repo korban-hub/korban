@@ -675,16 +675,28 @@ export default function QuickBidForm() {
     const sum = (pick: (e: (typeof engines)[number]) => number) =>
       engines.reduce((total, engine) => total + (pick(engine) || 0), 0);
 
-    const material = getObstructionFactor(form.obstructions, backend).material;
+    /*
+     * The counts are the counts.
+     *
+     * Obstructions used to multiply every frame, plank and brace by ten or
+     * fifteen percent, so the load list said 246 frames on a job that needs
+     * 224 and nobody could tell which 22 were contingency. A crew cannot
+     * build an allowance, and a contingency nobody can see is one nobody can
+     * defend when the GC asks what the extra is for.
+     *
+     * The uplift is a percentage now, carried to the Estimate and shown as
+     * its own contingent figure. The yard gets the real count.
+     */
+    const materialPercent = Math.round((getObstructionFactor(form.obstructions, backend).material - 1) * 1000) / 10;
 
     const q = {
-      frameCount: Math.round(sum((e) => e.frameCount) * material),
-      plankCount: Math.round(sum((e) => e.plankCount) * material),
-      crossBraceCount: Math.round(sum((e) => e.crossBraceCount) * material),
-      guardrailCount: Math.round(sum((e) => e.guardrailCount) * material),
-      basePlateCount: Math.round(sum((e) => e.basePlateCount) * material),
-      screwJackCount: Math.round(sum((e) => e.screwJackCount) * material),
-      couplingPinCount: Math.round(sum((e) => e.couplingPinCount) * material),
+      frameCount: sum((e) => e.frameCount),
+      plankCount: sum((e) => e.plankCount),
+      crossBraceCount: sum((e) => e.crossBraceCount),
+      guardrailCount: sum((e) => e.guardrailCount),
+      basePlateCount: sum((e) => e.basePlateCount),
+      screwJackCount: sum((e) => e.screwJackCount),
+      couplingPinCount: sum((e) => e.couplingPinCount),
       bayCount: sum((e) => e.bayCount),
       legCount: sum((e) => e.legCount),
       frameTall: Math.max(...engines.map((e) => e.frameTall || 0), 0),
@@ -695,8 +707,6 @@ export default function QuickBidForm() {
     // Brackets: one per leg per jump, and the planks they carry.
     const brackets = bracketPartNo ? q.legCount * q.frameTall : 0;
     const bracketPlankCount = brackets * bracketPlanks;
-
-    const labor = getObstructionFactor(form.obstructions, backend).labor;
 
     // Freestanding is not a checkbox - it is a second structure.
     const ownedTubes = new Set(
@@ -716,10 +726,9 @@ export default function QuickBidForm() {
      * whether that face is forty feet or a hundred. Four short sides cost
      * four setups, not one and a bit.
      *
-     * The material uplift for this was already applied. The labor was
-     * calculated, returned and never used, while the screen claimed it was
-     * "already in these counts" - which was true of the material and false of
-     * the hours.
+     * Neither half is baked into anything here. The hours and the material
+     * percentage ride along to the Estimate, where they stand as contingency
+     * an estimator can keep or strike.
      *
      * Worked out HERE, above the flags, because one of them reports it. A
      * const declared below its own reader throws rather than reading
@@ -823,7 +832,7 @@ export default function QuickBidForm() {
          figure nobody had yet. */
       flags.push({
         tone: "note",
-        text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions: material up ${pct}%, already in these counts. Labor adds ${obstructionHours.toLocaleString()} hours - ${perHundred} per 100 LF of each elevation - and carries to the Estimate.`,
+        text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions. The counts below are the real counts - the ${pct}% material allowance and ${obstructionHours.toLocaleString()} labor hours carry to the Estimate as contingency, where they can be included in the bid or left out.`,
       });
     }
     if (structure === "tank" && form.floor === "sloped") {
@@ -876,6 +885,7 @@ export default function QuickBidForm() {
       tunnelLegs,
       tunnelParts,
       obstructionHours,
+      materialPercent,
       lf: Math.round(lf * 10) / 10,
       height,
       perFace,
@@ -887,8 +897,6 @@ export default function QuickBidForm() {
       bracketPartNo,
       brackets,
       bracketPlankCount,
-      labor,
-      material,
       ruleApplies: Boolean(rule) && !form.widthOverridden,
       /** Which trade set the width, for the hint beside the control. */
       governingFinish: rule?.finish ?? "",
@@ -1071,8 +1079,12 @@ export default function QuickBidForm() {
           tunnel: tunnelPlan,
           /* Null on a clear site, which also clears hours left behind by
              someone trying Heavy and changing their mind. */
-          obstruction: derived.obstructionHours > 0
-            ? { level: form.obstructions, hours: derived.obstructionHours }
+          obstruction: derived.obstructionHours > 0 || derived.materialPercent > 0
+            ? {
+                level: form.obstructions,
+                hours: derived.obstructionHours,
+                materialPercent: derived.materialPercent,
+              }
             : null,
           /*
            * The rear runs, written down.
@@ -1537,7 +1549,7 @@ export default function QuickBidForm() {
                   <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
                     <div className="flex items-baseline justify-between">
                       <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-amber-300/80">
-                        Obstruction labor
+                        Contingency
                       </span>
                       <span className="font-mono text-[15px] font-bold text-amber-200">
                         {derived.obstructionHours.toLocaleString()}
@@ -1546,8 +1558,11 @@ export default function QuickBidForm() {
                     </div>
                     <p className="mt-1 text-[10px] leading-4 text-zinc-500">
                       {form.obstructions === "heavy" ? "Heavy" : "Moderate"} site &mdash;{" "}
-                      {form.obstructions === "heavy" ? 24 : 16} hours per 100 LF of each elevation,
-                      added to the Estimate on top of the production rate.
+                      {form.obstructions === "heavy" ? 24 : 16} hours per 100 LF of each elevation
+                      {derived.materialPercent > 0
+                        ? `, plus ${derived.materialPercent}% on material`
+                        : ""}
+                      . Carried to the Estimate as contingency; the counts below stay true.
                     </p>
                   </div>
                 )}
