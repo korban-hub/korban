@@ -61,7 +61,21 @@ export type SheetGuess = {
   face: string;
   /** Why it landed where it did, in a few words, for the index list. */
   reason: string;
+  /**
+   * Degrees this sheet needs turning to read upright, from its own text.
+   *
+   * Sets mix orientations - a landscape plan bound with portrait details, or
+   * pages inserted from somewhere else - and a sheet that renders sideways
+   * has to be turned before anything can be traced on it. The text says which
+   * way is up: title block text runs horizontally on a sheet the right way
+   * round, so if most of a page's text runs vertically the page is turned.
+   *
+   * 0 when it already reads upright, or when there was too little text to
+   * say. Applied per page, and the Rotate button remains the arbiter.
+   */
+  rotation: number;
 };
+
 
 /*
  * Sheets that are not takeoff material.
@@ -88,6 +102,48 @@ const REJECT = [
 ];
 
 /*
+ * Other trades' sheets.
+ *
+ * A full set is mostly not architectural. Plumbing, mechanical, electrical,
+ * fire protection, structural and civil all draw plans of the same building,
+ * all titled "PLAN", and none of them gives the perimeter a scaffold goes
+ * round - a mechanical plan is ductwork over a floor nobody is scaffolding
+ * from.
+ *
+ * Caught two ways, because either can be missing: the discipline letter on
+ * the sheet number, and the words in the title. A sheet numbered P2.01 is
+ * plumbing whatever it is called, and one titled "LEVEL 2 MECHANICAL PLAN"
+ * is mechanical whatever it is numbered.
+ */
+const OTHER_TRADES = [
+  "PLUMBING",
+  "MECHANICAL",
+  "ELECTRICAL",
+  "HVAC",
+  "FIRE PROTECTION",
+  "SPRINKLER",
+  "POWER PLAN",
+  "LIGHTING",
+  "STRUCTURAL",
+  "FRAMING PLAN",
+  "CIVIL",
+  "UTILITY",
+  "LANDSCAPE",
+  "IRRIGATION",
+  "LOW VOLTAGE",
+  "SECURITY PLAN",
+  "SIGNAGE",
+];
+
+/*
+ * Discipline prefixes that are not architectural.
+ *
+ * The letters before the series digit. A, AD, AS and the like are the
+ * architect's; everything here belongs to another consultant.
+ */
+const OTHER_DISCIPLINES = ["P", "M", "E", "S", "C", "FP", "FA", "T", "L", "Q", "I", "G", "ME", "EP"];
+
+/*
  * Plans that are not the building's footprint.
  *
  * All of these are called a plan and none of them gives the perimeter a
@@ -95,10 +151,21 @@ const REJECT = [
  * the lot, a foundation plan is below grade, and planting is the landscape
  * architect's.
  */
+/*
+ * A site plan is a judgement call, so it is offered rather than decided.
+ *
+ * For most trades it is not the footprint and not worth opening. For scaffold
+ * it often is the sheet you want - it carries the building in its lot, the
+ * sidewalk, and the overhead protection. Dropping it silently lost a sheet
+ * titled "SITE PLAN" on an overhead-protection exhibit, which is about as
+ * wrong as this can get. It comes through as a plan at low confidence, so it
+ * waits in the panel instead of filing itself.
+ */
+const SOFT_PLANS = ["SITE PLAN"];
+
 const NOT_FOOTPRINT = [
   "CEILING",
   "RCP",
-  "SITE PLAN",
   "FOUNDATION",
   "PLANTING",
   "GRADING",
@@ -108,6 +175,36 @@ const NOT_FOOTPRINT = [
   "PARTITION",
   "FURNITURE",
   "EQUIPMENT PLAN",
+];
+
+/*
+ * Elevations a scaffold contractor has no interest in.
+ *
+ * Scaffold goes on the outside. An interior elevation is a wall of a lobby, a
+ * restroom or a run of casework, drawn at a large scale to show tile and trim,
+ * and there are usually more of them in a set than there are of the building
+ * itself - so left in, they swamp the index with sheets nobody will grip and
+ * bury the four that matter.
+ *
+ * Checked against the whole title, so "ENLARGED INTERIOR ELEVATIONS" and
+ * "LOBBY ELEVATIONS" both go, while "EXTERIOR ELEVATIONS" and "NORTH
+ * ELEVATION" stay.
+ */
+const INTERIOR_ELEVATION = [
+  "INTERIOR",
+  "CASEWORK",
+  "MILLWORK",
+  "CABINET",
+  "RESTROOM",
+  "TOILET",
+  "BATHROOM",
+  "KITCHEN",
+  "LOBBY",
+  "CORRIDOR",
+  "STAIR ELEVATION",
+  "ELEVATOR",
+  "FINISH ELEVATION",
+  "PARTITION",
 ];
 
 /** North, south, east and west as a drawing set spells them in a title. */
@@ -123,35 +220,42 @@ const FACE_WORDS: { word: string; face: string }[] = [
 ];
 
 /**
- * The sheet number, as architects write it.
+ * The sheet number, as a whole string and nothing less.
  *
- * A2.02, A-202, A202, AD2.1 all mean the same thing in different offices, so
- * the discipline letters, the series digit and the rest are taken apart
- * rather than matched as one fixed shape.
+ * This used to be matched anywhere in the page's text, which meant "TYPE A2"
+ * and "DETAIL 3/A5" became sheet numbers and handed the discipline filter a
+ * prefix off a door tag. It has to BE the text item, start to finish:
+ * A2.04, A20.04A, A-201, AD1.01.
  */
-const SHEET_NUMBER = /\b([A-Z]{1,2})[-\s.]?(\d)[.\-]?(\d{1,2})?\b/;
+const SHEET_NUMBER_EXACT = /^([A-Z]{1,3})[-.]?(\d{1,3})(?:[.-](\d{1,3}))?([A-Z])?$/;
 
 /**
  * An imperial drawing scale out of a title block.
- *
- * Covers 1/8" = 1'-0", 1/4"=1'0", 3/32" = 1'-0" and the sloppier spacings
- * that come out of a text layer, plus a plain 1" = 20' on a site sheet.
  */
-const SCALE_FRACTION = /(\d{1,2})\s*\/\s*(\d{1,2})\s*["”]?\s*=\s*1\s*['’]/;
-const SCALE_WHOLE = /(\d{1,3})\s*["”]\s*=\s*(\d{1,3})\s*['’]/;
+const SCALE_FRACTION = /(\d{1,2})\s*\/\s*(\d{1,2})\s*["”]?\s*=\s*1\s*['’](?:\s*-\s*0\s*["”])?/;
+const SCALE_WHOLE = /(\d{1,3})\s*["”]\s*=\s*(\d{1,3})\s*['’](?:\s*-\s*0\s*["”])?/;
 
-function hasAny(text: string, words: string[]): string {
-  for (const word of words) if (text.includes(word)) return word;
+/**
+ * Whole words, singular or plural.
+ *
+ * Sheets are titled in the plural far more often than the singular - BUILDING
+ * SECTIONS, EXTERIOR ELEVATIONS, WALL SECTION DETAILS - and a matcher that
+ * only knew SECTION read none of them. It failed quietly too: the sheet just
+ * came back unnamed, or matched on the wrong word in the same title.
+ *
+ * Still whole words. The trailing S is optional and still has to be followed
+ * by a boundary, so PLAN and PLANS both match and PLANNET, PLANTER and
+ * PLANNING do not.
+ */
+function saysWord(text: string, word: string): boolean {
+  return new RegExp(`(^|[^A-Z])${word}S?($|[^A-Z])`).test(text);
+}
+
+function hasAnyWord(text: string, words: string[]): string {
+  for (const word of words) if (saysWord(text, word)) return word;
   return "";
 }
 
-/**
- * The scale the title block printed, as page units per foot.
- *
- * A PDF page is 72 units to the inch. At 1/8" = 1'-0", one foot of building is
- * an eighth of an inch on the sheet, which is nine page units - so the figure
- * is (72 x numerator) / denominator.
- */
 function scaleToUnitsPerFoot(label: string): number | null {
   const frac = label.match(SCALE_FRACTION);
   if (frac) {
@@ -168,146 +272,451 @@ function scaleToUnitsPerFoot(label: string): number | null {
   return null;
 }
 
-/**
- * What the sheet number alone suggests, by the usual A-series convention.
- *
- * Soft, and deliberately so. Most architects follow it because the standards
- * say to, and some do not - so this only ever corroborates a title. It never
- * decides a tag on its own, because a confident wrong answer from a numbering
- * quirk is worse than an Unknown an estimator fixes in one click.
- */
-function tagFromSeries(sheetNumber: string): SheetTag {
-  const m = sheetNumber.match(SHEET_NUMBER);
-  if (!m) return "Unknown";
-  // Architectural only. A structural or civil sheet numbered S2 is not an
-  // elevation just because the digit matches.
-  if (!m[1].startsWith("A")) return "Unknown";
-  switch (m[2]) {
-    case "1":
-      return "Floor Plan";
-    case "2":
-      return "Elevation View";
-    case "3":
-      return "Section View";
-    default:
-      return "Unknown";
+/** What the sheet number alone suggests, by the usual A-series convention. */
+function tagFromSeries(prefix: string, series: string): SheetTag {
+  if (!prefix.startsWith("A")) return "Unknown";
+  switch (series.charAt(0)) {
+    case "1": return "Floor Plan";
+    case "2": return "Elevation View";
+    case "3": return "Section View";
+    default:  return "Unknown";
   }
 }
 
-/** What the words say, which outranks the numbering every time. */
-function tagFromTitle(text: string): { tag: SheetTag; why: string } {
-  const rejected = hasAny(text, REJECT);
+/**
+ * What one label says this sheet is.
+ *
+ * Given ONE short label - a sheet title, a drawing title - never a whole
+ * page. That distinction is the whole fix. Matching against everything on the
+ * sheet meant a keynote reading "align with interior face of stud" rejected a
+ * set of exterior elevations, and a callout reading "DETAIL 3/A5" threw away
+ * a sheet of them. A note is not a title and now never gets a vote.
+ */
+function tagFromLabel(label: string): { tag: SheetTag; why: string } {
+  const text = label.toUpperCase();
+
+  const rejected = hasAnyWord(text, REJECT);
   if (rejected) return { tag: "Unknown", why: `${rejected.toLowerCase()} sheet` };
 
-  /*
-   * Section before elevation before plan.
-   *
-   * A sheet is often titled "BUILDING SECTIONS AND ELEVATIONS", and what it
-   * mostly carries is the first word. Sections are also the smallest and most
-   * specific group, so when two words appear the narrower one is the better
-   * guess.
-   */
-  if (text.includes("SECTION")) return { tag: "Section View", why: "titled section" };
-  /*
-   * A datum is not a drawing.
-   *
-   * "FINISH FLOOR ELEVATION 112'-6"" sits in the corner of plenty of floor
-   * plans, and the first version of this threw the whole sheet out for
-   * carrying the word - so a plan with a level note on it became Unknown and
-   * an estimator had to go and find it himself.
-   *
-   * The datum readings are struck from the text and what is left is read as
-   * normal. Only when nothing is left does the word stop counting, which lets
-   * the sheet fall through and be recognised as the plan it is.
-   */
-  const withoutDatums = text.replace(/ELEVATION\s*[:=]?\s*[+-]?\d+['’][^A-Z]*/g, " ");
-  if (withoutDatums.includes("ELEVATION")) {
+  const otherTrade = hasAnyWord(text, OTHER_TRADES);
+  if (otherTrade) return { tag: "Unknown", why: `${otherTrade.toLowerCase()} sheet` };
+
+  if (saysWord(text, "SECTION")) return { tag: "Section View", why: "titled section" };
+
+  if (saysWord(text, "ELEVATION")) {
+    const inside = hasAnyWord(text, INTERIOR_ELEVATION);
+    if (inside) return { tag: "Unknown", why: `${inside.toLowerCase()} elevation` };
     return { tag: "Elevation View", why: "titled elevation" };
   }
-  if (text.includes("ROOF PLAN")) return { tag: "Roof Plan", why: "titled roof plan" };
-  if (text.includes("PLAN")) {
-    const wrong = hasAny(text, NOT_FOOTPRINT);
+
+  if (saysWord(text, "ROOF") && saysWord(text, "PLAN")) {
+    return { tag: "Roof Plan", why: "titled roof plan" };
+  }
+
+  if (saysWord(text, "PLAN")) {
+    const soft = hasAnyWord(text, SOFT_PLANS);
+    if (soft) return { tag: "Floor Plan", why: `${soft.toLowerCase()} - check it is the footprint` };
+    const wrong = hasAnyWord(text, NOT_FOOTPRINT);
     if (wrong) {
       const said = wrong.toLowerCase();
       return { tag: "Unknown", why: said.endsWith("plan") ? said : `${said} plan` };
     }
     return { tag: "Floor Plan", why: "titled plan" };
   }
-  return { tag: "Unknown", why: "no title match" };
+
+  return { tag: "Unknown", why: "" };
+}
+
+/** One piece of text, where it sits and how big it is. */
+export type SheetTextItem = {
+  str: string;
+  /** pdf.js text matrix. [0],[1] give the angle; [4],[5] the position. */
+  transform?: number[];
+  /** Rendered height, when pdf.js supplies it. */
+  height?: number;
+};
+
+type Placed = { text: string; size: number; x: number; y: number };
+
+/** Font size from the text matrix, falling back to the reported height. */
+function sizeOf(item: SheetTextItem): number {
+  const t = item.transform;
+  if (t && t.length >= 4) {
+    const h = Math.hypot(t[2], t[3]);
+    if (h > 0) return h;
+  }
+  return item.height ?? 0;
+}
+
+function place(items: SheetTextItem[]): Placed[] {
+  return items
+    .map((item) => {
+      const t = item.transform;
+      return {
+        text: (item.str ?? "").trim(),
+        size: sizeOf(item),
+        x: t && t.length >= 6 ? t[4] : 0,
+        y: t && t.length >= 6 ? t[5] : 0,
+      };
+    })
+    .filter((row) => row.text !== "");
+}
+
+/**
+ * The sheet number, and therefore where the title block is.
+ *
+ * Measured across four sets from four different architects: on every one the
+ * sheet number was the single largest piece of text on the page. That is not
+ * a coincidence of template - it has to be legible on a folded set - so it is
+ * the one thing worth anchoring to.
+ *
+ * Required to be large as well as well-formed, because a bare "B5" in a
+ * drawing matches the pattern too and is not the sheet number.
+ */
+function findSheetNumber(rows: Placed[]): (Placed & { prefix: string; series: string }) | null {
+  if (rows.length === 0) return null;
+  const biggest = Math.max(...rows.map((r) => r.size));
+
+  const candidates = rows
+    .filter((r) => biggest <= 0 || r.size >= biggest * 0.55)
+    .map((r) => ({ row: r, m: r.text.toUpperCase().match(SHEET_NUMBER_EXACT) }))
+    .filter((c): c is { row: Placed; m: RegExpMatchArray } => Boolean(c.m));
+  if (candidates.length === 0) return null;
+
+  /* Biggest wins; between equals the longer string does, which picks the real
+     sheet number "A20.04A" over a stray "B5" set in the same size. */
+  candidates.sort(
+    (a, b) => b.row.size - a.row.size || b.row.text.length - a.row.text.length,
+  );
+  const best = candidates[0];
+  return {
+    ...best.row,
+    prefix: best.m[1].toUpperCase(),
+    series: best.m[2],
+  };
+}
+
+/**
+ * The labels sitting with the sheet number.
+ *
+ * On those same four sets the sheet title sat in the same column as the
+ * number and a short way above it - 41, 123 and 158 units on sheets 2160 to
+ * 2592 tall. Three templates, one relationship. So the title block is found
+ * by where the number is rather than by a corner of the page, and nothing
+ * outside that neighbourhood is ever read.
+ *
+ * The band is generous vertically and tight horizontally, which is what keeps
+ * a revision history or a drawing legend out of it.
+ */
+function labelsNearNumber(rows: Placed[], num: Placed, width: number, height: number): Placed[] {
+  const vertical = (height || 2400) * 0.16;
+  const horizontal = (width || 3000) * 0.22;
+  return rows
+    .filter(
+      (r) =>
+        r !== num &&
+        Math.abs(r.x - num.x) <= horizontal &&
+        r.y - num.y > -vertical * 0.3 &&
+        r.y - num.y <= vertical,
+    )
+    .sort((a, b) => Math.abs(a.y - num.y) - Math.abs(b.y - num.y));
 }
 
 /**
  * One page's text, read as a sheet.
  *
- * Takes the strings pdf.js found anywhere on the page rather than a title
- * block region, because where the block sits varies by office - right edge,
- * bottom strip, bottom right - and a region guessed wrong reads nothing at
- * all. Scanning the lot costs nothing and the keywords are distinctive.
+ * Four layers, each catching what the one before it missed, and an honest
+ * answer at the end when none of them can. Only the first earns a confident
+ * tag; the rest are offered for a human to place, because the one outcome
+ * worth avoiding is a sheet filed wrong in silence.
  */
-export function classifySheet(pageNumber: number, items: string[]): SheetGuess {
-  const lines = items.map((s) => s.trim()).filter(Boolean);
-  const text = lines.join(" ").toUpperCase();
-
-  const numberMatch = text.match(SHEET_NUMBER);
-  const sheetNumber = numberMatch ? numberMatch[0].trim() : "";
-
-  const fromTitle = tagFromTitle(text);
-  const fromSeries = tagFromSeries(sheetNumber);
+export function classifySheet(
+  pageNumber: number,
+  items: (string | SheetTextItem)[],
+  page?: { width?: number; height?: number; rotation?: number },
+): SheetGuess {
+  const asItems: SheetTextItem[] = items.map((item) =>
+    typeof item === "string" ? { str: item } : item,
+  );
+  const rows = place(asItems);
+  const width = page?.width ?? 0;
+  const height = page?.height ?? 0;
 
   /*
-   * The title decides; the series only agrees or stays quiet.
-   *
-   * A sheet the words reject stays rejected whatever its number says - that
-   * is how "A2.51 EXTERIOR DETAILS" avoids being filed as an elevation.
+   * A page that declares its own rotation is already handled by the renderer,
+   * so reading the text angle on top of that would turn a sheet that was
+   * right. Every set measured so far declares one.
    */
-  let tag = fromTitle.tag;
-  let confidence: "high" | "low" = "low";
-  let reason = fromTitle.why;
+  const rotation = page?.rotation ? 0 : dominantTextRotation(asItems);
 
-  if (tag !== "Unknown") {
-    // A roof plan is a plan: the A1 series agreeing is still agreement.
-    const seriesAgrees =
-      fromSeries === tag || (fromSeries === "Floor Plan" && tag === "Roof Plan");
-    if (seriesAgrees) {
-      confidence = "high";
-      reason = `${fromTitle.why}, ${sheetNumber} series agrees`;
-    }
-  } else if (fromTitle.why === "no title match" && fromSeries !== "Unknown") {
-    /* Nothing readable in the words, but the number is in a known series.
-       Offered, never assumed - it is the weaker of the two signals alone. */
-    tag = fromSeries;
-    reason = `${sheetNumber} series only`;
+  const blank: SheetGuess = {
+    pageNumber, tag: "Unknown", confidence: "low", sheetNumber: "", title: "",
+    scaleLabel: "", pageUnitsPerFootHint: null, face: "", reason: "", rotation,
+  };
+
+  // Nothing to read at all - a scan, or an image-only sheet.
+  if (rows.length === 0) {
+    return { ...blank, reason: "no text on this sheet - scan or image" };
   }
 
-  // The printed scale, if the block carried one.
-  const scaleMatch = text.match(SCALE_FRACTION) ?? text.match(SCALE_WHOLE);
-  const scaleLabel = scaleMatch ? scaleMatch[0].replace(/\s+/g, " ").trim() : "";
+  /*
+   * Text that is there but does not decode.
+   *
+   * CAD exports often embed subset fonts with no character map, and what
+   * comes back is glyph codes rather than letters. One of the four sets
+   * measured was like this throughout. Nothing can be read off it, and
+   * saying so is the honest answer - guessing from a page of question marks
+   * is how a sheet gets filed wrong in silence.
+   */
+  const sample = rows.map((r) => r.text).join("").slice(0, 600);
+  const legible = (sample.match(/[A-Za-z0-9.,'"&/()-]/g) ?? []).length;
+  if (sample.length > 0 && legible / sample.length < 0.5) {
+    return { ...blank, reason: "this sheet's text could not be decoded" };
+  }
 
-  /* Which wall an elevation is of, so it can line itself up with the face. */
-  const faceHit = tag === "Elevation View" ? FACE_WORDS.find((f) => text.includes(f.word)) : undefined;
+  const num = findSheetNumber(rows);
+  const sheetNumber = num?.text ?? "";
+
+  /* Another consultant's sheet, by a number we can trust because it was
+     matched whole and found at title-block size. */
+  if (num && !num.prefix.startsWith("A") && OTHER_DISCIPLINES.includes(num.prefix)) {
+    return { ...blank, sheetNumber, reason: `${num.prefix} discipline, not architectural` };
+  }
 
   /*
-   * The title as printed.
+   * Without positions there is no title block to find.
    *
-   * The line carrying the keyword, kept short - title blocks also hold the
-   * project name, the address and the architect's own boilerplate, and none
-   * of that belongs in a one-line index.
+   * Grouping by position collapses a whole page into one line when every item
+   * sits at the origin, and reading that line is reading the whole sheet -
+   * which is the fault this rewrite exists to remove. So when the caller has
+   * no geometry to give, layer one is skipped rather than faked, and the
+   * labels vote instead.
    */
-  const keyword = ["SECTION", "ELEVATION", "ROOF PLAN", "PLAN"].find((k) => text.includes(k)) ?? "";
-  const titleLine =
-    lines.find((line) => keyword && line.toUpperCase().includes(keyword) && line.length <= 60) ?? "";
+  const hasGeometry = rows.some((r) => r.x !== 0 || r.y !== 0);
+  const near = num && hasGeometry ? labelsNearNumber(rows, num, width, height) : [];
+  const fromSeries = num ? tagFromSeries(num.prefix, num.series) : "Unknown";
 
+  // -- Layer one: the title block --------------------------------------
+  /*
+   * Read lines, not words.
+   *
+   * A sheet title arrives broken across text items - "FLOOR PLAN -" then
+   * "LEVEL 4A", or "FLOOR PLAN -" then "ROOF -". Taken one item at a time the
+   * sense is lost: that last one is a roof plan, and only the assembled line
+   * says so. So the neighbourhood is grouped back into lines first and each
+   * line is read whole.
+   *
+   * The biggest classifying line wins, which steps over the small captions
+   * every title block carries - "Sheet Title", "Drawn By:", "Checked By:".
+   */
+  const lines = toLines(near, num?.y ?? 0).map((line) => ({ ...line, verdict: tagFromLabel(line.text) }));
+  const named = lines.filter((line) => line.verdict.tag !== "Unknown");
+  named.sort((a, b) => b.size - a.size || a.distance - b.distance);
+
+  if (named.length > 0) {
+    const line = named[0];
+    /* Anything flagged as a judgement call waits for a human, however clear
+       the rest of the sheet is. */
+    const soft = line.verdict.why.includes("check it is");
+    const scale = findScale(near.concat(rows.filter((r) => r.size < (num?.size ?? 0))));
+    return {
+      ...blank,
+      tag: line.verdict.tag,
+      confidence: soft ? "low" : "high",
+      sheetNumber,
+      title: tidyTitle(line.text),
+      scaleLabel: scale.label,
+      pageUnitsPerFootHint: scale.unitsPerFoot,
+      face: faceIn(line.verdict.tag, line.text),
+      reason:
+        fromSeries === line.verdict.tag ||
+        (fromSeries === "Floor Plan" && line.verdict.tag === "Roof Plan")
+          ? `${line.verdict.why}, ${sheetNumber} agrees`
+          : line.verdict.why,
+    };
+  }
+
+  /* A title block line naming something deliberately excluded - interior
+     elevations, another trade - settles the sheet on its own. */
+  const excluded = lines.filter((line) => line.verdict.why);
+  if (excluded.length > 0) {
+    excluded.sort((a, b) => b.size - a.size);
+    return {
+      ...blank,
+      sheetNumber,
+      title: excluded[0].text.toUpperCase(),
+      reason: excluded[0].verdict.why,
+    };
+  }
+
+  // -- Layer two: the drawing titles vote ------------------------------
+  /*
+   * Without sizes there is no ranking to do, so every short line is treated
+   * as a label and allowed to vote. That is the case when a caller hands over
+   * plain strings, and it is better than refusing to read the sheet.
+   */
+  const biggest = Math.max(...rows.map((r) => r.size));
+  const labels = rows.filter(
+    (r) =>
+      (biggest <= 0 || r.size >= biggest * 0.3) &&
+      r.text.length <= 44 &&
+      r.text.split(/\s+/).length <= 6,
+  );
+  const votes: Record<string, number> = {};
+  let why = "";
+  for (const row of labels) {
+    const verdict = tagFromLabel(row.text);
+    if (verdict.tag === "Unknown") continue;
+    votes[verdict.tag] = (votes[verdict.tag] ?? 0) + 1;
+    why = verdict.why;
+  }
+  const winner = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+  /* One vote is enough when there was no geometry to rank by; otherwise a
+     label needs company before it speaks for the sheet. */
+  if (winner && votes[winner] >= (biggest > 0 ? 2 : 1)) {
+    const scale = findScale(rows);
+    return {
+      ...blank,
+      tag: winner as SheetTag,
+      confidence: "low",
+      sheetNumber,
+      title: labels.find((r) => tagFromLabel(r.text).tag === winner)?.text.toUpperCase() ?? "",
+      scaleLabel: scale.label,
+      pageUnitsPerFootHint: scale.unitsPerFoot,
+      face: "",
+      reason: `${why} on the drawings`,
+    };
+  }
+
+  /*
+   * There is no layer reading the sheet number's series on its own.
+   *
+   * A1 plans, A2 elevations, A3 sections is a convention, not a rule, and
+   * plenty of offices do not follow it - put the plans in the A2 series, as
+   * one of these sets does, and every plan whose title could not be read came
+   * back offered as an elevation. A wrong answer delivered confidently is
+   * worse than no answer, and the estimator has no way to tell which he just
+   * got.
+   *
+   * So the series only ever corroborates a title that was actually read. With
+   * no title, Korban says it could not read the sheet and leaves it alone.
+   */
+
+  // -- Layer four: say so ----------------------------------------------
   return {
-    pageNumber,
-    tag,
-    confidence,
+    ...blank,
     sheetNumber,
-    title: titleLine.toUpperCase(),
-    scaleLabel,
-    pageUnitsPerFootHint: scaleLabel ? scaleToUnitsPerFoot(scaleLabel) : null,
-    face: faceHit?.face ?? "",
-    reason,
+    reason: sheetNumber ? "nothing names this sheet" : "no title block found",
   };
+}
+
+/**
+ * Text items grouped back into the lines they were drawn as.
+ *
+ * pdf.js hands back fragments, and a sheet title is routinely two or three of
+ * them. Items sharing a baseline - within a fraction of their own height -
+ * belong to one line, ordered left to right.
+ */
+function toLines(rows: Placed[], fromY = 0): { text: string; size: number; distance: number }[] {
+  const sorted = [...rows].sort((a, b) => b.y - a.y || a.x - b.x);
+  const lines: Placed[][] = [];
+  for (const row of sorted) {
+    const line = lines.find(
+      (group) => Math.abs(group[0].y - row.y) <= Math.max(group[0].size, row.size) * 0.6,
+    );
+    if (line) line.push(row);
+    else lines.push([row]);
+  }
+  return lines.map((group) => {
+    const ordered = [...group].sort((a, b) => a.x - b.x);
+    return {
+      text: ordered.map((r) => r.text).join(" ").replace(/\s+/g, " ").trim(),
+      size: Math.max(...group.map((r) => r.size)),
+      distance: Math.min(...group.map((r) => Math.abs(r.y - fromY))),
+    };
+  });
+}
+
+/** The printed scale, from the smallest sensible pool of text. */
+function findScale(rows: Placed[]): { label: string; unitsPerFoot: number | null } {
+  for (const row of rows) {
+    const m = row.text.match(SCALE_FRACTION) ?? row.text.match(SCALE_WHOLE);
+    if (m) {
+      const label = m[0].replace(/\s+/g, " ").trim();
+      return { label, unitsPerFoot: scaleToUnitsPerFoot(label) };
+    }
+  }
+  return { label: "", unitsPerFoot: null };
+}
+
+/**
+ * The title as it should read on one line of an index.
+ *
+ * A drawing title shares its line with the scale and the detail bubble it
+ * belongs to, which is right on the sheet and noise in a list.
+ */
+function tidyTitle(text: string): string {
+  let out = text.replace(SCALE_FRACTION, " ").replace(SCALE_WHOLE, " ");
+  /* Drawing titles end with the bubble number and the sheet it sits on -
+     "1  A20.04A". Useful on paper, noise in a list. */
+  for (let i = 0; i < 3; i++) {
+    out = out.replace(/\s+(?:[A-Z]{1,3}[-.]?\d{1,3}(?:[.-]\d{1,3})?[A-Z]?|\d{1,2})\s*$/i, "");
+  }
+  return out.replace(/[\s\-]+$/, "").replace(/\s+/g, " ").trim().slice(0, 60).toUpperCase();
+}
+
+/** Which wall an elevation is of, so it can line up with the face. */
+function faceIn(tag: SheetTag, title: string): string {
+  if (tag !== "Elevation View") return "";
+  const text = title.toUpperCase();
+  return FACE_WORDS.find((f) => text.includes(f.word))?.face ?? "";
+}
+
+/**
+ * Which way up a sheet is, from the way its own text runs.
+ *
+ * Every text item carries the matrix it was drawn with, and for ordinary
+ * horizontal text that matrix has no rotation in it. Weighted by how much
+ * text sits at each angle, so a single rotated label - a dimension string up
+ * the side of a wall, a note turned to fit - cannot outvote a whole title
+ * block.
+ *
+ * The correction is the opposite of the angle found: text drawn a quarter
+ * turn anticlockwise needs the page turned a quarter clockwise to read. If a
+ * sheet still lands wrong, the Rotate button fixes that page and the page
+ * remembers it - this only has to be right often enough to save the clicks.
+ */
+export function dominantTextRotation(rows: SheetTextItem[]): number {
+  const weight: Record<number, number> = { 0: 0, 90: 0, 180: 0, 270: 0 };
+  let total = 0;
+
+  for (const row of rows) {
+    const t = row.transform;
+    const len = (row.str ?? "").trim().length;
+    if (!t || t.length < 4 || len === 0) continue;
+    const [a, b] = t;
+    if (a === 0 && b === 0) continue;
+    const angle = ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
+    const quarter = (Math.round(angle / 90) * 90) % 360;
+    // Only square turns. Text at a genuine slant is a note, not the sheet.
+    if (Math.abs(angle - quarter) > 12 && Math.abs(angle - quarter) < 348) continue;
+    weight[quarter] = (weight[quarter] ?? 0) + len;
+    total += len;
+  }
+
+  /* Too little text to be sure of anything. A scanned sheet lands here, and
+     saying nothing is the right answer - a guess would turn a page nobody
+     asked to turn. */
+  if (total < 40) return 0;
+
+  const found = Number(
+    Object.keys(weight).reduce((best, key) =>
+      (weight[Number(key)] ?? 0) > (weight[Number(best)] ?? 0) ? key : best,
+    ),
+  );
+  // A clear majority, or leave it alone.
+  if ((weight[found] ?? 0) / total < 0.6) return 0;
+  return (360 - found) % 360;
 }
 
 /**

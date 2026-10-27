@@ -29,6 +29,8 @@ type ScaffoldWidth  = "3'" | "3'-6\"" | "5'";
 type ScaleState = {
   locked: boolean; label: string; pageUnitsPerFoot: number | null;
   point1: Pt|null; point2: Pt|null; pickingPoint: 1|2|null; measurementInput: string;
+  /** Read off the title block and awaiting a nod, rather than measured here. */
+  fromSheet?: boolean;
 };
 
 type ExtractedPage = { id: string; pageNumber: number; tag: PageTag; thumbnail: string; scale: ScaleState; };
@@ -90,7 +92,7 @@ type SectionView = {
 
 type DraftPiece = { id: string; type: string; x: number; y: number; };
 
-const DEFAULT_SCALE: ScaleState = { locked:false, label:"", pageUnitsPerFoot:null, point1:null, point2:null, pickingPoint:null, measurementInput:"" };
+const DEFAULT_SCALE: ScaleState = { locked:false, label:"", pageUnitsPerFoot:null, point1:null, point2:null, pickingPoint:null, measurementInput:"", fromSheet:false };
 const SECTION_LABELS = ["A-A","B-B","C-C","D-D"];
 // Clockwise order
 const ELEVATION_DIRS = ["North","East","South","West"];
@@ -237,8 +239,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * Sheet rotation, in degrees. Applied when the page is rendered rather than
    * by spinning the image in CSS - a CSS rotation would leave every traced
    * point and scale line pointing at the old orientation.
+   *
+   * Held per page below rather than as one current value, so there is nothing
+   * to drift out of step with it.
    */
-  const [rotation,       setRotation]       = useState(0);
+  /**
+   * Rotation per page, because a set is not all one way up.
+   *
+   * Landscape plans bound with portrait details, pages brought in from
+   * another set, sheets scanned sideways - one set routinely holds all of it.
+   * This was a single value shared by every page, so turning a sheet that
+   * read sideways turned every other sheet with it, and the next page came up
+   * wrong in the opposite direction.
+   *
+   * Seeded from the way each page's own text runs, and overridden by the
+   * Rotate button, which now only ever affects the page in front of you.
+   */
+  const [pageRotations,  setPageRotations]  = useState<Record<number, number>>({});
   /** The sheet's own pixel size. Everything on the page is measured in these. */
   const [naturalSize,    setNaturalSize]    = useState({ w: 0, h: 0 });
   /** When this takeoff was last written down. Null means not yet, this session. */
@@ -553,9 +570,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
     setPdfLib(lib); return lib;
   }
 
-  async function renderPage(pdf:any, n:number, sc:number, rot:number = rotation): Promise<string> {
+  /** How far the estimator has turned this page, on top of the sheet's own. */
+  function rotationFor(n: number) { return pageRotations[n] ?? 0; }
+
+  async function renderPage(pdf:any, n:number, sc:number, rot:number = rotationFor(n)): Promise<string> {
     const page=await pdf.getPage(n);
-    const vp=page.getViewport({ scale:sc, rotation:rot });
+    /*
+     * The sheet's own rotation comes first, and ours is added to it.
+     *
+     * getViewport's rotation option REPLACES the page's /Rotate rather than
+     * adding to it - it defaults to the page's own and we were always passing
+     * a number, so every sheet rendered as though it declared none. Large
+     * format sheets are routinely stored at /Rotate 90, which is why they
+     * came up a quarter turn out, and why turning one by hand then put it
+     * somewhere else again.
+     */
+    const own = page.rotate ?? 0;
+    const vp=page.getViewport({ scale:sc, rotation:(own + rot) % 360 });
     const canvas=document.createElement("canvas");
     canvas.width=vp.width; canvas.height=vp.height;
     const ctx=canvas.getContext("2d")!;
@@ -660,8 +691,8 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
   /** Turns the sheet a quarter at a time and re-renders at the new angle. */
   async function rotateSheet() {
-    const next = (rotation + 90) % 360;
-    setRotation(next);
+    const next = (rotationFor(currentPageNo) + 90) % 360;
+    setPageRotations(prev=>({ ...prev, [currentPageNo]: next }));
     if (pdfDoc) {
       setRenderingPage(true);
       try { setViewerUrl(await renderPage(pdfDoc, currentPageNo, 1.2, next)); }
@@ -738,16 +769,52 @@ export default function TakeoffWorkspaceAdvancedPage() {
         try {
           const page = await pdf.getPage(n);
           const content = await page.getTextContent();
+          /* Strings, the matrix each was drawn with and its height. The
+             matrix gives position and angle; position is how the title block
+             is found at all. */
           const items = (content.items ?? [])
-            .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
-            .filter(Boolean);
-          found.push(classifySheet(n, items));
+            .filter((item: any) => typeof item?.str === "string" && item.str.trim() !== "")
+            .map((item: any) => ({ str: item.str, transform: item.transform, height: item.height }));
+          const view = page.getViewport({ scale: 1 });
+          found.push(classifySheet(n, items, {
+            width: view.width,
+            height: view.height,
+            /* The sheet's own declared rotation. The renderer already applies
+               it, so the text angle must not be read on top of it. */
+            rotation: page.rotate ?? 0,
+          }));
         } catch {
           /* One unreadable page is not a reason to abandon the set. */
         }
       }
       setSheetGuesses(found);
-      setSheetIndexOpen(usefulSheets(found).length > 0);
+      /*
+       * Nothing is turned automatically.
+       *
+       * Korban can work out which way a sheet's text runs, and that figure is
+       * on every guess - but it is not applied, and it should not be until it
+       * has been checked against real sets. Sheets were coming up upside down,
+       * and the cause was the renderer ignoring each page's own declared
+       * rotation, not anything the text said. One fault at a time: the
+       * renderer now honours the sheet, and the Rotate button turns the page
+       * in front of you and remembers it.
+       */
+      /*
+       * The confident ones file themselves.
+       *
+       * The point of reading the index is that an estimator opens a sixty
+       * page set and the tabs are already populated - plans under Floor Plan,
+       * elevations under Elevations, sections under Section View. Making him
+       * confirm a sheet the set itself titled "EXTERIOR ELEVATIONS", where
+       * the number series agrees, is asking him to do the work twice.
+       *
+       * Only where both signals agree. A sheet identified on its number alone,
+       * or on a title the series contradicts, waits in the panel to be taken -
+       * those are the ones worth a human glance, and they are few.
+       */
+      const sure = usefulSheets(found).filter(g=>g.confidence==="high");
+      for (const guess of sure) await acceptSheetFrom(pdf, guess);
+      setSheetIndexOpen(usefulSheets(found).length > sure.length);
     } finally {
       setScanningSheets(false);
     }
@@ -763,16 +830,40 @@ export default function TakeoffWorkspaceAdvancedPage() {
    */
   async function acceptSheet(guess: SheetGuess) {
     if (!pdfDoc) return;
-    if (extractedPages.some(pg=>pg.pageNumber===guess.pageNumber&&pg.tag===guess.tag)) return;
-    const thumb = await renderPage(pdfDoc, guess.pageNumber, 0.18);
-    setExtractedPages(prev=>[...prev,{
+    await acceptSheetFrom(pdfDoc, guess);
+  }
+
+  /*
+   * Takes the document rather than reading it from state, because the scan
+   * runs while the PDF is still being opened and setPdfDoc has not landed.
+   */
+  async function acceptSheetFrom(pdf: any, guess: SheetGuess) {
+    if (!pdf) return;
+    /* Deduped inside the setter rather than against state read out here -
+       during the scan's loop that state has not caught up yet. */
+    const thumb = await renderPage(pdf, guess.pageNumber, 0.18);
+    setExtractedPages(prev=>prev.some(pg=>pg.pageNumber===guess.pageNumber&&pg.tag===guess.tag) ? prev : [...prev,{
       id:`idx-${guess.tag}-${guess.pageNumber}`,
       pageNumber:guess.pageNumber,
       tag:guess.tag,
       thumbnail:thumb,
-      scale: guess.pageUnitsPerFootHint
-        ? { locked:false, label:`${guess.scaleLabel} (from title block)`, pageUnitsPerFoot:guess.pageUnitsPerFootHint }
-        : { locked:false, label:"", pageUnitsPerFoot:null },
+      /*
+       * The sheet's own scale, carried but not locked.
+       *
+       * The title block printed it, so there is no reason to make an
+       * estimator pick two points and measure a wall he can already read off
+       * the drawing. But a printed scale only holds if the PDF is at the size
+       * it was drawn to - half-size prints and "fit to page" exports are
+       * common enough - so it arrives as something to confirm rather than
+       * something to trust. Confirm locks it; the two-point pick is still
+       * there for the sheets that printed none.
+       */
+      scale: {
+        ...DEFAULT_SCALE,
+        label: guess.scaleLabel,
+        pageUnitsPerFoot: guess.pageUnitsPerFootHint,
+        fromSheet: Boolean(guess.pageUnitsPerFootHint),
+      },
     }]);
   }
 
@@ -809,10 +900,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
       // Previously this overwrote unconditionally, so clicking a thumbnail
       // that had been extracted before scale was set would silently wipe
       // the scale you'd just locked - the "scale doesn't persist" bug.
+      /*
+       * A locked scale is never overwritten. An unlocked tab takes whatever
+       * the sheet brought - a scale somebody locked earlier, or the one the
+       * title block printed, which arrives unlocked and waits to be
+       * confirmed rather than being trusted outright.
+       */
       setTabScales(prev=>{
         const current = prev[activeTab];
         if (current?.locked) return prev;
-        if (!pg.scale?.locked) return prev;
+        if (!pg.scale?.locked && !pg.scale?.fromSheet) return prev;
         return { ...prev, [activeTab]: pg.scale };
       });
     } catch {} finally { setRenderingPage(false); }
@@ -1626,15 +1723,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
    * says what to do; this makes the thing itself glow, so an estimator does
    * not have to hunt the screen for the button being described.
    */
+  /**
+   * Which control the walkthrough is pointing at.
+   *
+   * This ran one path for both tiers - and that path was Korban Bid's. A Full
+   * Bid never traces a floor and never sets a reference point, so the pointer
+   * stopped on "trace" and stayed there: it glowed on a control that tier does
+   * not use, and never advanced to the highlighter, the grip or the store
+   * button. The tiers measure differently, so they are walked differently.
+   */
   const currentGuide = (() => {
     if (depthTab === "quick-bid" || guideHidden || walkthroughHidden) return null;
     if (!viewerUrl) return "upload";
     if (!scale.locked) return "scale";
+
+    if (depthTab === "full-bid") {
+      if (!highlights.some(h => h.lf > 0)) return "highlight";
+      /* Swiped but not gripped is the half-measured state, and it is the one
+         worth pointing at - a stroke with no height is no run at all. */
+      if (highlights.some(h => h.lf > 0 && h.heightFt <= 0)) return "grip";
+      if (!elevStored) return "store";
+      return null;
+    }
+
     if (!floorLevels.some(l=>l.tracePoints.length>=3)) return "trace";
     if (!floorLevels.every(l=>l.refPoint)) return "reference-point";
     if (!elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0))) return "grip";
     if (!overlayStored && !elevStored) return "store";
-    if (depthTab === "korban-bid" && !sections.some(sec => sec.wallComplete)) return "section";
+    if (!sections.some(sec => sec.wallComplete)) return "section";
     return null;
   })();
 
@@ -1654,8 +1770,61 @@ export default function TakeoffWorkspaceAdvancedPage() {
     wallOutlineMode;
 
   const korbanReadsIt = (() => {
-    if (depthTab !== "korban-bid" || readsItHidden) return null;
+    /*
+     * Full Bid gets an opinion too.
+     *
+     * This was Korban Bid only, written when Korban Bid was the tier with
+     * anything to notice. Full Bid now has faces, heights it may be missing
+     * and a scale it may have taken off a title block without anyone looking
+     * at it - which is exactly the sort of thing this box exists to say out
+     * loud. Quick Bid has its own flags on its own form.
+     */
+    if (depthTab === "quick-bid" || readsItHidden) return null;
     const flags: KorbanGuidanceFlag[] = [];
+
+    if (depthTab === "full-bid") {
+      const swiped = highlights.filter(h=>h.lf>0);
+      const ungripped = swiped.filter(h=>h.heightFt<=0);
+      const faceGroups = groupStrokesByFace(highlights);
+
+      if (scale.fromSheet && !scale.locked && viewerUrl) {
+        flags.push({ tone:"warn", text:`Scale came off the title block and nobody has checked it. ${scale.label} is right only if this PDF is full size - confirm it or measure a wall you know.` });
+      } else if (!scale.locked && viewerUrl) {
+        flags.push({ tone:"warn", text:"Scale not locked. Nothing measured counts yet." });
+      }
+      if (ungripped.length > 0) {
+        flags.push({ tone:"warn", text:`${ungripped.length} of ${swiped.length} faces swiped with no height. They are not runs and carry no material - ${ungripped.map(strokeDisplayName).join(", ")}.` });
+      }
+      if (swiped.length > 0 && swiped.some(h=>!h.face)) {
+        flags.push({ tone:"note", text:"Some strokes have no face yet. Set project north above the strokes and they name themselves." });
+      }
+      const stepped = faceGroups.filter(g=>g.stepped);
+      if (stepped.length > 0) {
+        flags.push({ tone:"note", text:`${stepped.map(g=>g.face).join(" and ")} carries more than one height. That is two runs, not an average - grip the strokes separately if the wall really steps.` });
+      }
+      if (swiped.length > 0 && ungripped.length === 0 && !elevStored) {
+        flags.push({ tone:"note", text:"Every face has a height. Store Elevations and it carries to the layout." });
+      }
+      if (flags.length === 0) {
+        flags.push({ tone:"note", text: viewerUrl
+          ? (swiped.length === 0
+              ? "Plans open, nothing swiped. Run the highlighter down each face and I'll follow along."
+              : "Everything lines up. Nothing I can see to argue with.")
+          : "No plans yet. Upload the set and I'll read its title blocks." });
+      }
+
+      return (
+        <KorbanGuidance
+          flags={flags}
+          title="Korban thinks..."
+          requireAck
+          accent="amber"
+          className="w-full sm:w-[300px]"
+          onDismiss={() => setReadsItHidden(true)}
+        />
+      );
+    }
+
         const traced = floorLevels.filter(l=>l.tracePoints.length>=3);
         const grippedFaces = elevData.filter(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
         const sectioned = sections.filter(s=>s.wallComplete);
@@ -1680,6 +1849,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
         }
         if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
           flags.push({ tone:"warn", text:"No wall height yet - one frame per leg. Grip an elevation and it carries through." });
+        }
+        if (floorLevels.some(l=>l.fromRoofPlan&&l.tracePoints.length>=3)) {
+          flags.push({ tone:"note", text:"An outline here came off a roof plan - drawn dashed, because that perimeter carries the overhang rather than the wall at grade. Worth a look before the legs go round it." });
         }
         if (courtyards.length>0 && !includeCourtyards) {
           flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
@@ -1953,41 +2125,42 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
         const steps: KorbanGuidanceStep[] = [
           { id:"upload", title:"Load the plans",
-            body:"Upload the PDF set for this job. You'll pull the floor plan and elevation sheets out of it as you go.",
+            body:"Drop the PDF in. I'll read the title blocks and sort the sheets into their tabs - anything I'm unsure of waits in Sheet index.",
             // Restored work counts as done even before the sheet finishes
             // loading, or the walkthrough tells a full takeoff to start over.
             done: Boolean(viewerUrl) || floorLevels.some(l => l.stored && l.tracePoints.length >= 3) },
-          { id:"scale", title:"Set the scale",
-            body:"Click Scale, pick two points a known distance apart on the drawing, then type that distance.",
-            why:"Nothing measures until Korban knows how big a foot is.",
-            done: scale.locked || (scale.pageUnitsPerFoot ?? 0) > 0 },
+          { id:"scale", title:"Confirm the scale",
+            body:"If the sheet printed one it's on the toolbar - check it and Confirm. Otherwise click Scale, pick two points you know the distance between, and type it.",
+            why:"A printed scale only holds if the PDF is full size. Worth the look.",
+            done: scale.locked },
           ...(depthTab === "full-bid" ? [
-            { id:"highlight", title:"Highlight the coverage",
-              body:"Press Highlight, then swipe along a face - press at one end, drag to the other, release. Add Highlight for the next one.",
-              why:"A stroke owns everything inside its length: setbacks, pop-outs, every in and out. Same as running a marker down a set of plans.",
+            { id:"highlight", title:"Swipe each face",
+              body:"Press Highlight, then press, drag and release along the wall. Check the north arrow matches the plan - that's what names them.",
+              why:"A stroke takes everything inside its length. Setbacks, pop-outs, the lot.",
               done: highlights.some(h => h.lf > 0) },
-            { id:"grip", title:"Give each highlight a height",
-              body:"Switch to Elevations. Each highlight is a tile there - set the scale, then grip top to bottom, or type the height.",
-              why:"The swipe gave the length. The grip gives the height. Together they are the takeoff.",
-              done: anyGrip },
+            { id:"grip", title:"Give every face a height",
+              body:"Over on Elevations your strokes are grouped by face. Grip one and the whole face takes it. Open a face if a wall steps.",
+              why:"No height, no run. The count up top has to reach the end.",
+              done: highlights.some(h => h.lf > 0) && !highlights.some(h => h.lf > 0 && h.heightFt <= 0) },
           ] : [
-            { id:"trace", title:"Trace the floor outline",
-              body:"Click around the outside of the building, corner to corner, then Close. Undo Point backs up if you misclick.",
+            { id:"trace", title:"Trace the outline",
+              body:"Click corner to corner round the outside, then Close. Near-square lines snap straight. Undo Point if you misclick.",
+              why:"Off a roof plan it draws dashed - that line carries the overhang, not the wall.",
               done: anyTraced },
             { id:"ref", title:"Set reference points",
-              body:"Pick the same fixed feature on each level - a column or grid intersection that appears on every sheet.",
-              why:"This stacks the floors. Without it a real step-back looks like a shaky trace.",
+              body:"Same fixed feature on every level - a column, a grid intersection.",
+              why:"It's what stacks the floors. Without it a step-back looks like a shaky hand.",
               done: allRefs },
             { id:"grip", title:"Grip the elevations",
-              body:"Switch to Elevations, set the scale there too, then drag a box over each wall face that needs coverage.",
-              why:"The grip gives height. Height sets frames per leg.",
+              body:"On Elevations, set the scale there too, then drag a box over each face.",
+              why:"Height sets frames per leg.",
               done: anyGrip },
           ]),
           { id:"store", title:"Store the work",
             body: depthTab === "full-bid"
-              ? "Store Elevations once every highlight has a height."
-              : "Store Overlay on the floor plan, Store Elevations on the elevations.",
-            done: overlayStored || elevStored },
+              ? "Store Elevations once every face has a height."
+              : "Store Overlay on the plan, Store Elevations on the elevations.",
+            done: depthTab === "full-bid" ? elevStored : (overlayStored || elevStored) },
         ];
 
         /*
@@ -1999,20 +2172,32 @@ export default function TakeoffWorkspaceAdvancedPage() {
           steps.push({
             id: "section",
             title: "Draw the sections",
-            body: "Start Section View and trace the wall profile on each face that needs one.",
-            why: "Sections pin the frame to the real wall. Difference between 8% and 3%.",
+            body: "Start Section View and trace the wall profile where you need one.",
+            why: "Pins the frame to the real wall. Difference between 8% and 3%.",
             done: sections.some(sec => sec.wallComplete),
           });
         }
-        if (guideHidden || walkthroughHidden) return null;
+        /*
+         * Two voices, dismissed separately.
+         *
+         * They share a row and they had come to share a gate: hiding the
+         * walkthrough took the observations with it, so an estimator who did
+         * not want to be told what to do next also stopped being told what
+         * Korban had noticed. One is instruction, the other is an opinion
+         * about the job, and wanting rid of the first is no reason to lose
+         * the second.
+         */
+        if (guideHidden || (walkthroughHidden && readsItHidden)) return null;
         return (
           <div className="flex flex-wrap items-start gap-3 px-6 pt-3">
-            <KorbanGuidance
-              steps={steps}
-              title={depthTab === "korban-bid" ? "Korban Bid walkthrough" : "Full Bid walkthrough"}
-              className="w-full sm:w-[340px]"
-              onDismiss={() => setWalkthroughHidden(true)}
-            />
+            {!walkthroughHidden && (
+              <KorbanGuidance
+                steps={steps}
+                title={depthTab === "korban-bid" ? "Korban Bid walkthrough" : "Full Bid walkthrough"}
+                className="w-full sm:w-[340px]"
+                onDismiss={() => setWalkthroughHidden(true)}
+              />
+            )}
             {korbanReadsIt}
           </div>
         );
@@ -2069,14 +2254,25 @@ export default function TakeoffWorkspaceAdvancedPage() {
             * is the fault this is trying to avoid, not commit.
             */}
           {sheetIndexOpen&&sheetGuesses.length>0&&(() => {
-            const rows = usefulSheets(sheetGuesses);
+            /*
+             * Only this tab's sheets.
+             *
+             * A single list of everything made the estimator do the sorting
+             * the index was supposed to do for him. The Floor Plan tab offers
+             * plans and roof plans, Elevations offers elevations, Section View
+             * offers sections - what you are looking at is what you can take.
+             */
+            const rows = usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag));
             return (
               <div className="absolute left-3 top-14 z-30 w-[380px] max-h-[70%] overflow-y-auto rounded-xl border border-zinc-800 bg-[#0b0b0b]/95 p-3 shadow-2xl backdrop-blur">
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <div>
-                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-300">Sheet index</p>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-300">
+                      Sheet index &middot; {TAB_TAGS[activeTab]}{activeTab==="floor"?" + roof":""}
+                    </p>
                     <p className="mt-0.5 text-[9px] leading-4 text-zinc-500">
-                      Read from the title blocks. Nothing is applied until you take it.
+                      Read from the title blocks. Anything the set named clearly is already filed;
+                      these were less certain.
                     </p>
                   </div>
                   <button onClick={()=>setSheetIndexOpen(false)}
@@ -2085,8 +2281,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
                 {rows.length===0 ? (
                   <p className="py-3 text-[10px] leading-4 text-zinc-500">
-                    Nothing readable in this set&apos;s title blocks. That usually means scanned
-                    sheets rather than vector &mdash; tag the pages by hand with Extract.
+                    {usefulSheets(sheetGuesses).length>0
+                      ? `Nothing left to confirm for this tab \u2014 what the set named clearly is already filed. Switch tabs to see the rest.`
+                      : `Nothing readable in this set's title blocks. That usually means scanned sheets rather than vector \u2014 tag the pages by hand with Extract.`}
                   </p>
                 ) : (
                   <>
@@ -2142,6 +2339,30 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </p>
                   </>
                 )}
+
+                {/*
+                  * What it could not read.
+                  *
+                  * Some sheets have no text to read - a scan, or a CAD export
+                  * whose font carries no character map. That is a normal thing
+                  * for a set to contain and not a failure worth hiding: say
+                  * which pages, say why, and point at the manual route.
+                  */}
+                {(() => {
+                  const unread = sheetGuesses.filter(
+                    g => g.reason.includes("could not be decoded") || g.reason.includes("no text on this sheet"),
+                  );
+                  if (unread.length === 0) return null;
+                  return (
+                    <p className="mt-2 border-t border-zinc-900 pt-2 text-[9px] leading-4 text-zinc-500">
+                      <span className="font-mono text-zinc-400">{unread.length} sheet{unread.length===1?"":"s"} unreadable</span>
+                      {" \u2014 "}
+                      {unread.length===1?"page":"pages"} {unread.map(g=>g.pageNumber).join(", ")}.
+                      {" "}No text Korban can follow, usually a scan or a CAD font without a
+                      character map. Page to them and use Extract.
+                    </p>
+                  );
+                })()}
               </div>
             );
           })()}
@@ -2156,7 +2377,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
               <button onClick={()=>setSheetIndexOpen(open=>!open)}
                 className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${
                   sheetIndexOpen?"border-orange-500 bg-orange-500/15 text-orange-300":"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-white/30"}`}>
-                {scanningSheets ? "Reading sheets..." : `Sheet index (${usefulSheets(sheetGuesses).length})`}
+                {scanningSheets
+                  ? "Reading sheets..."
+                  : `Sheet index (${usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag)).length})`}
               </button>
             )}
 
@@ -2195,7 +2418,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     <path d="M9.5 4.5A4 4 0 1 0 10 7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                     <path d="M9.8 1.6v3h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  {rotation ? `${rotation}\u00b0` : "Rotate"}
+                  {rotationFor(currentPageNo) ? `${rotationFor(currentPageNo)}\u00b0` : "Rotate"}
                 </button>
               )}
             </div>
@@ -2225,6 +2448,39 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     className="rounded-lg border border-zinc-800 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">
                     Clear {measurements.length}
                   </button>
+                )}
+                {/*
+                  * The sheet already said what the scale is.
+                  *
+                  * Picking two points and typing a dimension is how you
+                  * establish a scale that was never printed. When the title
+                  * block printed one, making an estimator do it anyway is
+                  * work for nothing - so it is offered for a nod instead.
+                  *
+                  * Confirmed rather than assumed, because a printed scale
+                  * only holds if the PDF is at the size it was drawn to, and
+                  * half-size prints and fit-to-page exports are common. The
+                  * two-point pick is still right there for when it looks
+                  * wrong.
+                  */}
+                {scale.fromSheet&&!scale.locked&&scale.pageUnitsPerFoot&&!scale.pickingPoint&&(
+                  <div className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/[0.07] px-2 py-1">
+                    <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-amber-300/80">
+                      sheet reads
+                    </span>
+                    <span className="font-mono text-[10px] font-bold text-amber-200">{scale.label}</span>
+                    <button
+                      onClick={()=>setScale({locked:true,fromSheet:false})}
+                      className="rounded border border-amber-500/50 bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-amber-200 hover:bg-amber-500/25">
+                      CONFIRM
+                    </button>
+                    <button
+                      onClick={()=>setScale({...DEFAULT_SCALE,pickingPoint:1})}
+                      title="Measure a known dimension instead"
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[9px] text-zinc-500 hover:text-zinc-200">
+                      MEASURE
+                    </button>
+                  </div>
                 )}
                 <button data-guide="scale" onClick={()=>setScale({pickingPoint:scale.pickingPoint?null:1,point1:null,point2:null})}
                   className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${scale.pickingPoint?"border-orange-500 bg-orange-500/20 text-orange-300":"border-zinc-700 text-zinc-400 hover:border-orange-500/40"} ${currentGuide==="scale"&&!scale.pickingPoint?"korban-guide-glow":""}`}>
