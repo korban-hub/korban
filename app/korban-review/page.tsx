@@ -6,6 +6,7 @@ import { KorbanButton, KorbanHeader, KorbanHeaderMeta } from "@/components/korba
 import {
   buildPhaseReport, computeCourtyardTotals, computeElevationOnlyTotals,
   calculateQuantityEngine, getActiveElevation, getActiveProject, getEstimateDepth, readTier,
+  setEstimateDepth,
   type EstimateDepth, type ProjectElevation,
 } from "@/lib/projectStore";
 
@@ -292,7 +293,23 @@ export default function KorbanReviewPage() {
                 isBelowCurrent={LEVEL_RANK[meta.id] < LEVEL_RANK[depth]}
                 courtyardCount={tierCourtyards.courtyardCount}
                 courtyardLinearFeet={tierCourtyards.linearFeet}
-                onGo={() => router.push("/takeoff-workspace-advanced")}
+                /*
+                 * A card sends you to its own round.
+                 *
+                 * Every one of these pushed to the takeoff without saying
+                 * which level it meant, so "set it up" on a round that had
+                 * never been bid dropped the estimator back into the round
+                 * that was already finished - the one place he did not need
+                 * to go.
+                 */
+                onGo={() => {
+                  try { setEstimateDepth(meta.id); } catch {}
+                  router.push("/takeoff-workspace-advanced");
+                }}
+                onPrice={() => {
+                  try { setEstimateDepth(meta.id); } catch {}
+                  router.push("/estimate-review");
+                }}
               />
               );
             })}
@@ -321,7 +338,7 @@ type Counts = {
 
 function LevelPanel({
   meta, counts, report, reached, isCurrent, isBelowCurrent,
-  courtyardCount, courtyardLinearFeet, onGo,
+  courtyardCount, courtyardLinearFeet, onGo, onPrice,
 }: {
   meta: LevelMeta;
   counts: Counts;
@@ -332,6 +349,7 @@ function LevelPanel({
   courtyardCount: number;
   courtyardLinearFeet: number;
   onGo: () => void;
+  onPrice: () => void;
 }) {
   const router = useRouter();
   return (
@@ -478,26 +496,23 @@ function LevelPanel({
             )}
 
             {/*
-              * Somewhere to go.
+              * One way on, not two ways back.
               *
-              * Korban said what was missing and then left you looking at it -
-              * the one thing you want at that moment is the page where you can
-              * fix it.
+              * A round that is measured does not need buttons to the pages
+              * that measured it - it needs the price. Takeoff and Set
+              * Scaffold are both a click away in the header anyway.
               */}
-            <div className="mt-2.5 flex gap-1.5">
-              <button
-                onClick={onGo}
-                className="rounded border border-zinc-700 px-2 py-1 font-mono text-[9.5px] text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
-              >
-                Takeoff
-              </button>
-              <button
-                onClick={() => router.push("/set-scaffold-v2")}
-                className="rounded border border-zinc-700 px-2 py-1 font-mono text-[9.5px] text-zinc-400 transition hover:border-orange-500/50 hover:text-orange-300"
-              >
-                Set Scaffold
-              </button>
-            </div>
+            <button
+              onClick={onPrice}
+              className="mt-2.5 w-full rounded border border-orange-500/40 bg-orange-500/10 px-3 py-1.5 text-left transition hover:border-orange-500 hover:bg-orange-500/20"
+            >
+              <span className="block font-mono text-[10px] font-bold text-orange-300">
+                Complete Estimate
+              </span>
+              <span className="block font-mono text-[9px] text-zinc-500">
+                Get estimate and proposal for {meta.name}
+              </span>
+            </button>
           </div>
         </div>
       )}

@@ -159,10 +159,34 @@ function makeCourtyard(index: number): Courtyard {
 }
 
 const TAB_TAGS: Record<ActiveTab,PageTag> = { floor:"Floor Plan", elevation:"Elevation View", section:"Section View" };
-/** Which sheet kinds a tab will show. The floor tab takes roof plans too. */
-function tabAccepts(tab:ActiveTab, tag:PageTag) {
-  return tab==="floor" ? isPlanTag(tag) : tag===TAB_TAGS[tab];
+
+/**
+ * A colour per level, so a stepped building reads at a glance.
+ *
+ * Amber is level one because that is the highlighter the rest of the page
+ * uses; the others are distinct at a glance and hold up on a white sheet.
+ */
+const STROKE_LEVEL_COLORS = ["#fbbf24", "#38bdf8", "#a78bfa", "#34d399", "#fb7185", "#f472b6"];
+function strokeLevelColor(level?: number) {
+  return STROKE_LEVEL_COLORS[((level ?? 1) - 1) % STROKE_LEVEL_COLORS.length];
 }
+/**
+ * Which sheet kinds a tab will show.
+ *
+ * The floor tab always takes roof plans as well as floor plans. In Full Bid
+ * it takes the elevation sheets too, because that tier has no second tab to
+ * put them on and the heights still have to be read off something - they sit
+ * under the plans in the same strip, a scroll away.
+ */
+function tabAccepts(tab:ActiveTab, tag:PageTag, depth?:EstimateDepth) {
+  if (tab === "floor") {
+    return isPlanTag(tag) || (depth === "full-bid" && tag === "Elevation View");
+  }
+  return tag===TAB_TAGS[tab];
+}
+
+/** Plans first, elevations under them - the order the work is done in. */
+const SHEET_STRIP_ORDER: PageTag[] = ["Floor Plan", "Roof Plan", "Elevation View", "Section View"];
 
 const menuLinks: KorbanMenuLink[] = [
   { href:"/takeoff-workspace",        label:"Standard Takeoff"  },
@@ -318,10 +342,46 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [projectNorthDeg, setProjectNorthDeg] = useState(0);
   /** The face being gripped, when the estimator is working a face rather than one stroke. */
   const [selectedFace, setSelectedFace] = useState<string>("");
+  /**
+   * The level new strokes belong to.
+   *
+   * A building that steps - podium, tower, a penthouse set back - is swiped
+   * once per level, and the levels are told apart by colour on the plan.
+   */
+  const [activeStrokeLevel, setActiveStrokeLevel] = useState(1);
+  /**
+   * Which half of a Full Bid takeoff the estimator is in.
+   *
+   * Swipe everything first, then go back and put heights on it. Two passes,
+   * because they are two different jobs: one is reading a floor plan and
+   * running a marker down it, the other is reading elevation sheets. Asking
+   * for a height between every swipe means breaking off the first job to do
+   * the second, over and over.
+   */
+  const [highlightsComplete, setHighlightsComplete] = useState(false);
+  /** Lights the height boxes for a few seconds after the overlay is completed. */
+  const [heightsPulse, setHeightsPulse] = useState(false);
+  /** The top of the strokes list, to come back to for the second pass. */
+  const highlightsTopRef = useRef<HTMLDivElement|null>(null);
+  /**
+   * What is in each height box while it is being typed.
+   *
+   * Kept apart from the figure it produces, so typing 4 on the way to 47 does
+   * not leave the box reading 4 the moment the number parses.
+   */
+  const [heightDrafts, setHeightDrafts] = useState<Record<string,string>>({});
   /** One elevation tile per stroke, kept in step with them. */
   const [highlightElev, setHighlightElev] = useState<ElevationData[]>([]);
   /** The tile a swipe will fill. Tiles come first; the stroke measures one. */
   const [activeHighlight, setActiveHighlight] = useState<string|null>(null);
+  /**
+   * The stroke a measurement or a swipe belongs to.
+   *
+   * Declared after activeHighlight, because a const is not hoisted - put
+   * above its own reader it throws on first render rather than reading
+   * undefined. The better failure, but a failure all the same.
+   */
+  const activeStroke = highlights.find(h => h.id === (activeHighlight ?? highlights[0]?.id));
   const [strokeFrom,    setStrokeFrom]    = useState<{x:number;y:number}|null>(null);
   const [strokeTo,      setStrokeTo]      = useState<{x:number;y:number}|null>(null);
   const [gripStart,     setGripStart]     = useState<Pt|null>(null);
@@ -901,16 +961,23 @@ export default function TakeoffWorkspaceAdvancedPage() {
       // that had been extracted before scale was set would silently wipe
       // the scale you'd just locked - the "scale doesn't persist" bug.
       /*
-       * A locked scale is never overwritten. An unlocked tab takes whatever
-       * the sheet brought - a scale somebody locked earlier, or the one the
-       * title block printed, which arrives unlocked and waits to be
-       * confirmed rather than being trusted outright.
+       * The sheet brings its own scale with it.
+       *
+       * On a tier where one tab holds both plans and elevations, the scale
+       * has to follow the page or a wall height gets measured against a floor
+       * plan. So opening a sheet adopts whatever that sheet knows - a scale
+       * locked on it before, or the one its title block printed, which
+       * arrives unlocked and waiting for a nod.
+       *
+       * A sheet that knows nothing leaves the tab's scale alone rather than
+       * wiping work: that was the old "scale doesn't persist" bug.
        */
       setTabScales(prev=>{
         const current = prev[activeTab];
+        const brought = pg.scale?.locked || pg.scale?.fromSheet;
+        if (brought) return { ...prev, [activeTab]: pg.scale };
         if (current?.locked) return prev;
-        if (!pg.scale?.locked && !pg.scale?.fromSheet) return prev;
-        return { ...prev, [activeTab]: pg.scale };
+        return prev;
       });
     } catch {} finally { setRenderingPage(false); }
   }
@@ -1011,7 +1078,20 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const px=Math.sqrt(dx*dx+dy*dy);
     const ft=parseFeetInches(scale.measurementInput);
     if (!ft||ft<=0) return;
-    setScale({ locked:true, pageUnitsPerFoot:px/ft, label:scale.measurementInput, pickingPoint:null, point1:null, point2:null });
+    const locked = { locked:true, pageUnitsPerFoot:px/ft, label:scale.measurementInput,
+                     pickingPoint:null as null, point1:null, point2:null, fromSheet:false };
+    setScale(locked);
+    /*
+     * The scale belongs to the sheet it was measured on.
+     *
+     * In Full Bid the plans and the elevations share one tab, and an
+     * elevation is rarely drawn at the plan's scale - so carrying one scale
+     * across both would measure a wall height against a floor plan and never
+     * say so. Written back onto the page it was taken from, and picked up
+     * again whenever that page is reopened.
+     */
+    setExtractedPages(prev=>prev.map(pg=>
+      pg.pageNumber===currentPageNo ? { ...pg, scale:{ ...pg.scale, ...locked } } : pg));
   }
 
   // -- Elevation grip helpers -------------------------------------------------
@@ -1180,8 +1260,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const snapped = snapPoint(pt).pt;
       if (!measureFrom) { setMeasureFrom(snapped); setMeasureTo(null); return; }
       const puf = scale.pageUnitsPerFoot;
-      const ft = puf > 0 ? Math.hypot(snapped.x-measureFrom.x, snapped.y-measureFrom.y)/puf : 0;
-      setMeasurements(prev => [...prev, { a: measureFrom, b: snapped, ft: parseFloat(ft.toFixed(2)) }]);
+      const squared = orthoSnap(measureFrom, snapped).pt;
+      const ft = puf > 0 ? Math.hypot(squared.x-measureFrom.x, squared.y-measureFrom.y)/puf : 0;
+      const rounded = parseFloat(ft.toFixed(2));
+      setMeasurements(prev => [...prev, { a: measureFrom, b: squared, ft: rounded }]);
+      /*
+       * In Full Bid a measurement is almost always a wall height.
+       *
+       * Ground to top of wall on an elevation sheet, for the stroke the
+       * estimator has selected - so it goes straight into that stroke's
+       * height rather than onto a list he then has to copy from.
+       */
+      if (depthTab === "full-bid" && rounded > 0 && activeStroke) {
+        setHighlights(prev=>prev.map(row=>row.id===activeStroke.id?{ ...row, heightFt: rounded }:row));
+        setHeightDrafts(prev=>({ ...prev, [activeStroke.id]: String(rounded) }));
+      }
       setMeasureFrom(null); setMeasureTo(null);
       return;
     }
@@ -1227,12 +1320,22 @@ export default function TakeoffWorkspaceAdvancedPage() {
   }
 
   function handleViewerMouseMove(e:React.MouseEvent<HTMLDivElement>) {
-    if (refPickLevelId || measureMode) {
+    /*
+     * Tracing gets the snap marker too.
+     *
+     * The point it will grab was only ever shown while picking a reference
+     * point or measuring - so while tracing, the one job where you are
+     * constantly trying to land on a corner, nothing told you it was about
+     * to snap. You found out after the click.
+     */
+    if (refPickLevelId || measureMode || floorLevels.some(l=>l.traceMode)) {
       const raw = getImgPt(e);
       if (raw) {
         const snapped = snapPoint(raw, refPickLevelId ?? undefined);
         setSnapPreview(snapped.kind ? { pt: snapped.pt, kind: snapped.kind } : null);
-        if (measureMode && measureFrom) setMeasureTo(snapped.pt);
+        /* Ground to top of wall is a plumb line, so the second point
+           straightens itself the same way drawn work does. */
+        if (measureMode && measureFrom) setMeasureTo(orthoSnap(measureFrom, snapped.pt).pt);
       }
     } else if (snapPreview) {
       setSnapPreview(null);
@@ -1453,9 +1556,20 @@ export default function TakeoffWorkspaceAdvancedPage() {
       // the handoff button happens to be the way out of the page.
       try{ setEstimateDepth(depthTab as EstimateDepth); setEstimateDepthState(depthTab as EstimateDepth); }catch{}
 
+      /*
+       * The stroke's own height wins.
+       *
+       * This took the elevation tile's figure whenever the tile existed - and
+       * an untouched tile holds zero, which is not nullish, so a height typed
+       * on the stroke was overwritten with nothing on the way to storage. Now
+       * that the height is typed on the stroke, the stroke is the record and
+       * the old tile is only a fallback for work gripped before this changed.
+       */
       const storedHighlights = highlights.map(h => ({
         ...h,
-        heightFt: highlightElev.find(row => row.direction === h.label)?.areas[0]?.heightFt ?? h.heightFt,
+        heightFt: h.heightFt > 0
+          ? h.heightFt
+          : highlightElev.find(row => row.direction === h.label)?.areas[0]?.heightFt ?? 0,
       }));
 
       /*
@@ -1739,15 +1853,16 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
     if (depthTab === "full-bid") {
       if (!highlights.some(h => h.lf > 0)) return "highlight";
-      /* Swiped but not gripped is the half-measured state, and it is the one
-         worth pointing at - a stroke with no height is no run at all. */
+      /* The marker comes first. Heights are the second pass, and the guide
+         does not ask for one until the estimator says he is done swiping. */
+      if (!highlightsComplete) return "highlight";
       if (highlights.some(h => h.lf > 0 && h.heightFt <= 0)) return "grip";
       if (!elevStored) return "store";
       return null;
     }
 
-    if (!floorLevels.some(l=>l.tracePoints.length>=3)) return "trace";
     if (!floorLevels.every(l=>l.refPoint)) return "reference-point";
+    if (!floorLevels.some(l=>l.tracePoints.length>=3)) return "trace";
     if (!elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0))) return "grip";
     if (!overlayStored && !elevStored) return "store";
     if (!sections.some(sec => sec.wallComplete)) return "section";
@@ -1788,29 +1903,40 @@ export default function TakeoffWorkspaceAdvancedPage() {
       const faceGroups = groupStrokesByFace(highlights);
 
       if (scale.fromSheet && !scale.locked && viewerUrl) {
-        flags.push({ tone:"warn", text:`Scale came off the title block and nobody has checked it. ${scale.label} is right only if this PDF is full size - confirm it or measure a wall you know.` });
+        flags.push({ tone:"warn", text:`Scale came off the sheet - ${scale.label}. Confirm it, or measure a wall you know.` });
       } else if (!scale.locked && viewerUrl) {
         flags.push({ tone:"warn", text:"Scale not locked. Nothing measured counts yet." });
       }
-      if (ungripped.length > 0) {
-        flags.push({ tone:"warn", text:`${ungripped.length} of ${swiped.length} faces swiped with no height. They are not runs and carry no material - ${ungripped.map(strokeDisplayName).join(", ")}.` });
+      if (ungripped.length > 0 && highlightsComplete) {
+        flags.push({ tone:"warn", text:`${ungripped.length} face${ungripped.length===1?"":"s"} still need a height: ${ungripped.map(strokeDisplayName).join(", ")}.` });
+      }
+      if (swiped.length > 0 && !highlightsComplete) {
+        flags.push({ tone:"note", text:`${swiped.length} face${swiped.length===1?"":"s"} swiped, ${Math.round(swiped.reduce((sum,h)=>sum+h.lf,0))}'. Heights come after.` });
+      }
+      const sheetHere = extractedPages.find(pg=>pg.pageNumber===currentPageNo);
+      if (measurements.length > 0 && sheetHere && isPlanTag(sheetHere.tag)) {
+        flags.push({ tone:"warn", text:"That measurement was taken on a plan, not an elevation. Heights come off an elevation sheet." });
       }
       if (swiped.length > 0 && swiped.some(h=>!h.face)) {
-        flags.push({ tone:"note", text:"Some strokes have no face yet. Set project north above the strokes and they name themselves." });
+        flags.push({ tone:"note", text:"Some strokes have no face. Set project north." });
       }
       const stepped = faceGroups.filter(g=>g.stepped);
       if (stepped.length > 0) {
-        flags.push({ tone:"note", text:`${stepped.map(g=>g.face).join(" and ")} carries more than one height. That is two runs, not an average - grip the strokes separately if the wall really steps.` });
+        flags.push({ tone:"note", text:`${stepped.map(g=>g.face).join(" and ")} has two heights. That is two runs, not an average.` });
       }
       if (swiped.length > 0 && ungripped.length === 0 && !elevStored) {
-        flags.push({ tone:"note", text:"Every face has a height. Store Elevations and it carries to the layout." });
+        flags.push({ tone:"note", text:"Every face has a height. Store it." });
+      }
+      const levels = new Set(swiped.map(h=>h.level ?? 1));
+      if (levels.size > 1) {
+        flags.push({ tone:"note", text:`${levels.size} levels, counted as separate runs.` });
       }
       if (flags.length === 0) {
         flags.push({ tone:"note", text: viewerUrl
           ? (swiped.length === 0
-              ? "Plans open, nothing swiped. Run the highlighter down each face and I'll follow along."
-              : "Everything lines up. Nothing I can see to argue with.")
-          : "No plans yet. Upload the set and I'll read its title blocks." });
+              ? "Plans open, nothing swiped yet."
+              : "Everything lines up.")
+          : "No plans yet. Drop the set in." });
       }
 
       return (
@@ -1819,7 +1945,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           title="Korban thinks..."
           requireAck
           accent="amber"
-          className="w-full sm:w-[300px]"
+          className="w-full sm:w-[340px] sm:flex-shrink-0"
           onDismiss={() => setReadsItHidden(true)}
         />
       );
@@ -1835,35 +1961,35 @@ export default function TakeoffWorkspaceAdvancedPage() {
         if (activeTab === "section" && !tabScales.section.locked && (sections.find(row => row.id === activeSection)?.wallOutline.length ?? 0) > 0) {
           // Sections are drawn larger than the plan they were cut from. Borrowing
           // the plan's scale measured a building several times the real size.
-          flags.push({ tone:"warn", text:"This section sheet has no scale of its own. Lock one here - it is not the floor plan's." });
+          flags.push({ tone:"warn", text:"Section sheets need their own scale. Lock one here." });
         }
         if (traced.length>0 && traced.some(l=>!l.refPoint)) {
           const missing = traced.filter(l=>!l.refPoint).length;
-          flags.push({ tone:"warn", text:`${missing} traced level${missing===1?"":"s"} without a reference point. I cannot stack them accurately, so a real step-back and a shaky trace look identical to me.` });
+          flags.push({ tone:"warn", text:`${missing} level${missing===1?"":"s"} with no reference point. I cannot stack them.` });
         }
         if (grippedFaces.length>0 && sectioned.length===0) {
-          flags.push({ tone:"note", text:"Gripped, no section drawn. A section pins the frame to the real wall." });
+          flags.push({ tone:"note", text:"No section drawn. One pins the frame to the wall." });
         }
         if (traced.length>1 && grippedFaces.length===0) {
-          flags.push({ tone:"note", text:"Floors traced, nothing gripped. Plan gives shape, grips give height." });
+          flags.push({ tone:"note", text:"Floors traced, nothing gripped yet." });
         }
         if (sectioned.length>0 && sectioned.some(s=>s.topOfWallDistance<=0)) {
-          flags.push({ tone:"warn", text:"No wall height yet - one frame per leg. Grip an elevation and it carries through." });
+          flags.push({ tone:"warn", text:"No wall height - one frame per leg. Grip an elevation." });
         }
         if (floorLevels.some(l=>l.fromRoofPlan&&l.tracePoints.length>=3)) {
-          flags.push({ tone:"note", text:"An outline here came off a roof plan - drawn dashed, because that perimeter carries the overhang rather than the wall at grade. Worth a look before the legs go round it." });
+          flags.push({ tone:"note", text:"Outline came off a roof plan, drawn dashed - that line carries the overhang." });
         }
         if (courtyards.length>0 && !includeCourtyards) {
-          flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} traced but excluded from totals. That is a choice, not an oversight - just make sure it is yours.` });
+          flags.push({ tone:"note", text:`${courtyards.length} courtyard${courtyards.length===1?"":"s"} left out of totals. Make sure that is yours.` });
         }
         if (flags.length===0 && grippedFaces.length>0) {
-          flags.push({ tone:"note", text:"Everything lines up. Tight as it gets before the crew shows up." });
+          flags.push({ tone:"note", text:"Everything lines up." });
         }
         // An empty job still deserves an answer. Silence reads as broken.
         if (flags.length===0) {
           flags.push({ tone:"note", text: viewerUrl
-            ? "Plans open, nothing measured. Scale, trace, grip - I'll flag anything off."
-            : "No plans yet. Upload the set and I'll follow along." });
+            ? "Plans open, nothing measured."
+            : "No plans yet." });
         }
 
     return (
@@ -1872,13 +1998,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
         title="Korban thinks..."
         requireAck
         accent="amber"
-        className="w-full sm:w-[300px]"
+        className="w-full sm:w-[340px] sm:flex-shrink-0"
         onDismiss={() => setReadsItHidden(true)}
       />
     );
   })();
 
-  const tabPages=extractedPages.filter(p=>tabAccepts(activeTab,p.tag));
+  const tabPages=extractedPages
+    .filter(p=>tabAccepts(activeTab,p.tag,depthTab as EstimateDepth))
+    .sort((a,b)=>
+      SHEET_STRIP_ORDER.indexOf(a.tag) - SHEET_STRIP_ORDER.indexOf(b.tag) ||
+      a.pageNumber - b.pageNumber);
   const activeSec=sections.find(s=>s.id===activeSection)??sections[0];
   // Zone-aware face list: either the building's elevations or the active
   // courtyard's faces. Everything downstream (grips, tagging, rendering)
@@ -1892,12 +2022,58 @@ export default function TakeoffWorkspaceAdvancedPage() {
   useEffect(() => {
     if (depthTab !== "full-bid") return;
     setHighlights(prev => prev.length > 0 ? prev
-      : [{ id:`hl-${Date.now().toString(36)}`, label:"Highlight 1", a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"" }]);
+      : [{ id:`hl-${Date.now().toString(36)}`, label:"Highlight 1", a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"", level:1 }]);
   }, [depthTab]);
 
   useEffect(() => {
     if (!activeHighlight && highlights.length > 0) setActiveHighlight(highlights[0].id);
   }, [highlights, activeHighlight]);
+
+  /*
+   * Heights write themselves down.
+   *
+   * With the second Store button gone there is nothing left to press after a
+   * height is typed, so a typed height has to persist on its own or it would
+   * live in React state until something else happened to save. Settled for a
+   * moment first, so a number is written once rather than once per keystroke.
+   */
+  useEffect(() => {
+    if (depthTab !== "full-bid" || !highlightsComplete) return;
+    if (!highlights.some(h => h.lf > 0 && h.heightFt > 0)) return;
+    const id = window.setTimeout(() => { try { storeElevations(); } catch {} }, 700);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlights, highlightsComplete, depthTab]);
+
+  /*
+   * Each tab offers its own sheets, without being asked.
+   *
+   * The index was there on every tab all along - but it only ever opened
+   * itself once, after the scan, and from then on it was a button somebody
+   * had to know to press. Moving to Elevations therefore looked like the
+   * index had gone. It now opens on arrival whenever that tab has sheets
+   * waiting, and only for sheets not already filed, so it stops appearing
+   * once there is nothing left to place.
+   */
+  useEffect(() => {
+    if (sheetGuesses.length === 0) return;
+    const waiting = usefulSheets(sheetGuesses).filter(
+      g => tabAccepts(activeTab, g.tag, depthTab as EstimateDepth) &&
+           !extractedPages.some(pg => pg.pageNumber === g.pageNumber && pg.tag === g.tag),
+    );
+    if (waiting.length > 0) setSheetIndexOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, sheetGuesses, depthTab]);
+
+  /*
+   * Full Bid has one tab, so it cannot be left standing on another.
+   *
+   * Switching tiers while the Elevations tab was open would otherwise leave
+   * the estimator looking at a panel with no tab to leave by.
+   */
+  useEffect(() => {
+    if (depthTab === "full-bid" && activeTab !== "floor") setActiveTab("floor");
+  }, [depthTab, activeTab]);
 
   /*
    * Faces follow the strokes.
@@ -2094,14 +2270,25 @@ export default function TakeoffWorkspaceAdvancedPage() {
           without competing with the orange accent. */}
       {depthTab!=="quick-bid" && (
       <div className="flex items-center gap-1.5 border-b border-zinc-900 bg-[#0f0f0f] px-6 py-1.5">
-        {([{id:"floor",label:"Floor Plan",icon:"\u229e"},{id:"elevation",label:"Elevations",icon:"\u2195"},{id:"section",label:"Section View",icon:"\u2702"}] as {id:ActiveTab;label:string;icon:string}[])
+        {([{id:"floor",label:depthTab==="full-bid"?"Project Plans":"Floor Plan",icon:"\u229e"},{id:"elevation",label:"Elevations",icon:"\u2195"},{id:"section",label:"Section View",icon:"\u2702"}] as {id:ActiveTab;label:string;icon:string}[])
+          /*
+           * Full Bid is one surface.
+           *
+           * It used to send the estimator to an Elevations tab to grip a
+           * height off a second sheet - which meant finding that sheet,
+           * scaling it, and matching its drawings back to strokes on a
+           * different tab. For a tier whose whole premise is a few swipes
+           * down a plan, that was the heaviest part of the job and the part
+           * everyone skipped. The height is typed on the stroke now, so
+           * there is nothing on another tab to go to.
+           */
           .filter(tool=>{
-            if(depthTab==="full-bid")   return tool.id!=="section";
+            if(depthTab==="full-bid")   return tool.id==="floor";
             return true;
           })
           .map(tool=>{
           const active = activeTab===tool.id;
-          const count = extractedPages.filter(p=>tabAccepts(tool.id,p.tag)).length;
+          const count = extractedPages.filter(p=>tabAccepts(tool.id,p.tag,depthTab as EstimateDepth)).length;
           return (
           <button key={tool.id} onClick={()=>setActiveTab(tool.id)}
             className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[10px] font-bold transition ${active?"border-orange-500 bg-orange-500 text-black":"border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-orange-500/40"}`}>
@@ -2125,32 +2312,34 @@ export default function TakeoffWorkspaceAdvancedPage() {
         const anyGrip   = elevData.some(ed=>ed.areas.some(a=>a.rect&&a.lf>0));
         const steps: KorbanGuidanceStep[] = [
           { id:"upload", title:"Load the plans",
-            body:"Drop the PDF in. I'll read the title blocks and sort the sheets into their tabs - anything I'm unsure of waits in Sheet index.",
+            body:"Drop the PDF in. I'll sort the sheets into their tabs; anything I'm unsure of waits in Sheet index.",
             // Restored work counts as done even before the sheet finishes
             // loading, or the walkthrough tells a full takeoff to start over.
             done: Boolean(viewerUrl) || floorLevels.some(l => l.stored && l.tracePoints.length >= 3) },
           { id:"scale", title:"Confirm the scale",
-            body:"If the sheet printed one it's on the toolbar - check it and Confirm. Otherwise click Scale, pick two points you know the distance between, and type it.",
-            why:"A printed scale only holds if the PDF is full size. Worth the look.",
+            body:"If the sheet printed one, Confirm it. Otherwise pick two points you know and type the distance.",
+            why:"A printed scale only holds if the PDF is full size.",
             done: scale.locked },
           ...(depthTab === "full-bid" ? [
-            { id:"highlight", title:"Swipe each face",
-              body:"Press Highlight, then press, drag and release along the wall. Check the north arrow matches the plan - that's what names them.",
-              why:"A stroke takes everything inside its length. Setbacks, pop-outs, the lot.",
+            { id:"highlight", title:"Swipe every face",
+              body:"Press Highlight, then press, drag, release along each wall. Add a level if the building steps. Heights come after.",
+              why:"A stroke takes everything inside its length - setbacks, pop-outs, the lot.",
               done: highlights.some(h => h.lf > 0) },
-            { id:"grip", title:"Give every face a height",
-              body:"Over on Elevations your strokes are grouped by face. Grip one and the whole face takes it. Open a face if a wall steps.",
-              why:"No height, no run. The count up top has to reach the end.",
+            { id:"grip", title:"Now the heights",
+              body:"Back at the top of the list. Open an elevation sheet, pick a highlight, then Measure ground to top of wall - it lands in that highlight's box. Or type it.",
+              why:"No height, no run.",
               done: highlights.some(h => h.lf > 0) && !highlights.some(h => h.lf > 0 && h.heightFt <= 0) },
           ] : [
-            { id:"trace", title:"Trace the outline",
-              body:"Click corner to corner round the outside, then Close. Near-square lines snap straight. Undo Point if you misclick.",
-              why:"Off a roof plan it draws dashed - that line carries the overhang, not the wall.",
-              done: anyTraced },
-            { id:"ref", title:"Set reference points",
-              body:"Same fixed feature on every level - a column, a grid intersection.",
-              why:"It's what stacks the floors. Without it a step-back looks like a shaky hand.",
+            /* The anchor first. Picking it after the trace means going back
+               over every level you already drew. */
+            { id:"ref", title:"Pick the reference point",
+              body:"Same fixed feature on every level - a column, a grid intersection. It glows when you are close enough to snap.",
+              why:"It's what stacks the floors, so it comes before they are drawn.",
               done: allRefs },
+            { id:"trace", title:"Trace the outline",
+              body:"Click corner to corner, then Close. Near-square lines snap straight.",
+              why:"Off a roof plan it draws dashed - that is the overhang.",
+              done: anyTraced },
             { id:"grip", title:"Grip the elevations",
               body:"On Elevations, set the scale there too, then drag a box over each face.",
               why:"Height sets frames per leg.",
@@ -2158,7 +2347,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
           ]),
           { id:"store", title:"Store the work",
             body: depthTab === "full-bid"
-              ? "Store Elevations once every face has a height."
+              ? "Nothing to press. Heights save as you type them."
               : "Store Overlay on the plan, Store Elevations on the elevations.",
             done: depthTab === "full-bid" ? elevStored : (overlayStored || elevStored) },
         ];
@@ -2173,7 +2362,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
             id: "section",
             title: "Draw the sections",
             body: "Start Section View and trace the wall profile where you need one.",
-            why: "Pins the frame to the real wall. Difference between 8% and 3%.",
+            why: "Pins the frame to the wall. Difference between 8% and 3%.",
             done: sections.some(sec => sec.wallComplete),
           });
         }
@@ -2189,12 +2378,20 @@ export default function TakeoffWorkspaceAdvancedPage() {
          */
         if (guideHidden || (walkthroughHidden && readsItHidden)) return null;
         return (
+          /*
+           * Wide enough, not as wide as the page.
+           *
+           * At 340px the steps wrapped three and four lines deep and the card
+           * became a column. Letting it take the whole width overshot the
+           * other way, leaving a long empty tail after the words. A fixed
+           * 560px is about one line per step with nothing spare.
+           */
           <div className="flex flex-wrap items-start gap-3 px-6 pt-3">
             {!walkthroughHidden && (
               <KorbanGuidance
                 steps={steps}
                 title={depthTab === "korban-bid" ? "Korban Bid walkthrough" : "Full Bid walkthrough"}
-                className="w-full sm:w-[340px]"
+                className="w-full sm:w-[560px]"
                 onDismiss={() => setWalkthroughHidden(true)}
               />
             )}
@@ -2215,7 +2412,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
         {/* Left panel */}
         <aside className="flex w-[140px] flex-shrink-0 flex-col border-r border-zinc-900 bg-[#080604]">
           <div className="border-b border-zinc-900 px-3 py-2.5">
-            <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">{TAB_TAGS[activeTab]}</p>
+            <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+              {depthTab==="full-bid"&&activeTab==="floor" ? "Project Plans" : TAB_TAGS[activeTab]}
+            </p>
           </div>
           {tabPages.length===0?(
             <div className="flex-1 flex items-center justify-center p-3">
@@ -2253,6 +2452,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
             * and a wrong one is a click to fix. A sheet filed wrong silently
             * is the fault this is trying to avoid, not commit.
             */}
+          {/*
+            * The index belongs to whichever tab you are on.
+            *
+            * It only ever rendered over the floor plan, so on Korban Bid the
+            * Elevations and Section View tabs had no way to pull their own
+            * sheets out of the set - the one tier that needs all three.
+            * tabAccepts already keeps each tab to its own kind, so the panel
+            * simply has to be available from all of them.
+            */}
           {sheetIndexOpen&&sheetGuesses.length>0&&(() => {
             /*
              * Only this tab's sheets.
@@ -2262,16 +2470,21 @@ export default function TakeoffWorkspaceAdvancedPage() {
              * plans and roof plans, Elevations offers elevations, Section View
              * offers sections - what you are looking at is what you can take.
              */
-            const rows = usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag));
+            const rows = usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag,depthTab as EstimateDepth));
             return (
               <div className="absolute left-3 top-14 z-30 w-[380px] max-h-[70%] overflow-y-auto rounded-xl border border-zinc-800 bg-[#0b0b0b]/95 p-3 shadow-2xl backdrop-blur">
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-orange-300">
-                      Sheet index &middot; {TAB_TAGS[activeTab]}{activeTab==="floor"?" + roof":""}
+                      Sheet index
                     </p>
-                    <p className="mt-0.5 text-[9px] leading-4 text-zinc-500">
-                      Read from the title blocks. Anything the set named clearly is already filed;
+                    <p className="mt-0.5 font-mono text-[8px] uppercase tracking-[0.12em] text-zinc-600">
+                      {activeTab==="floor"
+                        ? (depthTab==="full-bid" ? "floor plans + roof + elevations" : "floor plans + roof")
+                        : TAB_TAGS[activeTab].toLowerCase()}
+                    </p>
+                    <p className="mt-1 text-[9px] leading-4 text-zinc-500">
+                      Read from the title blocks. What the set named clearly is already filed;
                       these were less certain.
                     </p>
                   </div>
@@ -2288,7 +2501,12 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 ) : (
                   <>
                     <button
-                      onClick={()=>{ void (async()=>{ for(const row of rows) await acceptSheet(row); })(); }}
+                      /* Taking them all is the end of the job this panel
+                         exists for, so it gets out of the way. */
+                      onClick={()=>{ void (async()=>{
+                        for(const row of rows) await acceptSheet(row);
+                        setSheetIndexOpen(false);
+                      })(); }}
                       className="mb-2 w-full rounded-lg border border-orange-500/50 bg-orange-500/10 py-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-orange-300 hover:bg-orange-500/20">
                       Take all {rows.length}
                     </button>
@@ -2373,13 +2591,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
             <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)handleFile(f);e.target.value="";}}/>
 
             {/* The set's own index, once it has been read. */}
+            {/* Always on the toolbar once a set has been read, on every tab,
+                counting what that tab still has to place. */}
             {(scanningSheets||sheetGuesses.length>0)&&(
               <button onClick={()=>setSheetIndexOpen(open=>!open)}
                 className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition ${
                   sheetIndexOpen?"border-orange-500 bg-orange-500/15 text-orange-300":"border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-white/30"}`}>
                 {scanningSheets
                   ? "Reading sheets..."
-                  : `Sheet index (${usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag)).length})`}
+                  : `Sheet index (${usefulSheets(sheetGuesses).filter(g=>tabAccepts(activeTab,g.tag,depthTab as EstimateDepth)).length})`}
               </button>
             )}
 
@@ -2432,23 +2652,38 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
             {viewerUrl&&<div className="h-4 w-px bg-zinc-800"/>}
 
+            {/*
+              * Measure, wherever the scale stands.
+              *
+              * This sat inside the branch that renders while the scale is
+              * UNLOCKED, and was disabled unless it was locked - so it showed
+              * only when it could not be used and vanished the moment it
+              * could. It belongs outside that branch, which is also where an
+              * estimator reaches for it: on an elevation sheet, ground to top
+              * of wall, to get the height he is about to type.
+              */}
+            <button
+              onClick={()=>{ setMeasureMode(m=>!m); setMeasureFrom(null); setMeasureTo(null); }}
+              disabled={!scale.locked}
+              title={scale.locked
+                ? (activeStroke ? `Measure, and it fills ${strokeDisplayName(activeStroke)}` : "Measure between two points")
+                : "Lock a scale first"}
+              className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition disabled:opacity-30 ${measureMode?"border-cyan-400/60 bg-cyan-400/15 text-cyan-300":"border-zinc-700 text-zinc-400 hover:border-cyan-400/40"}`}
+            >
+              {measureMode
+                ? (measureFrom ? "Measure \u2014 second point" : "Measure \u2014 first point")
+                : "Measure"}
+            </button>
+            {measurements.length>0&&(
+              <button onClick={()=>setMeasurements([])}
+                className="rounded-lg border border-zinc-800 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">
+                Clear {measurements.length}
+              </button>
+            )}
+
             {/* Scale */}
             {!scale.locked?(
               <>
-                <button
-                  onClick={()=>{ setMeasureMode(m=>!m); setMeasureFrom(null); setMeasureTo(null); }}
-                  disabled={!scale.locked}
-                  title={scale.locked?"Measure between two points":"Set a scale first"}
-                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition disabled:opacity-30 ${measureMode?"border-cyan-400/60 bg-cyan-400/15 text-cyan-300":"border-zinc-700 text-zinc-400 hover:border-cyan-400/40"}`}
-                >
-                  Measure
-                </button>
-                {measurements.length>0&&(
-                  <button onClick={()=>setMeasurements([])}
-                    className="rounded-lg border border-zinc-800 px-2 py-1.5 text-[9px] text-zinc-500 hover:text-white">
-                    Clear {measurements.length}
-                  </button>
-                )}
                 {/*
                   * The sheet already said what the scale is.
                   *
@@ -2538,7 +2773,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
             )}
 
             {/* Section wall outline */}
-            {activeTab==="section"&&viewerUrl&&(
+            {/*
+              * No outline, no section.
+              *
+              * A section is a cut through a building, and with nothing traced
+              * there is no building to cut - so it was drawing a profile
+              * against geometry nobody had given it.
+              */}
+            {activeTab==="section"&&viewerUrl&&floorLevels.some(l=>l.tracePoints.length>=3)&&(
               <>
                 <div className="h-4 w-px bg-zinc-800"/>
                 <button onClick={()=>setWallOutlineMode(m=>!m)}
@@ -2688,7 +2930,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     * elevation drawing covers the whole face however many
                     * swipes it took.
                     */}
-                  {activeTab==="floor"&&groupStrokesByFace(highlights).map(group=>{
+                  {activeTab==="floor"&&!(depthTab==="full-bid"&&highlightsComplete)&&groupStrokesByFace(highlights).map(group=>{
                     const drawn=group.strokes;
                     if(drawn.length===0) return null;
                     // Out from the middle of the face, along its outward side.
@@ -2728,17 +2970,27 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     * Highlighter strokes. They stay lit, labelled with what
                     * they cover, so the plan reads like a marked-up set.
                     */}
-                  {activeTab==="floor"&&highlights.filter(h=>h.lf>0).map((h,i)=>{
+                  {/*
+                    * The strokes come off the sheet once the swiping is done.
+                    *
+                    * They are marks on the floor plan, and the second pass is
+                    * spent on elevation sheets in the same viewer - where a
+                    * set of plan strokes laid over a building elevation is
+                    * just something in the way of the wall being gripped.
+                    * They stay on the key plan, which is where they are
+                    * useful from here.
+                    */}
+                  {activeTab==="floor"&&!(depthTab==="full-bid"&&highlightsComplete)&&highlights.filter(h=>h.lf>0).map((h,i)=>{
                     /* With a face selected, the rest go quiet. Same idea as
                        the key plan: you can see what you are working on. */
                     const dim = selectedFace !== "" && h.face !== selectedFace;
                     return (
                     <g key={h.id} opacity={dim?0.28:1}>
                       <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
-                        stroke={h.heightFt>0?"#fbbf24":"#f59e0b"} strokeWidth={14/viewerZoom} strokeLinecap="round"
+                        stroke={strokeLevelColor(h.level)} strokeWidth={14/viewerZoom} strokeLinecap="round"
                         opacity={h.heightFt>0?0.32:0.18} />
                       <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
-                        stroke="#fbbf24" strokeWidth={2/viewerZoom} strokeLinecap="round"
+                        stroke={strokeLevelColor(h.level)} strokeWidth={2/viewerZoom} strokeLinecap="round"
                         strokeDasharray={h.heightFt>0?undefined:`${6/viewerZoom},${4/viewerZoom}`}
                         opacity="0.9" />
                       {(() => {
@@ -2761,6 +3013,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                             transform={`rotate(${ang} ${at.x} ${at.y})`}>
                             {strokeDisplayName(h)}
                             {h.heightFt > 0 ? ` \u00b7 ${h.heightFt}' TALL` : " \u00b7 NO HEIGHT"}
+                            {highlights.some(row=>(row.level ?? 1) !== 1) ? ` \u00b7 LVL ${h.level ?? 1}` : ""}
                             {h.note ? ` \u00b7 ${h.note.toUpperCase()}` : ""}
                           </text>
                         );
@@ -2868,9 +3121,15 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   {/* Snap target. A reference point reads as a ring, a trace
                       corner as a square, so it is never ambiguous which one
                       caught the cursor. */}
-                  {snapPreview&&(refPickLevelId||measureMode)&&(()=>{ const mk=1/viewerZoom; const {x,y}=snapPreview.pt; return snapPreview.kind==="ref"?(
+                  {snapPreview&&(refPickLevelId||measureMode||floorLevels.some(l=>l.traceMode))&&(()=>{ const mk=1/viewerZoom; const {x,y}=snapPreview.pt; return snapPreview.kind==="ref"?(
                     <g key="snap">
-                      <circle cx={x} cy={y} r={7*mk} fill="none" stroke="#fbbf24" strokeWidth={1.6*mk}/>
+                      {/* A ring that breathes, so the snap reads as live
+                          rather than as one more mark on a busy sheet. */}
+                      <circle cx={x} cy={y} r={7*mk} fill="none" stroke="#fbbf24" strokeWidth={1.6*mk}>
+                        <animate attributeName="r" values={`${7*mk};${12*mk};${7*mk}`} dur="1.1s" repeatCount="indefinite"/>
+                        <animate attributeName="opacity" values="1;0.35;1" dur="1.1s" repeatCount="indefinite"/>
+                      </circle>
+                      <circle cx={x} cy={y} r={7*mk} fill="none" stroke="#fbbf24" strokeWidth={1.2*mk} opacity={0.5}/>
                       <circle cx={x} cy={y} r={2*mk} fill="#fbbf24"/>
                     </g>
                   ):(
@@ -2946,12 +3205,189 @@ export default function TakeoffWorkspaceAdvancedPage() {
             */}
           {depthTab==="full-bid"&&activeTab==="floor"&&(
             <div className="border-b border-zinc-900 px-4 py-3">
-              <div className="mb-2 flex items-center justify-between">
+              <div ref={highlightsTopRef} className="mb-2 flex items-center justify-between">
                 <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-yellow-300">Highlights</p>
                 <span className="font-mono text-[10px] text-zinc-400">
                   {highlights.reduce((sum,h)=>sum+h.lf,0).toFixed(1)} LF
                 </span>
               </div>
+
+              {/*
+                * The takeoff so far, as one drawing.
+                *
+                * Every stroke on the job drawn together at the top of the
+                * list, so the shape of the building shows up out of a set of
+                * separate swipes - and the one you have selected glows, so
+                * the tile in your hand and the wall on the plan are never in
+                * doubt. This lived on the Elevations tab and went with it
+                * when Full Bid lost that tab; it belongs with the strokes.
+                */}
+              {(() => {
+                const swiped = highlights.filter(h=>h.lf>0);
+                if (swiped.length === 0) return null;
+                const xs = swiped.flatMap(h=>[h.a.x,h.b.x]);
+                const ys = swiped.flatMap(h=>[h.a.y,h.b.y]);
+                const pad = Math.max(12, (Math.max(...xs)-Math.min(...xs))*0.08);
+                const vb = `${Math.min(...xs)-pad} ${Math.min(...ys)-pad} ${Math.max(...xs)-Math.min(...xs)+pad*2} ${Math.max(...ys)-Math.min(...ys)+pad*2}`;
+                const lf = swiped.reduce((sum,h)=>sum+h.lf,0);
+                return (
+                  <div className="mb-2 rounded-lg border border-zinc-800 bg-black p-2">
+                    <div className="mb-1 flex items-baseline justify-between">
+                      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-600">Takeoff so far</span>
+                      <span className="font-mono text-[9px] text-yellow-300">{Math.round(lf*10)/10}&apos;</span>
+                    </div>
+                    {/*
+                      * Hairlines, not ribbons.
+                      *
+                      * Stroke width was being scaled off the building's own
+                      * size, so a small job drew fat rounded bars - closer to
+                      * a child's drawing than a key plan. non-scaling-stroke
+                      * pins every line to real screen pixels instead, so it
+                      * stays a one-pixel line whatever the building measures,
+                      * and square ends read as drafting rather than marker.
+                      */}
+                    <svg viewBox={vb} className="h-28 w-full" shapeRendering="geometricPrecision">
+                      {swiped.map(h=>{
+                        const lit = h.id === activeStroke?.id;
+                        const ink = lit ? strokeLevelColor(h.level) : "#52525b";
+                        return (
+                          <g key={h.id} style={{ cursor:"pointer" }} onClick={()=>setActiveHighlight(h.id)}>
+                            {lit&&(
+                              <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
+                                stroke={ink} strokeWidth={5} opacity={0.18}
+                                vectorEffect="non-scaling-stroke" />
+                            )}
+                            <line x1={h.a.x} y1={h.a.y} x2={h.b.x} y2={h.b.y}
+                              stroke={ink}
+                              strokeWidth={lit ? 1.5 : 1}
+                              strokeDasharray={h.heightFt>0 ? undefined : "4 3"}
+                              vectorEffect="non-scaling-stroke" />
+                            {/* A tick at each end, the way a run is terminated
+                                on a drawing. */}
+                            {[h.a, h.b].map((pt,i)=>{
+                              const dx=h.b.x-h.a.x, dy=h.b.y-h.a.y;
+                              const len=Math.hypot(dx,dy)||1;
+                              const nx=(-dy/len), ny=(dx/len);
+                              const t=len*0.02;
+                              return (
+                                <line key={i}
+                                  x1={pt.x-nx*t} y1={pt.y-ny*t} x2={pt.x+nx*t} y2={pt.y+ny*t}
+                                  stroke={ink} strokeWidth={lit ? 1.5 : 1}
+                                  vectorEffect="non-scaling-stroke" opacity={0.8} />
+                              );
+                            })}
+                          </g>
+                        );
+                      })}
+                    </svg>
+                    <p className="mt-1 font-mono text-[8px] uppercase tracking-[0.1em] text-zinc-700">
+                      {highlightsComplete ? "Dashed \u2014 still needs a height" : "Click a wall to select it"}
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {/*
+                * Store, where the work is.
+                *
+                * Full Bid's store button lived on the Elevations tab, which
+                * this tier no longer opens. It belongs with the strokes.
+                */}
+              {depthTab==="full-bid"&&highlights.some(h=>h.lf>0)&&(() => {
+                const swiped = highlights.filter(h=>h.lf>0);
+                const owed = swiped.filter(h=>h.heightFt<=0).length;
+
+                /*
+                 * The first pass needs no banner - the Complete Overlay
+                 * button sits at the end of the strokes, which is where the
+                 * swiping finishes. This is the second pass's progress line.
+                 */
+                if (!highlightsComplete) return null;
+
+                return (
+                  <div className="mb-2 space-y-1">
+                    <div className={`rounded-lg border px-3 py-2 text-center ${
+                      owed>0 ? "border-amber-500/30 bg-amber-500/[0.06]" : "border-emerald-500/30 bg-emerald-500/[0.06]"}`}>
+                      <span className={`font-mono text-[10px] uppercase tracking-[0.12em] ${
+                        owed>0 ? "text-amber-300/90" : "text-emerald-300/90"}`}>
+                        {owed>0
+                          ? `${owed} of ${swiped.length} still need a height`
+                          : `All ${swiped.length} heights in`}
+                      </span>
+                    </div>
+
+                    {/*
+                      * The way out of the second pass.
+                      *
+                      * The heights are the last thing Takeoff asks for, so
+                      * when they are all in the next place is the layout.
+                      * Shown only once nothing is owed - it is a door, not a
+                      * nag.
+                      */}
+                    {owed===0&&(
+                      <a
+                        href="/set-scaffold-v2"
+                        onClick={()=>storeElevations()}
+                        className="block w-full rounded-lg bg-orange-500 px-3 py-2 text-center text-black transition hover:bg-orange-400">
+                        <span className="block text-[11px] font-bold">Complete Elevations</span>
+                        <span className="block font-mono text-[9px] uppercase tracking-[0.1em] text-black/90">
+                          (set scaffold next)
+                        </span>
+                      </a>
+                    )}
+
+                    <button
+                      onClick={()=>setHighlightsComplete(false)}
+                      className="w-full rounded border border-zinc-800 py-1 font-mono text-[9px] text-zinc-600 transition hover:border-zinc-600 hover:text-zinc-400">
+                      &larr; MORE HIGHLIGHTS
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/*
+                * Levels, when a building steps.
+                *
+                * One is the ordinary case and says nothing. A second appears
+                * only when somebody adds it, and from then on each level has
+                * its own colour on the plan - so a podium at twenty feet and
+                * a tower at ninety are told apart by looking rather than by
+                * remembering which stroke was which.
+                */}
+              {(() => {
+                const levels = Array.from(
+                  new Set([1, activeStrokeLevel, ...highlights.map(h=>h.level ?? 1)]),
+                ).sort((a,b)=>a-b);
+                if (levels.length === 1 && highlights.every(h=>(h.level ?? 1) === 1)) {
+                  return (
+                    <button
+                      onClick={()=>setActiveStrokeLevel(2)}
+                      className="mb-2 w-full rounded-lg border border-dashed border-zinc-800 py-1 font-mono text-[9px] text-zinc-600 transition hover:border-sky-400/40 hover:text-sky-300">
+                      + LEVEL &mdash; FOR A BUILDING THAT STEPS
+                    </button>
+                  );
+                }
+                return (
+                  <div className="mb-2 flex flex-wrap items-center gap-1">
+                    {levels.map(level=>(
+                      <button key={level}
+                        onClick={()=>setActiveStrokeLevel(level)}
+                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 font-mono text-[9px] transition ${
+                          activeStrokeLevel===level
+                            ? "border-zinc-500 bg-zinc-800 text-zinc-100"
+                            : "border-zinc-800 text-zinc-500 hover:text-zinc-300"}`}>
+                        <span className="h-2 w-2 rounded-full" style={{ background: strokeLevelColor(level) }} />
+                        LEVEL {level}
+                      </button>
+                    ))}
+                    <button
+                      onClick={()=>setActiveStrokeLevel(Math.max(...levels)+1)}
+                      className="rounded-lg border border-dashed border-zinc-800 px-2 py-1 font-mono text-[9px] text-zinc-600 hover:border-zinc-600 hover:text-zinc-400">
+                      +
+                    </button>
+                  </div>
+                );
+              })()}
 
               {/*
                 * Project north, set once per sheet.
@@ -2986,7 +3422,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     onClick={()=>setActiveHighlight(h.id)}
                     className={`cursor-pointer rounded-lg border px-2 py-1.5 transition ${selected?"border-yellow-500/60 bg-yellow-500/5":"border-zinc-800 bg-black hover:border-zinc-700"}`}>
                     <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 flex-shrink-0 rounded-full ${h.lf>0?"bg-yellow-400":"border border-zinc-700"}`} />
+                      <span className="h-2 w-2 flex-shrink-0 rounded-full"
+                        style={h.lf>0
+                          ? { background: strokeLevelColor(h.level) }
+                          : { border:"1px solid #3f3f46" }} />
                       {/*
                         * Named for where it is, not when it was drawn.
                         *
@@ -3043,6 +3482,40 @@ export default function TakeoffWorkspaceAdvancedPage() {
                       }`}>
                       {highlightMode&&selected ? "SWIPING \u2014 PRESS AND DRAG" : h.lf>0 ? "RE-SWIPE" : "SWIPE TO MEASURE"}
                     </button>
+                    {/*
+                      * The height, typed here.
+                      *
+                      * It used to be gripped off an elevation sheet on
+                      * another tab, which meant finding that sheet, scaling
+                      * it and matching its drawings back to this stroke. An
+                      * estimator reading a set already knows the wall height;
+                      * asking him to measure it twice was work for nothing.
+                      *
+                      * Takes feet and inches as they are written - 47, 47'6",
+                      * 47'-6" all land the same.
+                      */}
+                    {h.lf>0&&highlightsComplete&&(
+                      <div className="mt-1 flex items-center gap-1">
+                        <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-zinc-600">Ht</span>
+                        <input
+                          value={heightDrafts[h.id] ?? (h.heightFt>0 ? String(h.heightFt) : "")}
+                          onChange={e=>{
+                            const typed=e.target.value;
+                            setHeightDrafts(prev=>({ ...prev, [h.id]: typed }));
+                            const ft=parseFeetInches(typed);
+                            setHighlights(prev=>prev.map(row=>row.id===h.id
+                              ? { ...row, heightFt: Number.isFinite(ft)&&ft>0 ? ft : 0 }
+                              : row));
+                          }}
+                          onClick={e=>e.stopPropagation()}
+                          placeholder="47'-6&quot;"
+                          className={`w-full rounded border bg-zinc-950 px-1.5 py-1 font-mono text-[10px] outline-none placeholder:text-zinc-700 ${
+                            h.heightFt>0
+                              ? "border-zinc-800 text-emerald-300 focus:border-emerald-500/50"
+                              : "border-amber-500/40 text-amber-200 focus:border-amber-400"} ${
+                            heightsPulse&&h.heightFt<=0 ? "korban-guide-glow" : ""}`}/>
+                      </div>
+                    )}
                     {/* Somewhere to say which face this is, in the estimator's
                         own words - "back alley", "over the canopy". */}
                     <input value={h.note} placeholder="NOTE"
@@ -3055,12 +3528,47 @@ export default function TakeoffWorkspaceAdvancedPage() {
                 <button
                   onClick={()=>{
                     const id=`hl-${Date.now().toString(36)}`;
-                    setHighlights(prev=>[...prev,{ id, label:`Highlight ${prev.length+1}`, a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"" }]);
+                    setHighlights(prev=>[...prev,{ id, label:`Highlight ${prev.length+1}`, a:{x:0,y:0}, b:{x:0,y:0}, lf:0, heightFt:0, note:"", level:activeStrokeLevel }]);
                     setActiveHighlight(id);
+                    /* Asking for a new highlight is asking to draw one, so
+                       the marker is already in hand. Pressing Add and then
+                       pressing Swipe was two clicks saying the same thing.
+                       Not before there is a scale, though - a swipe without
+                       one measures nothing and the cursor just goes dead. */
+                    setHighlightMode(scale.locked);
+                    setStrokeFrom(null);
+                    setStrokeTo(null);
                   }}
                   className="w-full rounded-lg border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-600 transition hover:border-yellow-500/40 hover:text-yellow-300">
                   + Add Highlight
                 </button>
+
+                {/*
+                  * Complete Overlay, at the end of the list.
+                  *
+                  * The swiping finishes at the bottom of the strokes, so this
+                  * is where the estimator's hand already is. It writes the
+                  * strokes down, opens the height boxes, and puts him back at
+                  * the top of the list with those boxes lit - the second pass
+                  * starts at the first face, not wherever the first pass
+                  * happened to end.
+                  */}
+                {highlights.some(h=>h.lf>0)&&!highlightsComplete&&(
+                  <button
+                    onClick={()=>{
+                      storeElevations();
+                      setHighlightsComplete(true);
+                      setHeightsPulse(true);
+                      window.setTimeout(()=>setHeightsPulse(false), 4000);
+                      highlightsTopRef.current?.scrollIntoView({ behavior:"smooth", block:"start" });
+                    }}
+                    className={`mt-2 w-full rounded-lg bg-orange-500 px-3 py-2 text-black transition hover:bg-orange-400 ${currentGuide==="store"?"korban-guide-glow":""}`}>
+                    <span className="block text-[11px] font-bold">Complete Overlay</span>
+                    <span className="block font-mono text-[9px] uppercase tracking-[0.1em] text-black/90">
+                      (grip elevations next)
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -3296,6 +3804,9 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   );
                 })()}
               </div>
+              {/* An overlay is a traced thing. Full Bid has no trace to
+                  store, and its own button already did the storing. */}
+              {depthTab!=="full-bid"&&(
               <div className="p-4 border-t border-zinc-900">
                 <button data-guide="store" onClick={storeOverlay} className={`w-full rounded-xl px-4 py-2.5 text-xs font-bold transition ${overlayStored?"bg-emerald-500 text-black":"bg-orange-500 text-black hover:bg-orange-400"} ${currentGuide==="store"&&!overlayStored?"korban-guide-glow":""}`}>{overlayStored?"Overlay Stored":"Store Overlay"}</button>
 
@@ -3307,6 +3818,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
                   Complete Overlay &rarr; Elevations
                 </button>
               </div>
+              )}
             </div>
           )}
 
@@ -3791,7 +4303,18 @@ export default function TakeoffWorkspaceAdvancedPage() {
           )}
 
           {/* -- SECTION VIEW -- */}
-          {activeTab==="section"&&(
+          {/* A section is a cut through something. With nothing traced there
+              is nothing to cut, so the tools stay away rather than offering to
+              draw against geometry that does not exist. */}
+          {activeTab==="section"&&!floorLevels.some(l=>l.tracePoints.length>=3)&&(
+            <div className="flex h-full items-center justify-center p-6">
+              <p className="max-w-[220px] text-center text-[11px] leading-5 text-zinc-600">
+                Nothing traced yet. A section cuts through the building, so trace an outline on the
+                Floor Plan tab first.
+              </p>
+            </div>
+          )}
+          {activeTab==="section"&&floorLevels.some(l=>l.tracePoints.length>=3)&&(
             <div className="flex flex-col h-full">
               <div className="p-4 flex-1 space-y-3 overflow-y-auto">
                 <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white">Section Views</p>

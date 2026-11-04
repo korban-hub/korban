@@ -42,7 +42,7 @@ const menuLinks: KorbanMenuLink[] = [
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
   { href: "/margin-review", label: "Margin Review" },
   { href: "/set-scaffold-v2", label: "Set Scaffold" },
-  { href: "/korban-review", label: "Review" },
+  { href: "/korban-review", label: "Overview" },
   { href: "/estimate-review", label: "Estimate" },
   { href: "/backend", label: "Backend" },
 ];

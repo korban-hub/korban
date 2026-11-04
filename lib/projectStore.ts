@@ -186,6 +186,15 @@ export type StoredHighlight = {
    */
   face?: string;
   /**
+   * Which level of the building this stroke covers.
+   *
+   * A podium at twenty feet and a tower at ninety are two runs, not one
+   * building at an average height - so they are two strokes, told apart by
+   * their level and drawn in that level's colour. One level is the ordinary
+   * case and needs no thought; the second only appears when somebody adds it.
+   */
+  level?: number;
+  /**
    * Set when the estimator corrects the face by hand.
    *
    * The outward side is inferred from where the rest of the strokes sit, which

@@ -163,6 +163,9 @@ const OTHER_DISCIPLINES = ["P", "M", "E", "S", "C", "FP", "FA", "T", "L", "Q", "
  */
 const SOFT_PLANS = ["SITE PLAN"];
 
+/** Series that hold interiors, schedules and details rather than the building. */
+const INTERIOR_SERIES = ["6", "7", "8", "9"];
+
 const NOT_FOOTPRINT = [
   "CEILING",
   "RCP",
@@ -292,7 +295,18 @@ function tagFromSeries(prefix: string, series: string): SheetTag {
  * set of exterior elevations, and a callout reading "DETAIL 3/A5" threw away
  * a sheet of them. A note is not a title and now never gets a vote.
  */
-function tagFromLabel(label: string): { tag: SheetTag; why: string } {
+/*
+ * Words that say an elevation is of the building's outside.
+ *
+ * A sheet titled plainly "ELEVATIONS" is as likely to be a run of restroom
+ * walls as the outside of the building - offices put interiors in the A7, A8
+ * and A9 series and title them no differently. So a bare elevation is not
+ * trusted on its own; it wants either one of these words or a sheet number
+ * in the elevation series before it files itself.
+ */
+const EXTERIOR_CUE = ["EXTERIOR", "BUILDING", "NORTH", "SOUTH", "EAST", "WEST", "FRONT", "REAR", "SIDE"];
+
+function tagFromLabel(label: string): { tag: SheetTag; why: string; weak?: boolean } {
   const text = label.toUpperCase();
 
   const rejected = hasAnyWord(text, REJECT);
@@ -306,7 +320,10 @@ function tagFromLabel(label: string): { tag: SheetTag; why: string } {
   if (saysWord(text, "ELEVATION")) {
     const inside = hasAnyWord(text, INTERIOR_ELEVATION);
     if (inside) return { tag: "Unknown", why: `${inside.toLowerCase()} elevation` };
-    return { tag: "Elevation View", why: "titled elevation" };
+    const cue = hasAnyWord(text, EXTERIOR_CUE);
+    return cue
+      ? { tag: "Elevation View", why: `titled ${cue.toLowerCase()} elevation` }
+      : { tag: "Elevation View", why: "titled elevation", weak: true };
   }
 
   if (saysWord(text, "ROOF") && saysWord(text, "PLAN")) {
@@ -518,11 +535,31 @@ export function classifySheet(
     /* Anything flagged as a judgement call waits for a human, however clear
        the rest of the sheet is. */
     const soft = line.verdict.why.includes("check it is");
+
+    /*
+     * A bare "ELEVATIONS" in the interior series is an interior sheet.
+     *
+     * Nothing in the words distinguishes a page of lobby walls from the
+     * outside of the building, so the sheet number is the only thing left to
+     * ask - and in the A6 to A9 range the answer is reliably interiors,
+     * schedules and details. Dropped rather than offered, because a set
+     * carries dozens of them and they bury the four sheets that matter.
+     */
+    if (line.verdict.weak && num && INTERIOR_SERIES.includes(num.series.charAt(0))) {
+      return {
+        ...blank,
+        sheetNumber,
+        title: tidyTitle(line.text),
+        reason: `${sheetNumber} series - interior elevations`,
+      };
+    }
     const scale = findScale(near.concat(rows.filter((r) => r.size < (num?.size ?? 0))));
     return {
       ...blank,
       tag: line.verdict.tag,
-      confidence: soft ? "low" : "high",
+      /* A bare elevation files itself only where the series backs it up. */
+      confidence:
+        soft || (line.verdict.weak && fromSeries !== line.verdict.tag) ? "low" : "high",
       sheetNumber,
       title: tidyTitle(line.text),
       scaleLabel: scale.label,
@@ -567,6 +604,9 @@ export function classifySheet(
   for (const row of labels) {
     const verdict = tagFromLabel(row.text);
     if (verdict.tag === "Unknown") continue;
+    /* Same rule as the title block: a bare elevation in the interior series
+       is an interior sheet, and gets no vote. */
+    if (verdict.weak && num && INTERIOR_SERIES.includes(num.series.charAt(0))) continue;
     votes[verdict.tag] = (votes[verdict.tag] ?? 0) + 1;
     why = verdict.why;
   }

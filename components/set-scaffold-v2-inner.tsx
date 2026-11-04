@@ -6,24 +6,23 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, isStandardBay, largestBayWithin, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, type SectionDraftingItem } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
 import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
+import { readInsets, setOut, setOutRuns, type BaySpan, type LegResult, type PlanPoint, type SegmentLegs } from "@/lib/scaffoldSetOut";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type PlanPoint = { x: number; y: number };
+// PlanPoint, LegResult, BaySpan and SegmentLegs come from the set-out engine
+// in lib/scaffoldSetOut.ts. The drawing and the ledger read what it hands back
+// and decide nothing about geometry themselves.
 type ScaffoldWidth = "3'" | "3'-6\"" | "5'";
-type LegResult = {
-  wallPoint: PlanPoint; tickTip: PlanPoint; labelPoint: PlanPoint;
-  isTurnaroundMirror: boolean; isStartLeg: boolean; isEndLeg: boolean;
-};
 
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/project-plan-desk", label: "Project Plan Desk" },
   { href: "/takeoff-workspace-advanced", label: "Takeoff Workspace" },
-  { href: "/korban-review", label: "Review" },
+  { href: "/korban-review", label: "Overview" },
   { href: "/estimate-review", label: "Estimate" },
 ];
 
@@ -102,6 +101,18 @@ function getPrimaryGeometryPoints(elev: ProjectElevation | null): PlanPoint[] {
 }
 
 /** No traced plan. Everything downstream treats an empty outline as "nothing to lay out". */
+/*
+ * One ink for the whole layout.
+ *
+ * Full Bid drew its runs in orange and Korban Bid drew the same thing in
+ * white, so the same building looked like two different drawings depending on
+ * which round made it - and the orange one printed grey. A layout is line
+ * work: white on screen, black on paper, and identical at every tier. Orange
+ * is kept for what the estimator is touching - a selected leg, a tool in use.
+ */
+const LAYOUT_INK = "#f8fafc";
+
+/** No traced plan. Everything downstream treats an empty outline as "nothing to lay out". */
 const EMPTY_OUTLINE: PlanPoint[] = [];
 
 /** Kept only so older references compile; never drawn or counted. */
@@ -126,360 +137,22 @@ function planksPerBay(width: ScaffoldWidth): number {
   return planksPerBayForWidth(parseFt(width));
 }
 
+/**
+ * The frames-per-leg number beside a tick, one size everywhere it is drawn.
+ *
+ * Scaled to the tick so it reads at any zoom, with a floor so it never
+ * vanishes. It was half the tick length and crowded the drawing; a third is
+ * a note on a tick, not a heading.
+ */
+function legLabelSize(tickLenPx: number): number {
+  return Math.max(tickLenPx * 0.33, 4.2);
+}
+
 // ── Leg computation ──────────────────────────────────────────────────────────
 //
-// Built to KORBAN-Scaffold-Geometry-Rules. In short:
-//
-//   A tick always points square at the wall in front of it - never a bisector.
-//   Every corner carries an invisible stop at frameWidth + 1' along each wall,
-//   and no leg lands past it. Runs resolve in order, each starting at its free
-//   corner and marching toward the junction, so the remainder lands where it
-//   can be judged rather than in the middle of a wall.
-//
-//   A run marches at bay length until 10' or less remains, then finishes:
-//   exactly 10' takes a leg on the boundary; between 8' and 10' takes the
-//   largest standard brace that fits; 8' or under is planked across to the
-//   perpendicular leg, which Cal-OSHA allows unbraced.
-//
-//   Anything that is not a standard brace length is a bastard bay and takes
-//   guardrail instead of a fixed brace. That is a different part, not just a
-//   different spacing.
-
-/** A jog shallower than this is absorbed - the run carries straight past. */
-const JOG_TOLERANCE_FT = 8 / 12;
-
-/**
- * How a span is closed. Three different things, and they buy different material.
- *
- *   braced  - a standard bay. Leg at each end, fixed cross braces.
- *   bastard - a real bay at a length no brace is made for. Leg at each end,
- *             guardrail instead of braces.
- *   rail    - not a bay at all. No far leg. Plank and rail stretched to the
- *             perpendicular leg that starts the next run.
- *
- * The last one is the point. A leg is a full stack of frames from grade to
- * working height, so railing across a six-foot gap on a sixty-foot building
- * saves ten frames and everything that goes with them. It is what a crew
- * would do, and it is preferred rather than tolerated.
- */
-export type BayKind = "braced" | "bastard" | "rail";
-
-export type BaySpan = { segIndex: number; lengthFt: number; kind: BayKind };
-
-/**
- * Legs for one wall, and the wall itself.
- *
- * The endpoints travel with the result on purpose. The renderer used to look
- * the wall back up by index against the raw outline, but the legs are computed
- * against the simplified one - so the moment a jog was absorbed the indices
- * stopped lining up and legs were drawn against the wrong wall, with that
- * wall's normal. That is what put ticks at odd angles and legs inside the
- * building. Carrying the geometry removes the possibility.
- */
-export type SegmentLegs = {
-  segIndex: number;
-  legs: LegResult[];
-  bays: BaySpan[];
-  /** The wall these legs belong to, as used. */
-  a: PlanPoint;
-  b: PlanPoint;
-  /** Square to that wall. The renderer must not recompute it. */
-  normal: PlanPoint;
-};
-
-/**
- * Collapses jogs the scaffold would not follow.
- *
- * A traced perimeter carries every bump in the building. Real scaffold runs
- * straight past anything under eight inches - it is inside the standoff
- * anyway. At eight inches the run breaks and picks up the new wall line.
- */
-function simplifyOutline(outline: PlanPoint[], puf: number): PlanPoint[] {
-  if (outline.length < 3 || puf <= 0) return outline;
-  const tolerance = JOG_TOLERANCE_FT * puf;
-  const kept: PlanPoint[] = [];
-
-  for (let i = 0; i < outline.length; i++) {
-    const prev = kept.length ? kept[kept.length - 1] : outline[(i - 1 + outline.length) % outline.length];
-    const vertex = outline[i];
-    const next = outline[(i + 1) % outline.length];
-
-    // Perpendicular distance from this vertex to the line prev->next. If the
-    // building only steps out by a few inches, the scaffold does not notice.
-    const dx = next.x - prev.x, dy = next.y - prev.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 1e-6) { kept.push(vertex); continue; }
-    const deviation = Math.abs((vertex.x - prev.x) * dy - (vertex.y - prev.y) * dx) / len;
-
-    if (deviation >= tolerance) kept.push(vertex);
-  }
-
-  return kept.length >= 3 ? kept : outline;
-}
-
-/**
- * A stretch of wall that steps in and comes back out.
- *
- * Buildings are full of these - a doorway set back, a light well, a row of
- * bays between piers. Scaffold does not follow every one of them, and which
- * ones it does follow is a judgement an estimator makes in a second and a
- * machine has to be told.
- */
-export type Recess = {
-  /** Index of the vertex the recess leaves the main line at. */
-  from: number;
-  /** Index it rejoins at. */
-  to: number;
-  depthFt: number;
-  /** Distance across the opening. */
-  mouthFt: number;
-  strategy: "bracket" | "straddle" | "double";
-  /** The wall inside the recess, for a double run to stand against. */
-  innerPoints: PlanPoint[];
-};
-
-/**
- * Finds recesses and decides what to do with each.
- *
- * Specification section 9. Depth decides:
- *
- *   under 8"          absorbed already, before this runs
- *   8" to 3'          brackets reach in from a run on the main line
- *   3' or more, and the mouth can be spanned      straddle it
- *   3' or more, too wide to span                  a second run inside
- *
- * Bracket against straddle is a question of span, not depth: if the piers
- * either side are close enough to bridge under normal bay rules, the deck
- * carries across and nothing reaches in.
- */
-function findRecesses(outline: PlanPoint[], puf: number, bayFt: number): Recess[] {
-  const n = outline.length;
-  if (n < 5 || puf <= 0) return [];
-
-  const DEEP_FT = 3;
-  const found: Recess[] = [];
-  let i = 0;
-
-  while (i < n) {
-    const a = outline[i];
-    // The line this stretch of wall is running along.
-    const prev = outline[(i - 1 + n) % n];
-    const dir = { x: a.x - prev.x, y: a.y - prev.y };
-    const dirLen = Math.hypot(dir.x, dir.y);
-    if (dirLen < 1e-6) { i++; continue; }
-    const u = { x: dir.x / dirLen, y: dir.y / dirLen };
-
-    // Look ahead for the vertex that picks the same line back up.
-    let matched = -1;
-    for (let span = 2; span <= 8 && i + span < n + 1; span++) {
-      const b = outline[(i + span) % n];
-      const back = { x: b.x - a.x, y: b.y - a.y };
-      const backLen = Math.hypot(back.x, back.y);
-      if (backLen < puf) continue;
-      const along = (back.x * u.x + back.y * u.y) / backLen;
-      // Within a few degrees of the original line, and moving forward along it.
-      if (along <= 0.985) continue;
-      /*
-       * And the wall has to carry on along that line afterwards. Without this
-       * the search matches across a corner and calls the building's own shape
-       * a recess - a step-back is not a recess, because the wall never comes
-       * back to where it was.
-       */
-      const after = outline[(i + span + 1) % n];
-      const nx = after.x - b.x, ny = after.y - b.y;
-      const nl = Math.hypot(nx, ny);
-      if (nl < 1e-6) continue;
-      if ((nx * u.x + ny * u.y) / nl <= 0.985) continue;
-      matched = i + span;
-      break;
-    }
-    if (matched < 0) { i++; continue; }
-
-    // How far the wall steps away from the chord between the two.
-    const b = outline[matched % n];
-    const chord = { x: b.x - a.x, y: b.y - a.y };
-    const chordLen = Math.hypot(chord.x, chord.y);
-    let depth = 0;
-    const innerPoints: PlanPoint[] = [];
-    const sides = new Set<boolean>();
-    for (let k = i + 1; k < matched; k++) {
-      const v = outline[k % n];
-      innerPoints.push(v);
-      const cross = (v.x - a.x) * chord.y - (v.y - a.y) * chord.x;
-      sides.add(cross > 0);
-      depth = Math.max(depth, Math.abs(cross) / chordLen);
-    }
-    // A genuine recess stays on one side of its own opening. Anything that
-    // crosses back and forth is the building, not a pocket in it.
-    if (sides.size > 1) { i++; continue; }
-
-    const depthFt = depth / puf;
-    const mouthFt = chordLen / puf;
-    if (depthFt >= JOG_TOLERANCE_FT) {
-      const spannable = mouthFt <= bayFt + 0.1;
-      const strategy: Recess["strategy"] =
-        depthFt < DEEP_FT ? "bracket" : spannable ? "straddle" : "double";
-      found.push({ from: i, to: matched % n, depthFt, mouthFt, strategy, innerPoints });
-      i = matched;
-      continue;
-    }
-    i++;
-  }
-
-  return found;
-}
-
-/**
- * The line the main run actually follows.
- *
- * Bracketed and straddled recesses are stepped over - the scaffold runs
- * straight past and reaches in, or decks across. A recess deep enough for its
- * own run is left in the outline, because the run goes in there.
- */
-function runLineFor(outline: PlanPoint[], recesses: Recess[]): PlanPoint[] {
-  const skip = new Set<number>();
-  recesses.forEach(r => {
-    if (r.strategy === "double") return;
-    for (let k = r.from + 1; k < r.to; k++) skip.add(k % outline.length);
-  });
-  if (skip.size === 0) return outline;
-  const kept = outline.filter((_, i) => !skip.has(i));
-  return kept.length >= 3 ? kept : outline;
-}
-
-function computeLegs(
-  outline: PlanPoint[], widthFt: number, bayFt: number, puf: number,
-  /** Walls where the scaffold sits interior. Everything else is exterior. */
-  interiorWalls: number[] = [],
-): SegmentLegs[] {
-  const raw = outline;
-  /*
-   * Two passes before a leg is placed.
-   *
-   * First the jogs the scaffold would not follow are absorbed. Then the
-   * recesses are found and each one decided: stepped over and bracketed,
-   * stepped over and decked across, or left in for a run of its own. What
-   * comes out is the line the scaffold actually stands on, which is rarely
-   * the line the building was traced along.
-   */
-  const simplified = simplifyOutline(outline, puf);
-  const recesses = findRecesses(simplified, puf, bayFt);
-  const shape = runLineFor(simplified, recesses);
-  const n = shape.length;
-  if (n < 2 || puf <= 0 || bayFt <= 0) {
-    return raw.map((_, i) => ({
-      segIndex: i, legs: [], bays: [],
-      a: raw[i], b: raw[(i + 1) % raw.length],
-      normal: { x: 0, y: -1 },
-    }));
-  }
-
-  const wallGap = 1 * puf;
-  const tickLen = widthFt * puf;
-  const labelOff = wallGap + tickLen + puf * 1.4;
-  const bayPx = bayFt * puf;
-  // How far past its starting corner a wall puts its first leg.
-  const floatPx = (widthFt + 1) * puf;
-
-  const results: SegmentLegs[] = [];
-
-  for (let i = 0; i < n; i++) {
-    const start = shape[i];
-    const end = shape[(i + 1) % n];
-    const dx = end.x - start.x, dy = end.y - start.y;
-    const segLen = Math.hypot(dx, dy);
-    if (segLen <= 0) {
-      results.push({ segIndex: i, legs: [], bays: [], a: start, b: end, normal: { x: 0, y: -1 } });
-      continue;
-    }
-
-    const along = { x: dx / segLen, y: dy / segLen };
-    // Square at the wall in front of it - every leg on this wall, including
-    // the float, which keeps the direction of the wall it belongs to.
-    const normal = computeOutwardNormal(start, end, shape, interiorWalls.includes(i) ? "interior" : "exterior");
-
-    function legAt(dist: number, isStart = false, isEnd = false): LegResult {
-      const base = { x: start.x + along.x * dist, y: start.y + along.y * dist };
-      return {
-        wallPoint: { x: base.x + normal.x * wallGap, y: base.y + normal.y * wallGap },
-        tickTip: { x: base.x + normal.x * (wallGap + tickLen), y: base.y + normal.y * (wallGap + tickLen) },
-        labelPoint: { x: base.x + normal.x * labelOff, y: base.y + normal.y * labelOff },
-        isTurnaroundMirror: false,
-        isStartLeg: isStart,
-        isEndLeg: isEnd,
-      };
-    }
-
-    /*
-     * Four steps, and every wall follows them without needing to know what any
-     * other wall did - which is what makes the corners resolve.
-     *
-     *   1. A leg frameWidth + 1' PAST the corner this wall starts from. It
-     *      floats, with no wall in front of it.
-     *   2. March at bay length along the wall.
-     *   3. Stop when the next bay would run off the end.
-     *   4. Leave whatever is left. It rails across to the next wall's float.
-     *
-     * The float belongs to the wall that is starting, not to the one that is
-     * ending. The earlier version had this inverted - it began each run four
-     * feet INSIDE its corner, which left every corner of the building bare.
-     */
-    const positions: number[] = [-floatPx];
-    let cursor = -floatPx;
-    let guard = 0;
-    while (cursor + bayPx <= segLen + 0.01 && guard++ < 500) {
-      cursor += bayPx;
-      positions.push(cursor);
-    }
-
-    /*
-     * The span to the next wall's float is what is left of this wall plus the
-     * one foot of standoff in front of that leg. Cal-OSHA allows eight, so
-     * seven feet of wall is the most that can be left unbraced. More than that
-     * earns one more leg, at the largest brace length that fits.
-     */
-    const leftoverFt = (segLen - cursor) / puf;
-    if (leftoverFt > 7 + 0.05) {
-      const closing = largestBayWithin(leftoverFt);
-      if (closing !== null) {
-        cursor += closing * puf;
-        positions.push(cursor);
-      }
-    }
-
-    const legs: LegResult[] = positions.map((d, index) =>
-      legAt(d, index === 0, index === positions.length - 1)
-    );
-
-    /*
-     * Bays. The first spans from the float to the first leg on the wall, so it
-     * hangs past the corner. The last is what is left over - a rail bay, which
-     * buys no leg at all.
-     */
-    const bays: BaySpan[] = [];
-    for (let b = 1; b < positions.length; b++) {
-      const lengthFt = (positions[b] - positions[b - 1]) / puf;
-      bays.push({ segIndex: i, lengthFt, kind: isStandardBay(lengthFt) ? "braced" : "bastard" });
-    }
-    const remainderFt = (segLen - positions[positions.length - 1]) / puf;
-    if (remainderFt > 0.05) {
-      bays.push({ segIndex: i, lengthFt: remainderFt, kind: "rail" });
-    }
-
-    results.push({
-      segIndex: i,
-      legs: legs.filter(l => isFinitePoint(l.tickTip)),
-      bays, a: start, b: end, normal,
-    });
-  }
-
-  /*
-   * Returned against the simplified shape, not padded back onto the raw one.
-   * Every caller reads the wall off the result rather than looking it up by
-   * index, so there is nothing for the two to disagree about.
-   */
-  return results;
-}
+// Lives in lib/scaffoldSetOut.ts, built to KORBAN-Scaffold-Geometry-Rules.md.
+// This file used to carry its own version and every rule in it was a guess
+// that happened to work on rectangles. Now it asks the engine and draws.
 
 // ── Three.js 3D model — full building perimeter ───────────────────────────────
 function ScaffoldModel3D({
@@ -1550,6 +1223,18 @@ export default function SetScaffoldV2Inner() {
    * Specification section 3b.
    */
   /**
+   * How far every leg stands off the wall, from the company's settings.
+   *
+   * It was a hardcoded foot. It is a rule about clearance, the same figure
+   * the section view already reads, and a company that works to eighteen
+   * inches should get eighteen inches everywhere rather than in one view.
+   */
+  const legStandoffFt =
+    elevation?.scaffoldInput?.wallOffset ??
+    getBackendSettings()?.scaffold?.wallOffset ??
+    1;
+
+  /**
    * Recesses in the traced plan, and what Korban decided to do with each.
    *
    * Computed here as well as inside the leg engine so the material and the
@@ -1557,8 +1242,8 @@ export default function SetScaffoldV2Inner() {
    */
   const recesses = useMemo(() => {
     if (!scaleOk || effPuf <= 0 || outline.length < 5) return [];
-    return findRecesses(simplifyOutline(outline, effPuf), effPuf, bayLengthFt);
-  }, [outline, scaleOk, effPuf, bayLengthFt]);
+    return readInsets(outline, { puf: effPuf, frameWidthFt: scaffoldWidthFt, bayFt: bayLengthFt, standoffFt: legStandoffFt });
+  }, [outline, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt, legStandoffFt]);
 
   const deviatingWalls = useMemo(() => {
     if (levelOutlines.length < 2 || effPuf <= 0) return [];
@@ -1662,11 +1347,77 @@ export default function SetScaffoldV2Inner() {
     saveActiveElevation(next);
   }
 
-  // Segment legs with no-orphan rule
-  const allSegmentLegs = useMemo(() => {
+  /*
+   * Turnaround bays, job wide.
+   *
+   * Every corner leg gets its mirror one frame width into the run and the run
+   * re-sets from it, so the deck turns each corner on a braced bay instead of
+   * a planked gap. Saved with the elevation, like which walls are interior.
+   */
+  const turnaroundBays = (elevation as (ProjectElevation & { turnaroundBays?: boolean }) | null)?.turnaroundBays ?? false;
+  function toggleTurnaroundBays() {
+    if (!elevation) return;
+    const next = { ...elevation, turnaroundBays: !turnaroundBays } as ProjectElevation;
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+
+  // The set-out: every leg, bay and gap on the traced plan, from the engine.
+  const tracedSegmentLegs = useMemo<SegmentLegs[]>(() => {
     if (!scaleOk || !outline.length || effPuf <= 0 || bayLengthFt <= 0) return [];
-    return computeLegs(outline, scaffoldWidthFt, bayLengthFt, effPuf, interiorWalls);
-  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, interiorWalls]);
+    return setOut(outline, {
+      puf: effPuf,
+      frameWidthFt: scaffoldWidthFt,
+      bayFt: bayLengthFt,
+      standoffFt: legStandoffFt,
+      interiorWalls,
+      standardBays: [...STANDARD_BAY_LENGTHS],
+      turnaround: turnaroundBays,
+    });
+  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, interiorWalls, legStandoffFt, turnaroundBays]);
+
+  /*
+   * Strokes that meet are one scaffold turning a corner, and it is set out by
+   * the same engine as a traced plan - strokes that close are a building,
+   * strokes that meet but do not close are an open chain with a leg at each
+   * free end. Each stroke used to be laid out on its own, floating a leg past
+   * every corner it met, which put two floats on every outside corner and a
+   * tick inside the building at every inside one. A stroke that meets nothing
+   * still stands alone, below.
+   */
+  const strokeSetOut = useMemo(() => {
+    if (!scaleOk || effPuf <= 0 || bayLengthFt <= 0 || drawnRuns.length === 0) return { segments: [], singles: [] };
+    return setOutRuns(
+      drawnRuns.map(r => ({ id: r.id, a: r.a, b: r.b, sitsInterior: r.sitsInterior })),
+      {
+        puf: effPuf,
+        frameWidthFt: scaffoldWidthFt,
+        bayFt: bayLengthFt,
+        standoffFt: legStandoffFt,
+        standardBays: [...STANDARD_BAY_LENGTHS],
+        turnaround: turnaroundBays,
+      },
+      8 * effPuf,
+    );
+  }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt, legStandoffFt, turnaroundBays]);
+
+  /** Everything the engine set out: the traced plan and the chained strokes. */
+  const allSegmentLegs = useMemo<SegmentLegs[]>(
+    () => [...tracedSegmentLegs, ...strokeSetOut.segments],
+    [tracedSegmentLegs, strokeSetOut],
+  );
+
+  /** Frames per leg on a stroke's walls - a stroke carries its own height. */
+  const strokeTallBySeg = useMemo(() => {
+    const reach = getBackendSettings()?.scaffold?.workerReachHeight ?? 6;
+    const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+    const m = new Map<number, number>();
+    for (const seg of strokeSetOut.segments) {
+      const run = drawnRuns.find(r => r.id === seg.runId);
+      if (run) m.set(seg.segIndex, Math.max(1, computeFrameMakeup(Math.max(0, run.heightFt - reach), jack).frameTall));
+    }
+    return m;
+  }, [strokeSetOut, drawnRuns, elevation]);
 
   // Per-leg frame tall — single source of truth is `frameTall`, the same
   // value driving the 3D model and Frame Config Options (derived from
@@ -1679,7 +1430,7 @@ export default function SetScaffoldV2Inner() {
   const getFrameTallForLeg = (segIndex: number, legIndex: number): number => {
     const legKey = `${segIndex}-${legIndex}`;
     if (overriddenFC[legKey]) return overriddenFC[legKey];
-    return frameTall;
+    return strokeTallBySeg.get(segIndex) ?? frameTall;
   };
 
   // A leg counts as "broken free" from the parallel track once its stored
@@ -1707,6 +1458,23 @@ export default function SetScaffoldV2Inner() {
     const outline2 = elevation?.sectionView?.wallOutline;
     return outline2 && outline2.length >= 2 ? (outline2 as PlanPoint[]) : ([] as PlanPoint[]);
   }, [elevation]);
+  /** Whether any cut on this job actually has a traced wall behind it. */
+  const hasAnySectionTrace =
+    sectionWallOutline.length >= 2 ||
+    (elevation?.sectionViews ?? []).some(sv => (sv.wallOutline?.length ?? 0) >= 2);
+
+  /*
+   * Standing on a tab that has just stopped existing shows nothing at all.
+   *
+   * Declared here rather than up with the other tab state, because a
+   * dependency array is evaluated during render - so an effect naming
+   * hasAnySectionTrace above its own declaration throws before the page can
+   * draw anything.
+   */
+  useEffect(() => {
+    if (activeMainTab === "section" && !hasAnySectionTrace) setActiveMainTab("overlay");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMainTab, hasAnySectionTrace]);
   const scaffoldSide = elevation?.sectionView?.scaffoldSide ?? "left";
   const draftingAdditions = elevation?.sectionView?.draftingAdditions ?? [];
   const manualFrameCount = useMemo(() => draftingAdditions.filter(d => d.kind === "frame").length, [draftingAdditions]);
@@ -1768,8 +1536,8 @@ export default function SetScaffoldV2Inner() {
    * Frames in one leg, from the wall height.
    *
    * This used to divide total frames by total legs, which sounds reasonable and
-   * is not: the frames come from the quantity engine and the legs are drawn by
-   * computeLegs, so the two counts describe different layouts. On a 21' wall it
+   * is not: the frames come from the quantity engine and the legs are set out
+   * by the engine in lib/scaffoldSetOut.ts, so the two counts describe different layouts. On a 21' wall it
    * reported two frames per leg - the answer you get when the division lands on
    * the minimum rather than when anything is actually two frames tall.
    *
@@ -1988,15 +1756,15 @@ export default function SetScaffoldV2Inner() {
 
   function snapToLayout(pt: PlanPoint): PlanPoint {
     const radius = Math.max(effPuf * 3, 6);
-    let best: { pt: PlanPoint; dist: number } | null = null;
+    let bestPt: PlanPoint | null = null, bestDist = Infinity;
     const consider = (c: PlanPoint) => {
       const dist = Math.hypot(c.x - pt.x, c.y - pt.y);
-      if (dist <= radius && (!best || dist < best.dist)) best = { pt: c, dist };
+      if (dist <= radius && dist < bestDist) { bestPt = c; bestDist = dist; }
     };
     allSegmentLegs.forEach(seg => seg.legs.forEach(l => consider(l.wallPoint)));
     drawnRuns.forEach(r => { consider(r.a); consider(r.b); });
     outline.forEach(consider);
-    return best ? best.pt : pt;
+    return bestPt ?? pt;
   }
 
   /**
@@ -2007,14 +1775,42 @@ export default function SetScaffoldV2Inner() {
    * a drawn run has no building to take its side from, so the side comes from
    * the direction it was drawn, and says where its scaffold sits.
    */
-  const drawnRunLegs = useMemo(() => {
+  type DrawnRunLegs = {
+    id: string;
+    legs: LegResult[];
+    lengthFt: number;
+    /** Every bay on the stroke by kind, when the engine laid it; a lone stroke's bays are all braced. */
+    bays?: BaySpan[];
+    /** Laid by the engine as part of a chain: drawn and counted with the engine's walls, not here. */
+    fromEngine?: boolean;
+  };
+  const drawnRunLegs = useMemo<DrawnRunLegs[]>(() => {
     if (!scaleOk || effPuf <= 0 || bayLengthFt <= 0) return [];
     const wallGap = 1 * effPuf;
     const tickLen = scaffoldWidthFt * effPuf;
     const stopPx = (scaffoldWidthFt + 1) * effPuf;
-    const bayPx = bayLengthFt * effPuf;
 
-    return drawnRuns.map(run => {
+    /* Strokes the engine chained: their legs and bays, gathered back per stroke. */
+    const chained: DrawnRunLegs[] = drawnRuns
+      .filter(run => !strokeSetOut.singles.some(s => s.id === run.id))
+      .map(run => {
+        const segs = strokeSetOut.segments.filter(s => s.runId === run.id);
+        return {
+          id: run.id,
+          legs: segs.flatMap(s => s.legs),
+          lengthFt: Math.hypot(run.b.x - run.a.x, run.b.y - run.a.y) / effPuf,
+          bays: segs.flatMap(s => [
+            ...(s.lead ? [s.lead] : []),
+            ...s.bays,
+            ...(s.tail ? [{ segIndex: s.segIndex, lengthFt: s.tail.lengthFt, kind: s.tail.kind }] : []),
+          ]),
+          fromEngine: true,
+        };
+      });
+
+    /* Strokes that meet nothing stand alone, laid out as one straight run. */
+    const alone = strokeSetOut.singles.map(single => {
+      const run = drawnRuns.find(r => r.id === single.id)!;
       const dx = run.b.x - run.a.x, dy = run.b.y - run.a.y;
       const len = Math.hypot(dx, dy);
       if (len <= 0) return { id: run.id, legs: [] as LegResult[], lengthFt: 0 };
@@ -2090,7 +1886,8 @@ export default function SetScaffoldV2Inner() {
       });
       return { id: run.id, legs, lengthFt: len / effPuf };
     });
-  }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt]);
+    return [...chained, ...alone];
+  }, [drawnRuns, strokeSetOut, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt]);
 
   /**
    * Legs on the walls that only exist above or below the key level.
@@ -2118,7 +1915,8 @@ export default function SetScaffoldV2Inner() {
        * the answer backwards on one of them, and the ticks point into the
        * building instead of away from the wall they serve.
        */
-      const normal = computeOutwardNormal(wall.a, wall.b, wall.levelPoints, interiorWalls.includes(wall.segIndex) ? "interior" : "exterior");
+      // A level's own wall has no index on the key outline; it is worked from outside.
+      const normal = computeOutwardNormal(wall.a, wall.b, wall.levelPoints, "exterior");
 
       const positions: number[] = [-floatPx];
       let cursor = -floatPx;
@@ -2179,25 +1977,52 @@ export default function SetScaffoldV2Inner() {
     // count. A bay is governed by its SHORTER leg: nothing can attach to
     // a frame that isn't there.
     let legs = 0, bays = 0, totalFrames = 0;
-    let braceCount = 0, plankCount = 0, railCount = 0, pinCount = 0;
+    let braceCount = 0, plankCount = 0, railCount = 0, pinCount = 0, bracketCount = 0;
+    /*
+     * One bay's worth of material, by what kind of bay it is.
+     *
+     *   braced  - cross braces, top and intermediate rails, planks
+     *   bastard - no brace is made to fit it: rails instead, two to a level, planks
+     *   rail    - a planked gap. No frame, no leg, no brace. Plank at deck
+     *             width and two rails to a level. Still a bay the foreman
+     *             builds and still material off the truck, so it is counted
+     *             as one - it just does not buy steel to stand on.
+     */
+    const countBay = (kind: BaySpan["kind"], bayLifts: number) => {
+      bays += 1;
+      plankCount += bayLifts * ppb;
+      if (kind === "braced") {
+        braceCount += bayLifts * MATERIAL_RULES.crossBracesPerBayPerLift;
+        railCount += MATERIAL_RULES.guardrailTopPerBay + Math.max(0, bayLifts - 1) * MATERIAL_RULES.guardrailIntermediatePerBay;
+      } else {
+        railCount += bayLifts * 2;
+      }
+    };
     for (const seg of allSegmentLegs) {
-      const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+      // Every leg the engine lists is a frame - a turnaround mirror included.
+      const sl = seg.legs;
       const active = sl
         .map((_, i) => i)
         .filter(i => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
       const lifts = active.map(i => overriddenFC[`${seg.segIndex}-${i}`] ?? getFrameTallForLeg(seg.segIndex, i));
       legs += lifts.length;
-      if (lifts.length > 1) bays += lifts.length - 1;
       for (const n of lifts) {
         totalFrames += n;
         pinCount += Math.max(0, n - 1) * MATERIAL_RULES.couplingPinsPerFrame;
       }
+      // A bay is governed by its shorter leg: nothing can attach to a frame that isn't there.
       for (let i = 0; i < lifts.length - 1; i++) {
         const bayLifts = Math.min(lifts[i], lifts[i + 1]);
-        braceCount += bayLifts * MATERIAL_RULES.crossBracesPerBayPerLift;
-        plankCount += bayLifts * ppb;
-        railCount += MATERIAL_RULES.guardrailTopPerBay + Math.max(0, bayLifts - 1) * MATERIAL_RULES.guardrailIntermediatePerBay;
+        const adjacent = active[i + 1] === active[i] + 1;
+        countBay(adjacent ? (seg.bays[active[i]]?.kind ?? "braced") : "braced", bayLifts);
       }
+      // The bay out of a corner leg the arriving run landed on.
+      if (seg.lead && lifts.length) countBay(seg.lead.kind, lifts[0]);
+      // And the tail at the end of the run: a planked gap round the corner, or
+      // the bay into a followed inset's first leg.
+      if (seg.tail) countBay(seg.tail.kind, lifts.length ? lifts[lifts.length - 1] : frameTall);
+      // Brackets hooked off the legs in front of a followed inset, one per leg per jump.
+      if (seg.brackets) bracketCount += lifts.reduce((s, n) => s + n, 0);
     }
     /*
      * Runs that are not the traced perimeter count too.
@@ -2210,6 +2035,7 @@ export default function SetScaffoldV2Inner() {
     const reachFt = getBackendSettings().scaffold.workerReachHeight ?? 6;
     const jackIn = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
     for (const run of drawnRunLegs) {
+      if (run.fromEngine) continue;   // counted above, with the engine's walls
       const source = drawnRuns.find(r => r.id === run.id);
       const tall = Math.max(1, computeFrameMakeup(Math.max(0, (source?.heightFt ?? 0) - reachFt), jackIn).frameTall);
       const n = run.legs.length;
@@ -2237,7 +2063,7 @@ export default function SetScaffoldV2Inner() {
       legs: legs + courtyardContribution.legs,
       bays: bays + courtyardContribution.bays,
       frames: totalFrames + manualFrameCount + courtyardContribution.frames,
-      brackets: manualBracketCount,
+      brackets: bracketCount + manualBracketCount,
       planks: plankCount + courtyardContribution.planks,
       braces: braceCount + courtyardContribution.braces,
       guardrails: railCount + courtyardContribution.guardrails,
@@ -2405,7 +2231,7 @@ export default function SetScaffoldV2Inner() {
       let best: string | null = null;
       let bestDist = hitRadius;
       for (const seg of segs) {
-        const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+        const sl = seg.legs;
         sl.forEach((leg, i) => {
           const k = `${seg.segIndex}-${i}`;
           if (dels.has(k)) return;
@@ -2556,7 +2382,7 @@ export default function SetScaffoldV2Inner() {
     const [si, li] = draggedLegKey.split("-").map(Number);
     const seg = allSegmentLegs.find(s => s.segIndex === si);
     if (!seg) return null;
-    const sl = seg.legs.filter(l => !l.isTurnaroundMirror);
+    const sl = seg.legs;
     const posOf = (idx: number) => {
       const leg = sl[idx];
       if (!leg) return null;
@@ -2662,7 +2488,7 @@ export default function SetScaffoldV2Inner() {
      * the one that is right - which is why the panel read 46 legs while the
      * load list read 34, missing every leg on the deviating level.
      */
-    const drawnLegCount = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0);
+    const drawnLegCount = tracedSegmentLegs.reduce((sum, seg) => sum + seg.legs.length, 0);
     /*
      * The legs on the traced perimeter.
      *
@@ -2683,9 +2509,17 @@ export default function SetScaffoldV2Inner() {
      * the load wrapped it in an empty catch, so Set Scaffold never received
      * the project and showed a blank job with no explanation for a week.
      */
+    /*
+     * Every bay the engine laid, by kind. A braced bay buys braces; a bastard
+     * bay and a planked gap buy rails in their place. All of them buy plank.
+     */
+    const engineBays = tracedSegmentLegs.flatMap(seg => [...(seg.lead ? [seg.lead] : []), ...seg.bays, ...(seg.tail ? [seg.tail] : [])]);
+    const bracedBays = engineBays.filter(b => b.kind === "braced").length;
+    const railedBays = engineBays.length - bracedBays;
     const bayCount = drawnLegCount > 0
-      ? allSegmentLegs.reduce((sum, seg) => sum + Math.max(0, seg.legs.length - 1), 0)
+      ? engineBays.length
       : hasOtherRuns ? 0 : (qe.bayCount ?? 0);
+    const bracedCount = drawnLegCount > 0 ? bracedBays : bayCount;
     const entries: { partNo: string; qty: number; note?: string }[] = [];
 
     // Frames, by the actual makeup of a leg rather than one tall stack.
@@ -2723,19 +2557,39 @@ export default function SetScaffoldV2Inner() {
     const bracesPerBayPerJump =
       (getBackendSettings()?.scaffold as Record<string, number | undefined> | undefined)
         ?.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
-    if (makeup.length > 0 && bayCount > 0) {
+    if (makeup.length > 0 && bracedCount > 0) {
       makeup.forEach((piece) => {
         const heightFt = piece.label.startsWith("6") ? 6.333 : piece.label.startsWith("5") ? 5 : 3;
         entries.push({
           partNo: braceForBay(bayLengthUsed, heightFt),
-          qty: bayCount * piece.qty * bracesPerBayPerJump,
+          qty: bracedCount * piece.qty * bracesPerBayPerJump,
           note: `${piece.label} jumps - ${configNote}`,
         });
       });
-    } else {
-      entries.push({ partNo: parts.brace, qty: qe.crossBraceCount, note: configNote });
+    } else if (bracedCount > 0 || drawnLegCount === 0) {
+      entries.push({ partNo: parts.brace, qty: drawnLegCount > 0 ? 0 : qe.crossBraceCount, note: configNote });
     }
-    entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount, note: configNote });
+    /*
+     * Guardrail from the bays the engine laid, the same way the tiles count it:
+     * a braced bay takes a top rail and one a jump below it; a bastard bay or a
+     * planked gap takes two a level in place of braces. The quantity engine's
+     * own figure, worked from linear feet, only stands when nothing is drawn -
+     * adding the railed bays on top of it was billing those bays twice.
+     */
+    if (drawnLegCount > 0) {
+      const jumpsHere = Math.max(1, qe.frameTall ?? 1);
+      const bracedRails = bracedBays * (MATERIAL_RULES.guardrailTopPerBay + Math.max(0, jumpsHere - 1) * MATERIAL_RULES.guardrailIntermediatePerBay);
+      if (bracedRails > 0) entries.push({ partNo: parts.guardrail, qty: bracedRails, note: configNote });
+      if (railedBays > 0) {
+        entries.push({
+          partNo: parts.guardrail,
+          qty: railedBays * 2 * jumpsHere,
+          note: `${railedBays} bastard bay${railedBays === 1 ? "" : "s"} and planked gap${railedBays === 1 ? "" : "s"} - rails in place of braces, two a level`,
+        });
+      }
+    } else {
+      entries.push({ partNo: parts.guardrail, qty: qe.guardrailCount, note: configNote });
+    }
     entries.push({ partNo: "BP1", qty: qe.basePlateCount });
     entries.push({ partNo: "AL1S", qty: qe.screwJackCount });
     entries.push({ partNo: "CPS", qty: qe.couplingPinCount ?? 0 });
@@ -2755,13 +2609,18 @@ export default function SetScaffoldV2Inner() {
         return sum + Math.max(1, mk.frameTall);
       }, 0) / Math.max(1, drawnRuns.length);
       const jumps = Math.max(1, Math.round(drawnJumps));
-      drawnBays = Math.max(0, drawnLegs - drawnRuns.length);
+      // Bays by kind where the engine laid the strokes; a lone stroke's bays are all braced.
+      const strokeBays = drawnRunLegs.flatMap(r => r.bays ?? new Array<BaySpan>(Math.max(0, r.legs.length - 1)).fill({ segIndex: -1, lengthFt: bayLengthFt, kind: "braced" }));
+      const strokeBraced = strokeBays.filter(b => b.kind === "braced").length;
+      const strokeRailed = strokeBays.length - strokeBraced;
+      drawnBays = strokeBays.length;
       entries.push({ partNo: parts.frame, qty: drawnLegs * jumps, note: "drawn runs" });
       entries.push({ partNo: "BP1", qty: drawnLegs, note: "drawn runs" });
       entries.push({ partNo: "AL1S", qty: drawnLegs, note: "drawn runs" });
       if (drawnBays > 0) {
         entries.push({ partNo: parts.plank, qty: drawnBays * planksPerBayForWidth(si.scaffoldWidth) * jumps, note: "drawn runs" });
-        entries.push({ partNo: braceForBay(bayLengthUsed, 6.333), qty: drawnBays * jumps * bracesPerBayPerJump, note: `drawn runs - ${configNote}` });
+        if (strokeBraced > 0) entries.push({ partNo: braceForBay(bayLengthUsed, 6.333), qty: strokeBraced * jumps * bracesPerBayPerJump, note: `drawn runs - ${configNote}` });
+        if (strokeRailed > 0) entries.push({ partNo: parts.guardrail, qty: strokeRailed * 2 * jumps, note: "drawn runs - bastard bays and planked gaps, rails in place of braces" });
       }
     }
 
@@ -2786,26 +2645,21 @@ export default function SetScaffoldV2Inner() {
     }
 
     /*
-     * Brackets for recesses the run steps past.
+     * Brackets in front of a followed inset.
      *
-     * One per leg along the opening, sized to reach the recessed wall while
-     * keeping the standoff off its face. A pocket two feet deep needs a deck
-     * two feet wider, and that deck has to be carried by something.
+     * The legs stay on the main line, back points in line with the rest, and
+     * a bracket hooked off each one reaches in to a foot off the inset wall.
+     * One per leg per jump, sized to the reach.
      */
-    const bracketed = recesses.filter(r => r.strategy === "bracket");
-    if (bracketed.length > 0 && drawnLegCount > 0) {
-      const perBracketLegs = Math.max(1, Math.round(legs / Math.max(1, allSegmentLegs.length)));
-      bracketed.forEach(r => {
-        const partNo = r.depthFt <= 1.05 ? "BR12S" : r.depthFt <= 1.7 ? "BR20S" : "BR30S";
-        const spanLegs = Math.max(2, Math.ceil(r.mouthFt / bayLengthUsed) + 1);
-        entries.push({
-          partNo,
-          qty: spanLegs * Math.max(1, qe.frameTall ?? 1),
-          note: `${r.depthFt.toFixed(1)}' recess, ${r.mouthFt.toFixed(0)}' wide`,
-        });
-        void perBracketLegs;
+    allSegmentLegs.filter(seg => seg.brackets && seg.legs.length > 0).forEach(seg => {
+      const reach = seg.bracketReachFt ?? 0;
+      const partNo = reach <= 1.05 ? "BR12S" : reach <= 1.7 ? "BR20S" : "BR30S";
+      entries.push({
+        partNo,
+        qty: seg.legs.length * Math.max(1, qe.frameTall ?? 1),
+        note: `${seg.legs.length} legs in front of a ${reach.toFixed(1)}' inset - one per leg per jump`,
       });
-    }
+    });
 
     // Anything dropped onto the section drawing is real material too.
     const drafted = el.sectionView?.draftingAdditions ?? [];
@@ -3100,7 +2954,7 @@ export default function SetScaffoldV2Inner() {
             <KorbanHeaderMeta label="Job No." value={sheetInfo.jobNumber || "-"} />
             <KorbanButton as="a" href="/takeoff-workspace-advanced" variant="ghost">← Takeoff</KorbanButton>
             <KorbanButton as="a" href="/project-plan-desk" variant="ghost">Project Plan Desk</KorbanButton>
-            <KorbanButton as="a" href="/korban-review" variant="primary">Review →</KorbanButton>
+            <KorbanButton as="a" href="/korban-review" variant="primary">Overview →</KorbanButton>
           </>
         }
       />
@@ -3394,12 +3248,21 @@ export default function SetScaffoldV2Inner() {
               flags.push({ tone: "warn", text: `${sectionSummary.label} needs ${sectionSummary.frameTall} frame${sectionSummary.frameTall === 1 ? "" : "s"} per leg - that cut is ${Math.floor(h)}'-${Math.round((h % 1) * 12)}". Takeoff built ${liveFrameTall}. Check the grip on that face.` });
             }
             if (recesses.length > 0) {
-              const by = (k: string) => recesses.filter(r => r.strategy === k).length;
+              const by = (k: string) => recesses.filter(r => r.treatment === k).length;
               const parts: string[] = [];
-              if (by("bracket")) parts.push(`${by("bracket")} bracketed`);
-              if (by("straddle")) parts.push(`${by("straddle")} decked across`);
-              if (by("double")) parts.push(`${by("double")} with its own run`);
-              flags.push({ tone: "note", text: `${recesses.length} recess${recesses.length === 1 ? "" : "es"} in this plan - ${parts.join(", ")}. Under 8" I run straight past.` });
+              if (by("follow")) parts.push(`${by("follow")} followed on the main line with brackets`);
+              if (by("double")) parts.push(`${by("double")} crossed, with a second run on the back wall`);
+              if (by("turnin")) parts.push(`${by("turnin")} crossed, with a set turned in`);
+              if (by("outline")) parts.push(`${by("outline")} deep enough to follow wall by wall`);
+              flags.push({ tone: "note", text: `${recesses.length} inset${recesses.length === 1 ? "" : "s"} in this plan - ${parts.join(", ")}. Under 8" I run straight past.` });
+            }
+            if (turnaroundBays) {
+              const mirrors = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.filter(l => l.isTurnaroundMirror).length, 0);
+              flags.push({ tone: "note", text: `Turnaround bays on - ${mirrors} corner frame${mirrors === 1 ? "" : "s"} added, every run re-set from its corner.` });
+            }
+            const skippedWalls = allSegmentLegs.filter(seg => seg.skipped && seg.kind === "outer").length;
+            if (skippedWalls > 0) {
+              flags.push({ tone: "note", text: `${skippedWalls} wall${skippedWalls === 1 ? "" : "s"} too short to stand a frame against - the runs either side carry past and plank back.` });
             }
             if (levelRunLegs.length > 0) {
               const legs = levelRunLegs.reduce((sum, r) => sum + r.legs.length, 0);
@@ -3611,7 +3474,17 @@ export default function SetScaffoldV2Inner() {
               { id: "overlay", label: "Overlay / Takeoff", icon: "⊞" },
               { id: "section", label: "Section View", icon: "✂" },
             ] as { id: typeof activeMainTab; label: string; icon: string }[])
-              .filter(tab => tab.id !== "section" || tier.sectionView)
+              /*
+               * No cut, no Section View tab.
+               *
+               * The panel behind it drew the scaffold regardless and printed
+               * "no wall outline traced yet - showing scaffold only", which
+               * reads as a section of a building nobody measured. A section
+               * is a cut through a traced wall; without one there is nothing
+               * to show, so the tab is not offered.
+               */
+              .filter(tab => tab.id !== "section" ||
+                (tier.sectionView && hasAnySectionTrace))
               .map(tab => {
               const active = activeMainTab === tab.id;
               return (
@@ -3639,6 +3512,12 @@ export default function SetScaffoldV2Inner() {
               <div className="flex items-center gap-1.5">
                 <button onClick={() => setShowOverlay(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showOverlay ? "border-blue-500/40 bg-blue-500/10 text-blue-300" : "border-zinc-800 text-zinc-600"}`}>Overlay</button>
                 <button onClick={() => setShowScaffold(c => !c)} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${showScaffold ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600"}`}>Scaffold</button>
+                <button onClick={toggleTurnaroundBays}
+                  disabled={!elevation}
+                  title="Every corner leg gets a frame one frame width in, and the run re-sets from it - the deck turns each corner on a braced bay. Off goes back to the primary layout."
+                  className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600 hover:border-orange-500/40"}`}>
+                  Turnaround bays
+                </button>
                 <button onClick={() => { setEditMode(m => !m); setMeasureMode(false); setAddRunMode(false); }} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "\u2713 Editing" : "Edit Bay"}</button>
                 <button onClick={() => { setAddRunMode(m => !m); setEditMode(false); setMeasureMode(false); setRunStart(null); setRunEnd(null); }}
                   title="Draw a run anywhere on the plan"
@@ -3789,12 +3668,12 @@ export default function SetScaffoldV2Inner() {
               * well, a stair core, a wall worked from within. One switch for
               * the whole job could not say that, so every wall says it itself.
               */}
-            {allSegmentLegs.length > 0 && (
+            {tracedSegmentLegs.length > 0 && (
               <div className="absolute bottom-2 right-2 z-40 max-h-[45%] w-[176px] overflow-y-auto rounded-lg border border-zinc-800 bg-black/90 p-2">
                 <p className="mb-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-zinc-600">
                   Scaffold sits
                 </p>
-                {allSegmentLegs.filter(seg => seg.legs.length > 0).map(seg => {
+                {tracedSegmentLegs.filter(seg => seg.legs.length > 0).map(seg => {
                   const interior = interiorWalls.includes(seg.segIndex);
                   const lengthFt = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) / Math.max(effPuf, 0.0001);
                   return (
@@ -3890,7 +3769,7 @@ export default function SetScaffoldV2Inner() {
                   {rawOverlayRows.map((r: any, i: number) => (
                     <path key={i}
                       d={`M${r.points[0]?.x} ${r.points[0]?.y} ${r.points.slice(1).map((p: any) => `L${p.x} ${p.y}`).join(" ")}${r.closed ? " Z" : ""}`}
-                      fill="transparent" stroke={r.isKeyFloor ? "#2563eb" : r.color}
+                      fill="transparent" stroke={LAYOUT_INK}
                       strokeWidth={r.isKeyFloor ? "1" : "0.7"}
                       /* The line above, dashed - a roof plan's perimeter
                          carries the overhang, not the wall at grade. */
@@ -3917,7 +3796,7 @@ export default function SetScaffoldV2Inner() {
                         textAnchor="middle" dominantBaseline="middle" opacity="0.9"
                         fill={run.wall.color}
                         style={{
-                          fontSize: Math.max(scaffoldWidthFt * effPuf * 0.5, 6.25),
+                          fontSize: legLabelSize(scaffoldWidthFt * effPuf),
                           fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
                         }}>{liveFrameTall}</text>
                     </g>
@@ -3957,25 +3836,28 @@ export default function SetScaffoldV2Inner() {
                       return (
                         <>
                           <line x1={run.a.x} y1={run.a.y} x2={run.b.x} y2={run.b.y}
-                            stroke={stroke ? "#a1a1aa" : "#f97316"} strokeWidth={stroke ? 2 : 1.2}
+                            stroke={LAYOUT_INK} strokeWidth={stroke ? 2 : 1.2}
                             strokeDasharray={stroke ? undefined : "4,3"} opacity={stroke ? 0.9 : 0.55} />
                           {stroke && (
                             <g transform={`rotate(${flip ? angle + 180 : angle} ${at.x} ${at.y})`}>
+                              {/* Small. It is a note on a drawing, not a
+                                  heading - it was set larger than the
+                                  building's own dimensions. */}
                               <text x={at.x} y={at.y}
-                                textAnchor="middle" fontSize={effPuf * 1.6} fill="#a1a1aa"
+                                textAnchor="middle" fontSize={effPuf * 0.62} fill="#a1a1aa"
                                 fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                letterSpacing={effPuf * 0.06}
-                                stroke="#000" strokeWidth={effPuf * 0.35} paintOrder="stroke">
+                                letterSpacing={effPuf * 0.03}
+                                stroke="#000" strokeWidth={effPuf * 0.16} paintOrder="stroke">
                                 {stroke.label.toUpperCase()} &middot; {Math.round(stroke.lf)}&apos;
                               </text>
                               {/* Whatever the estimator called it, on its own line
                                   under the name rather than run on after it. */}
                               {stroke.note && (
-                                <text x={at.x} y={at.y + effPuf * 1.8}
-                                  textAnchor="middle" fontSize={effPuf * 1.25} fill="#71717a"
+                                <text x={at.x} y={at.y + effPuf * 0.78}
+                                  textAnchor="middle" fontSize={effPuf * 0.55} fill="#71717a"
                                   fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                  letterSpacing={effPuf * 0.05}
-                                  stroke="#000" strokeWidth={effPuf * 0.3} paintOrder="stroke">
+                                  letterSpacing={effPuf * 0.03}
+                                  stroke="#000" strokeWidth={effPuf * 0.14} paintOrder="stroke">
                                   {stroke.note.toUpperCase()}
                                 </text>
                               )}
@@ -3985,11 +3867,11 @@ export default function SetScaffoldV2Inner() {
                       );
                     })()}
                     {/*
-                      * Cross braces between the legs, the same as a traced run.
-                      * A line of ticks with nothing between them does not read
-                      * as scaffold.
+                      * A lone stroke's legs and braces. A stroke the engine
+                      * chained is drawn with the engine's walls above - ticks,
+                      * bays by kind, tails and all - so nothing is drawn twice.
                       */}
-                    {computed?.legs.slice(0, -1).map((leg, i) => {
+                    {!computed?.fromEngine && computed?.legs.slice(0, -1).map((leg, i) => {
                       const next = computed.legs[i + 1];
                       if (!next) return null;
                       const rdx = run.b.x - run.a.x, rdy = run.b.y - run.a.y;
@@ -4006,10 +3888,10 @@ export default function SetScaffoldV2Inner() {
                         <line key={`dbrace-${i}`}
                           x1={cx - al.x * hb + nrm.x * nlen * 0.15} y1={cy - al.y * hb + nrm.y * nlen * 0.15}
                           x2={cx + al.x * hb + nrm.x * nlen * 0.9} y2={cy + al.y * hb + nrm.y * nlen * 0.9}
-                          stroke="#f97316" strokeWidth="0.7" opacity="0.5" />
+                          stroke={LAYOUT_INK} strokeWidth="0.7" opacity="0.5" />
                       );
                     })}
-                    {computed?.legs.map((leg, i) => {
+                    {!computed?.fromEngine && computed?.legs.map((leg, i) => {
                       // A drawn run carries its own height, so its frame count
                       // is its own - not the elevation's.
                       const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
@@ -4018,19 +3900,19 @@ export default function SetScaffoldV2Inner() {
                       return (
                         <g key={i}>
                           <line x1={leg.wallPoint.x} y1={leg.wallPoint.y} x2={leg.tickTip.x} y2={leg.tickTip.y}
-                            stroke="#f97316" strokeWidth={2} strokeLinecap="round" />
+                            stroke={LAYOUT_INK} strokeWidth={1.8} strokeLinecap="square" />
                           <text x={leg.labelPoint.x} y={leg.labelPoint.y}
                             textAnchor="middle" dominantBaseline="middle" opacity="0.9"
-                            fill="#f97316"
+                            fill={LAYOUT_INK}
                             style={{
-                              fontSize: Math.max(scaffoldWidthFt * effPuf * 0.5, 6.25),
+                              fontSize: legLabelSize(scaffoldWidthFt * effPuf),
                               fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
                             }}>{tall}</text>
                         </g>
                       );
                     })}
                     <text x={(run.a.x+run.b.x)/2} y={(run.a.y+run.b.y)/2-4} textAnchor="middle"
-                      fontSize="4.5" fill="#f97316" fontFamily="monospace"
+                      fontSize="4.5" fill={LAYOUT_INK} fontFamily="monospace"
                       stroke="#000" strokeWidth="1.4" paintOrder="stroke">
                       {Math.round(computed?.lengthFt ?? 0)}&apos; x {run.heightFt}&apos;
                     </text>
@@ -4080,14 +3962,15 @@ export default function SetScaffoldV2Inner() {
                 * Re-deriving it here by index was how legs ended up drawn
                 * against the wrong wall whenever a jog had been absorbed.
                 */}
-              {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs, a: segStart, b: segEnd, normal }) => {
+              {showScaffold && scaleOk && allSegmentLegs.map(({ segIndex, legs, bays: segBays, lead, tail, brackets, bracketReachFt, a: segStart, b: segEnd, normal }) => {
                 if (!segStart || !segEnd) return null;
                 const dx = segEnd.x - segStart.x, dy = segEnd.y - segStart.y, len = Math.sqrt(dx * dx + dy * dy);
                 const wg = 1 * effPuf, tl = scaffoldWidthFt * effPuf;
-                const sl = legs.filter(l => !l.isTurnaroundMirror);
+                const sl = legs;
+                const al = len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
 
                 return (
-                  <g key={`seg-${segIndex}`} fill="#f8fafc" stroke="#f8fafc" strokeLinecap="square" opacity="0.9">
+                  <g key={`seg-${segIndex}`} fill={LAYOUT_INK} stroke={LAYOUT_INK} strokeLinecap="square" opacity="0.9">
                     {/* Cross braces — skipped if either connected leg has
                         broken free from the parallel track (see
                         isLegBrokenFree above) */}
@@ -4096,10 +3979,25 @@ export default function SetScaffoldV2Inner() {
                       if (isLegBrokenFree(segIndex, i) || isLegBrokenFree(segIndex, i + 1)) return null;
                       const o1 = legOffsets[`${segIndex}-${i}`] ?? { dx: 0, dy: 0 };
                       const o2 = legOffsets[`${segIndex}-${i + 1}`] ?? { dx: 0, dy: 0 };
+                      /*
+                       * A bastard bay. No cross brace is made to fit an odd
+                       * length, so none is drawn - it is marked back point to
+                       * back point with a dashed line instead, which is how
+                       * the foreman is told this one bay is built differently
+                       * before he gets there and finds out.
+                       */
+                      if (segBays?.[i]?.kind === "bastard") {
+                        return (
+                          <line key={`bastard-${i}`}
+                            x1={leg.tickTip.x + o1.dx} y1={leg.tickTip.y + o1.dy}
+                            x2={next.tickTip.x + o2.dx} y2={next.tickTip.y + o2.dy}
+                            strokeWidth="0.8" strokeDasharray="4,3" opacity="0.75" />
+                        );
+                      }
                       const cx = (leg.wallPoint.x + o1.dx + next.wallPoint.x + o2.dx) / 2;
                       const cy = (leg.wallPoint.y + o1.dy + next.wallPoint.y + o2.dy) / 2;
                       const bp = Math.sqrt((next.wallPoint.x - leg.wallPoint.x) ** 2 + (next.wallPoint.y - leg.wallPoint.y) ** 2);
-                      const hb = bp * 0.3, al = len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
+                      const hb = bp * 0.3;
                       return (
                         <line key={`brace-${i}`}
                           x1={cx - al.x * hb + normal.x * wg * 0.5} y1={cy - al.y * hb + normal.y * wg * 0.5}
@@ -4107,7 +4005,7 @@ export default function SetScaffoldV2Inner() {
                           strokeWidth="0.7" opacity="0.5" />
                       );
                     })}
-                    {/* Tick lines — legs are already filtered by computeLegs (with the corner exemption above); no need to re-filter here */}
+                    {/* Tick lines - one per leg the engine listed, turnaround frames included */}
                     {sl.map((leg, i) => {
                       const k = `${segIndex}-${i}`;
                       if (deletedLegKeys.has(k)) return null;
@@ -4125,19 +4023,88 @@ export default function SetScaffoldV2Inner() {
                             stroke={sel ? "#f97316" : "rgba(249,115,22,0.25)"}
                             strokeWidth={sel ? "1.5" : "0.7"} strokeDasharray={sel ? "none" : "3,2"} />}
                           <line x1={wp.x} y1={wp.y} x2={tp.x} y2={tp.y}
-                            strokeWidth={sel ? "2.5" : "1.8"} stroke={sel ? "#f97316" : "#f8fafc"} />
+                            strokeWidth={sel ? "2.5" : "1.8"} stroke={sel ? "#f97316" : LAYOUT_INK} />
                           <text x={lp.x} y={lp.y}
                             opacity="0.9" textAnchor="middle" dominantBaseline="middle"
-                            fill={sel ? "#f97316" : "#f8fafc"}
+                            fill={sel ? "#f97316" : LAYOUT_INK}
                             style={{
                               cursor: editMode ? "pointer" : "default",
-                              fontSize: Math.max(tl * 0.5, 6.25),
+                              fontSize: legLabelSize(tl),
                               fontFamily: "'Didact Gothic', var(--font-fira-code), ui-monospace, sans-serif",
                               fontWeight: 400,
                             }}>{ft}</text>
                         </g>
                       );
                     })}
+                    {/*
+                      * The bay out of a corner leg the arriving run landed on.
+                      * That leg is drawn with the arriving run; this run owns
+                      * the bay, so it is braced or dashed from here.
+                      */}
+                    {lead && sl[0] && (() => {
+                      const first = sl[0];
+                      const d = lead.lengthFt * effPuf;
+                      const c0 = { x: first.wallPoint.x - al.x * d, y: first.wallPoint.y - al.y * d };
+                      const c1 = { x: first.tickTip.x - al.x * d, y: first.tickTip.y - al.y * d };
+                      if (lead.kind === "bastard") {
+                        return <line x1={c1.x} y1={c1.y} x2={first.tickTip.x} y2={first.tickTip.y}
+                          strokeWidth="0.8" strokeDasharray="4,3" opacity="0.75" />;
+                      }
+                      const cx = (c0.x + first.wallPoint.x) / 2, cy = (c0.y + first.wallPoint.y) / 2, hb = d * 0.3;
+                      return <line x1={cx - al.x * hb + normal.x * wg * 0.5} y1={cy - al.y * hb + normal.y * wg * 0.5}
+                        x2={cx + al.x * hb + normal.x * (wg + tl) * 0.9} y2={cy + al.y * hb + normal.y * (wg + tl) * 0.9}
+                        strokeWidth="0.7" opacity="0.5" />;
+                    })()}
+                    {/*
+                      * Brackets in front of a followed inset. The legs stay on
+                      * the main line; each bracket hooks off its leg and
+                      * reaches in to a foot off the inset wall.
+                      */}
+                    {brackets && bracketReachFt ? sl.map((leg, i) => {
+                      const k = `${segIndex}-${i}`;
+                      if (deletedLegKeys.has(k)) return null;
+                      const off = legOffsets[k] ?? { dx: 0, dy: 0 };
+                      const wp = { x: leg.wallPoint.x + off.dx, y: leg.wallPoint.y + off.dy };
+                      const reach = bracketReachFt * effPuf;
+                      const hook = { x: wp.x - normal.x * reach, y: wp.y - normal.y * reach };
+                      const lip = { x: hook.x + al.x * effPuf * 0.8, y: hook.y + al.y * effPuf * 0.8 };
+                      return (
+                        <g key={`bracket-${k}`} opacity="0.9">
+                          <line x1={wp.x} y1={wp.y} x2={hook.x} y2={hook.y} strokeWidth="1.4" />
+                          <line x1={hook.x} y1={hook.y} x2={lip.x} y2={lip.y} strokeWidth="1.4" />
+                        </g>
+                      );
+                    }) : null}
+                    {/*
+                      * The tail of the run, exactly as the engine hands it
+                      * back and never diagonal: a planked gap straight on to
+                      * the next run's deck, the strip across to a deck lying
+                      * alongside, or the bay into a followed inset's first
+                      * leg. A planked gap has no tick on it, because there is
+                      * no leg there - that is the whole point of it.
+                      */}
+                    {tail && (() => {
+                      const { a0, a1, b0, b1 } = tail;
+                      if (![a0, a1, b0, b1].every(isFinitePoint)) return null;
+                      if (tail.isBay) {
+                        if (tail.kind === "bastard") {
+                          return <line x1={a1.x} y1={a1.y} x2={b1.x} y2={b1.y}
+                            strokeWidth="0.8" strokeDasharray="4,3" opacity="0.75" />;
+                        }
+                        return (
+                          <g opacity="0.5">
+                            <line x1={a0.x} y1={a0.y} x2={b1.x} y2={b1.y} strokeWidth="0.7" />
+                            <line x1={a1.x} y1={a1.y} x2={b0.x} y2={b0.y} strokeWidth="0.7" />
+                          </g>
+                        );
+                      }
+                      return (
+                        <g opacity="0.45">
+                          <line x1={a0.x} y1={a0.y} x2={b0.x} y2={b0.y} strokeWidth="0.7" />
+                          <line x1={a1.x} y1={a1.y} x2={b1.x} y2={b1.y} strokeWidth="0.7" />
+                        </g>
+                      );
+                    })()}
                   </g>
                 );
               })}
@@ -4168,7 +4135,7 @@ export default function SetScaffoldV2Inner() {
             {editMode && selectedLegKey && (() => {
               const [si, li] = selectedLegKey.split("-").map(Number);
               const seg = allSegmentLegs.find(s => s.segIndex === si);
-              const legs = seg?.legs.filter(l => !l.isTurnaroundMirror) ?? [];
+              const legs = seg?.legs ?? [];
               const leg = legs[li]; if (!leg) return null;
               const svg = svgRef.current; if (!svg) return null;
               const off = legOffsets[selectedLegKey] ?? { dx: 0, dy: 0 };
@@ -4227,7 +4194,7 @@ export default function SetScaffoldV2Inner() {
         )}
 
         {/* ── Tab: Section View & Frame Configuration ──────────────────── */}
-        {activeMainTab === "section" && (
+        {activeMainTab === "section" && hasAnySectionTrace && (
         <section className="flex w-full overflow-hidden">
           {/*
             * The section gets the whole width. Frame Configuration Options had a
