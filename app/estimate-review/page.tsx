@@ -12,6 +12,7 @@ import {
   getActiveProject,
   readTier,
   saveActiveElevation,
+  updateActiveProject,
 } from "@/lib/projectStore";
 import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
@@ -88,6 +89,8 @@ const EMPTY_ESTIMATE = {
   contactPhone: "",
   estimator: "",
   bidDate: "",
+  /** yyyy-mm-dd, the day the proposal went out. Empty until it does. */
+  issuedDate: "",
   proposalNumber: "",
   projectType: "",
   unionStatus: "",
@@ -105,6 +108,25 @@ const EMPTY_ESTIMATE = {
 };
 
 type EstimateData = typeof EMPTY_ESTIMATE;
+
+/** Today as yyyy-mm-dd in the estimator's own time zone, not UTC's. */
+function todayIso(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/**
+ * "November 4, 2026" from yyyy-mm-dd. Written out, because that is how a
+ * proposal is dated; parsed by hand, because `new Date("2026-11-04")` reads
+ * as midnight UTC and prints the day before in California.
+ */
+function formatIssued(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
 
 const estimateMenuLinks: KorbanMenuLink[] = [
   { href: "/", label: "Bid Room" },
@@ -227,7 +249,9 @@ function KorbanMotionStyles() {
        * happens to run out.
        */
       @media print {
-        @page { size: letter portrait; margin: 0.4in; }
+        /* Tighter at the head - the masthead is ruled now, so it does not
+           need a band of paper above it to sit against. */
+        @page { size: letter portrait; margin: 0.3in 0.4in 0.4in; }
 
         body { background: #fff !important; }
 
@@ -438,6 +462,7 @@ export default function EstimateReviewPage() {
         contactPhone: project.contactPhone,
         estimator: project.estimator ?? "",
         bidDate: project.bidDueDate,
+        issuedDate: project.proposalIssuedDate ?? "",
         proposalNumber: project.proposalNumber,
         projectType: backendSettings.scaffold.scaffoldType ?? "",
         unionStatus: project.unionStatus || backendSettings.company.unionDefault,
@@ -626,6 +651,16 @@ export default function EstimateReviewPage() {
   }, [bidLevel, isHydrated]);
 
   const estimate = storedEstimate ?? EMPTY_ESTIMATE;
+
+  /**
+   * The issue date. Stamped the first time the proposal goes out - printed,
+   * shared or sent - and editable after that. It lives on the project, next
+   * to the proposal number, so every round and the deck read the same one.
+   */
+  const setIssuedDate = (iso: string) => {
+    setStoredEstimate((prev) => (prev ? { ...prev, issuedDate: iso } : prev));
+    updateActiveProject({ proposalIssuedDate: iso });
+  };
 
   /**
    * Every alternate is priced from the takeoff, selected or not, so the tiles
@@ -1140,6 +1175,7 @@ export default function EstimateReviewPage() {
       ) : (
         <ProposalTab
           estimate={estimate}
+          setIssuedDate={setIssuedDate}
           bidLevel={bidLevel}
           erectDays={totals.productionDays}
           dismantleDays={Math.max(1, Math.ceil(totals.productionDays * (dismantlePercent / 100)))}
@@ -2318,8 +2354,10 @@ function ProposalTab({
   miscRevenue, setMiscRevenue, alternateRevenue, finalBid,
   approvedAlternates, toggleAlternate, alternatePricing, alternateSettings,
   updateAlternateSettings, proposalNotes, setProposalNotes, finishes, toggleFinish, proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
+  setIssuedDate,
 }: {
   estimate: EstimateData;
+  setIssuedDate: (iso: string) => void;
   bidLevel: BidLevel;
   erectDays: number;
   dismantleDays: number;
@@ -2365,6 +2403,21 @@ function ProposalTab({
   const [linkCopied, setLinkCopied] = useState(false);
   /** Set once the bid has been printed, saved or shared. */
   const [sentPrompt, setSentPrompt] = useState<string | null>(null);
+  /** Print was asked for before the issue date was on the sheet; fires once it is. */
+  const [printPending, setPrintPending] = useState(false);
+
+  /** Dates the proposal if it has not been dated yet. Returns true if it just did. */
+  const stampIssued = (): boolean => {
+    if (estimate.issuedDate) return false;
+    setIssuedDate(todayIso());
+    return true;
+  };
+  useEffect(() => {
+    if (!printPending || !estimate.issuedDate) return;
+    setPrintPending(false);
+    window.print();
+    setSentPrompt("");
+  }, [printPending, estimate.issuedDate]);
   const focusHandler = (field: string) => (active: boolean) =>
     setActiveField((current) => (active ? field : current === field ? null : current));
 
@@ -2376,7 +2429,8 @@ function ProposalTab({
     customer: estimate.customer,
     estimator: backend?.estimator.estimatorName || estimate.estimator,
     proposalNumber: estimate.proposalNumber,
-    bidDate: estimate.bidDate,
+    // The deck is dated the day the proposal went out. Until it has, the due date stands in.
+    bidDate: estimate.issuedDate ? formatIssued(estimate.issuedDate) : estimate.bidDate,
     depth: bidLevel,
     company: company.name,
     companyPhone: backend?.estimator.estimatorPhone || company.phone,
@@ -2437,7 +2491,9 @@ function ProposalTab({
               <InfoRow label="Estimator" value={estimate.estimator} />
               <InfoRow label="Phone" value={estimate.contactPhone} />
               <InfoRow label="Union status" value={estimate.unionStatus} />
-              <InfoRow label="Bid date" value={estimate.bidDate} />
+              <InfoRow label="Bid due" value={estimate.bidDate} />
+              <DateRow label="Issued" value={estimate.issuedDate} onChange={setIssuedDate}
+                placeholder="Stamped on first print" />
               <InfoRow label="Coverage" value={`${estimate.totalLinearFeet.toLocaleString()} LF`} />
               <InfoRow label="Rental" value={`${rentalDays} days · ${rentalMonths} mo.`} />
             </div>
@@ -2594,6 +2650,8 @@ function ProposalTab({
               </span>
               <button
                 onClick={() => {
+                  // The date goes on the sheet before the sheet goes to paper.
+                  if (stampIssued()) { setPrintPending(true); return; }
                   window.print();
                   setSentPrompt("");
                 }}
@@ -2612,6 +2670,7 @@ function ProposalTab({
                 onClick={async () => {
                   // The whole bid rides in the link, so there is nothing to
                   // upload and nothing for the client to log into.
+                  stampIssued();
                   const url = buildPresentationUrl(presentationData);
                   try {
                     await navigator.clipboard.writeText(url);
@@ -2633,6 +2692,7 @@ function ProposalTab({
               </button>
               <button
                 onClick={() => {
+                  stampIssued();
                   setProposalStatus("Ready To Send");
                   setSentPrompt("");
                 }}
@@ -3068,7 +3128,7 @@ function SheetPage({
           {proposalNumber}
         </span>
       )}
-      <div className="px-9 py-7" style={{ color: INK }}>
+      <div className="px-9 pb-7 pt-5" style={{ color: INK }}>
         {children}
         <div className="mt-7 flex items-center justify-between border-t pt-2" style={{ borderColor: "#d8d4cb" }}>
           <span className="font-mono text-[7.5px] uppercase tracking-[0.2em] text-[#a5a099]">
@@ -3171,29 +3231,38 @@ function ProposalSheet({
       <div className="grid gap-2.5">
         {/* -- Page 1 --------------------------------------------------- */}
         <SheetPage number={1} total={totalPages} proposalNumber={estimate.proposalNumber} showCorner={false}>
-          {/* Masthead — the one inverted band on the page */}
+          {/*
+            * Masthead - ruled, not filled.
+            *
+            * It was a solid black band bled to the paper edge, which on a
+            * printed sheet reads as a redaction and drinks a cartridge. A
+            * heavy rule around it says the same thing in the register the
+            * rest of the document is drawn in, and the type goes back to ink
+            * on paper where it is legible.
+            */}
           <div
-            className="-mx-9 -mt-7 mb-6 flex items-end justify-between px-9 py-4"
-            style={{ background: "#0e0d0b" }}
+            className="mb-5 flex items-end justify-between px-5 py-3"
+            style={{ border: `3px solid ${INK}` }}
           >
             <div className="flex items-end gap-2">
               <span
-                className="text-[26px] font-semibold uppercase leading-none tracking-[0.16em] text-white"
-                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui" }}
+                className="text-[26px] font-semibold uppercase leading-none tracking-[0.16em]"
+                style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui", color: INK }}
               >
                 {companyName}
               </span>
               <span className="mb-[3px] h-1.5 w-1.5 rounded-full bg-orange-500" />
-              <span className="mb-[2px] font-mono text-[8px] uppercase tracking-[0.24em] text-zinc-500">
+              <span className="mb-[2px] font-mono text-[8px] uppercase tracking-[0.24em] text-[#8a857d]">
                 Scaffold proposal
               </span>
             </div>
             <div className="text-right">
-              <p className="font-mono text-[12px] font-bold text-orange-400">
-              {estimate.proposalNumber || "\u2014"}
-            </p>
-              <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-zinc-500">
-                {estimate.bidDate || "\u2014"}
+              <p className="font-mono text-[12px] font-bold text-orange-600">
+                {estimate.proposalNumber || "\u2014"}
+              </p>
+              {/* The day it went out. Until it has, the sheet says so. */}
+              <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-[#8a857d]">
+                {estimate.issuedDate ? `Issued ${formatIssued(estimate.issuedDate)}` : "Draft \u2014 not yet issued"}
               </p>
             </div>
           </div>
@@ -3210,7 +3279,7 @@ function ProposalSheet({
               </p>
               <p className="mt-1 text-[9.5px] text-[#4a4741]">{estimate.projectAddress}</p>
               <p className="mt-0.5 font-mono text-[8.5px] uppercase tracking-[0.14em] text-[#8a857d]">
-                Scaffold scope
+                Scaffold scope{estimate.bidDate ? ` \u00b7 Bid due ${estimate.bidDate}` : ""}
               </p>
             </LiveBlock>
 
@@ -3507,6 +3576,31 @@ function ProposalSheet({
 // ----------------------------------------------------------------------
 // Small pieces
 // ----------------------------------------------------------------------
+
+/**
+ * A date the estimator can change in place. Blank until it is set, and it
+ * says what will set it - the proposal's issue date is stamped on first
+ * print and corrected here if the meeting moves.
+ */
+function DateRow({ label, value, onChange, placeholder }: {
+  label: string; value: string; onChange: (iso: string) => void; placeholder: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-zinc-900/70 py-1">
+      <span className="text-[10px] text-zinc-600">{label}</span>
+      <span className="flex items-center gap-2 text-right">
+        {!value && <span className="text-[10px] text-zinc-700">{placeholder}</span>}
+        <input
+          type="date"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          title={value ? formatIssued(value) : placeholder}
+          className="rounded border border-zinc-800 bg-transparent px-1.5 py-0.5 text-[11px] font-semibold text-zinc-300 [color-scheme:dark] focus:border-orange-500/60 focus:outline-none"
+        />
+      </span>
+    </div>
+  );
+}
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  computeFrameMakeup, layoutSection,
+  computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, DEFAULT_WORKER_REACH_FT, layoutSection,
   type FrameMakeupPiece, type SectionDraftingItem, type SectionViewRecord,
 } from "@/lib/projectStore";
 
@@ -96,8 +96,8 @@ export default function SectionDrawing({
   section,
   scaffoldWidthFt,
   planksPerDeck,
-  workerReachFt = 6,
-  screwJackMaxIn = 18,
+  workerReachFt = DEFAULT_WORKER_REACH_FT,
+  screwJackMaxIn = DEFAULT_SCREW_JACK_MAX_IN,
   onSave,
   onSideChange,
   onSummary,
@@ -285,8 +285,10 @@ export default function SectionDrawing({
       planksPerDeck,
       side: section?.scaffoldSide ?? "left",
       jumpHeightsFt,
+      workerReachFt,
+      screwJackMaxIn,
     });
-  }, [ready, profile, puf, frameTall, jumpHeightsFt, scaffoldWidthFt, planksPerDeck, section?.scaffoldSide]);
+  }, [ready, profile, puf, frameTall, jumpHeightsFt, scaffoldWidthFt, planksPerDeck, section?.scaffoldSide, workerReachFt, screwJackMaxIn]);
 
   useEffect(() => {
     /*

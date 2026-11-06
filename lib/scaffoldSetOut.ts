@@ -34,7 +34,7 @@ export type BayKind = "braced" | "bastard" | "rail";
 export type BaySpan = { segIndex: number; lengthFt: number; kind: BayKind };
 
 /** Where a run sits. The outer run follows the face; the others are features on it. */
-export type RunKind = "outer" | "inner" | "spur";
+export type RunKind = "outer" | "inner" | "spur" | "curve";
 
 export type SegmentLegs = {
   segIndex: number;
@@ -67,6 +67,8 @@ export type SegmentLegs = {
   tail?: { a0: PlanPoint; a1: PlanPoint; b0: PlanPoint; b1: PlanPoint; isBay: boolean; beside: boolean; lengthFt: number; kind: BayKind };
   /** On a followed inset's legs: how far the bracket reaches in from the leg, ft - to a foot off the inset wall. */
   bracketReachFt?: number;
+  /** On a curve run: what the curve is and how it was built - for the page to say so and offer the bay size. */
+  curve?: { radiusFt: number; sweepDeg: number; side: CurveSide; bayFt: number; closed: boolean; wedges: number; leftoverFt: number };
   /** Why the engine did what it did here, in the estimator's words. */
   note?: string;
 };
@@ -104,6 +106,20 @@ export type SetOutOptions = {
    * between them. Default false.
    */
   open?: boolean;
+  /**
+   * Bays on a curve: square bays, each with its own two frames, the wedge
+   * between them planked. 5' whatever the radius unless the estimator says
+   * otherwise. Default 5.
+   */
+  curveBayFt?: number;
+  /** The least gap between neighbouring frames on a curve, at their nearest point. Default 1'. */
+  curveClearanceFt?: number;
+  /**
+   * A tank - an outline that is one closed curve - can be scaffolded outside,
+   * inside or both. Default outside. Ignored for a building with a curved wall,
+   * where the scaffold side is the outline's.
+   */
+  curveSides?: CurveSide | "both";
 };
 
 // ── Small geometry ────────────────────────────────────────────────────────────
@@ -167,11 +183,12 @@ function closest(a1: PlanPoint, a2: PlanPoint, b1: PlanPoint, b2: PlanPoint): { 
 // ── The outline, read ─────────────────────────────────────────────────────────
 
 /** Collapses jogs the scaffold would not follow. Under eight inches it is inside the standoff anyway. */
-function simplifyOutline(outline: PlanPoint[], tolerance: number, open = false): PlanPoint[] {
+function simplifyOutline(outline: PlanPoint[], tolerance: number, open = false, keep?: Set<string>): PlanPoint[] {
   if (outline.length < 3) return outline;
   const kept: PlanPoint[] = [];
   for (let i = 0; i < outline.length; i++) {
     if (open && (i === 0 || i === outline.length - 1)) { kept.push(outline[i]); continue; }
+    if (keep?.has(`${outline[i].x},${outline[i].y}`)) { kept.push(outline[i]); continue; }
     const prev = kept.length ? kept[kept.length - 1] : outline[(i - 1 + outline.length) % outline.length];
     const v = outline[i], next = outline[(i + 1) % outline.length];
     const dx = next.x - prev.x, dy = next.y - prev.y, len = Math.hypot(dx, dy);
@@ -183,12 +200,13 @@ function simplifyOutline(outline: PlanPoint[], tolerance: number, open = false):
 }
 
 /** Drops vertices that sit on the straight line between their neighbours. */
-function dropCollinear(pts: PlanPoint[], open = false): PlanPoint[] {
+function dropCollinear(pts: PlanPoint[], open = false, keep?: Set<string>): PlanPoint[] {
   if (pts.length < 4) return pts;
   const out: PlanPoint[] = [];
   const n = pts.length;
   for (let i = 0; i < n; i++) {
     if (open && (i === 0 || i === n - 1)) { out.push(pts[i]); continue; }
+    if (keep?.has(`${pts[i].x},${pts[i].y}`)) { out.push(pts[i]); continue; }
     const p = pts[(i - 1 + n) % n], v = pts[i], q = pts[(i + 1) % n];
     const ux = v.x - p.x, uy = v.y - p.y, vx = q.x - v.x, vy = q.y - v.y;
     const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
@@ -287,6 +305,8 @@ function findInsets(pts: PlanPoint[], puf: number, jogFt: number, deepFt: number
 // ── The walls of a run line ───────────────────────────────────────────────────
 
 type Junction =
+  | "curve"        // into or out of a curved wall: the straight run just meets it, a foot clear
+
   | "wrap"        // the next run starts at an outside corner and wraps it with its float
   | "inside"      // an inside corner: the next run owns the corner leg
   | "continuous"  // through a followed inset: one run, the legs step in and out
@@ -299,7 +319,9 @@ type Wall = {
   along: PlanPoint; normal: PlanPoint;
   startOutside: boolean; endOutside: boolean;
   skipped: boolean;
-  role: "main" | "followSide" | "followBack" | "innerBack" | "innerSide";
+  role: "main" | "followSide" | "followBack" | "innerBack" | "innerSide" | "curve";
+  /** A curved wall: its arc and the bays laid round it. */
+  curve?: { arc: CurveArc; side: CurveSide; layout?: CurveLayout };
   /** Filled in once the walls are read as a loop. */
   toNext?: Junction;
   fromPrev?: Junction;
@@ -453,7 +475,33 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
     return interiorSegs.some(([s, e]) => frameGap(m, m, s, e) <= JOG * puf + 1e-6);
   };
   if (signedArea(ordered) > 0) ordered.reverse();
-  const base = dropCollinear(simplifyOutline(ordered, JOG * puf, OPEN), OPEN);
+  ordered = ordered.filter((p, i) => i === 0 || Math.hypot(p.x - ordered[i - 1].x, p.y - ordered[i - 1].y) > 1e-6);
+  if (!OPEN && ordered.length > 1 && Math.hypot(ordered[0].x - ordered[ordered.length - 1].x, ordered[0].y - ordered[ordered.length - 1].y) <= 1e-6) ordered.pop();
+
+  // Curves, read off the raw outline before any jog is absorbed - a traced
+  // curve is nothing but small jogs. Each curved stretch becomes one wall,
+  // start to end, that lays its own square bays.
+  const CURVE_BAY = opts.curveBayFt ?? 5, CLEAR = opts.curveClearanceFt ?? 1;
+  const curves = detectCurves(ordered, { open: OPEN });
+  const keyOf = (p: PlanPoint) => `${p.x},${p.y}`;
+  const curveByStart = new Map<string, DetectedCurve>();
+  if (curves.length === 1 && curves[0].arc.closed) {
+    // A tank: one closed curve and nothing else. Outside, inside or both.
+    const sides: CurveSide[] = opts.curveSides === "both" ? ["outside", "inside"] : [opts.curveSides ?? "outside"];
+    return sides.map((side, k) => curveRun(k, curves[0], side, { puf, bayFt: CURVE_BAY, frameWidthFt: W, standoffFt: G, clearanceFt: CLEAR, standardBays: BAYS, maxSpanFt: MAXSPAN }, BAYS));
+  }
+  if (curves.length > 0) {
+    const drop = new Set<number>();
+    for (const c of curves) {
+      curveByStart.set(keyOf(c.start), c);
+      let k = c.from;
+      while (k !== c.to) { k = (k + 1) % ordered.length; if (k !== c.to) drop.add(k); }
+    }
+    ordered = ordered.filter((_, i) => !drop.has(i));
+  }
+  const protectedKeys = new Set<string>();
+  for (const c of curves) { protectedKeys.add(keyOf(c.start)); protectedKeys.add(keyOf(c.end)); }
+  const base = dropCollinear(simplifyOutline(ordered, JOG * puf, OPEN, protectedKeys), OPEN, protectedKeys);
   const insets = OPEN ? [] : findInsets(base, puf, JOG, DEEP, STAND);
 
   // 2. The run line. Deep insets come out of it - the outer run carries straight
@@ -491,7 +539,14 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
     const k0 = key(line[i]);
     const w = makeWall(i, line[i], line[(i + 1) % n], line, sitsInterior(line[i], line[(i + 1) % n]) ? "interior" : "exterior");
     w.off = G_px;
-    if (sideStarts.has(k0)) w.role = "followSide";
+    const curveHere = curveByStart.get(k0);
+    if (curveHere) {
+      // which side of its chord the centre sits on says which way the wall bows
+      const mid = { x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 };
+      const toCentre = (curveHere.arc.cx - mid.x) * w.normal.x + (curveHere.arc.cy - mid.y) * w.normal.y;
+      w.role = "curve";
+      w.curve = { arc: curveHere.arc, side: toCentre < 0 ? "outside" : "inside" };
+    } else if (sideStarts.has(k0)) w.role = "followSide";
     else if (backStarts.has(k0)) {
       // the legs in front of a followed inset stay on the main line - their
       // back points in line with every other frame - and brackets reach in
@@ -499,7 +554,7 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
       w.inset = depthAt.get(k0) ?? 0;
       w.off = G_px + w.inset * puf;
     }
-    w.skipped = w.len < STAND * puf - 1e-6 || w.role === "followSide";
+    w.skipped = w.role === "curve" ? false : (w.len < STAND * puf - 1e-6 || w.role === "followSide");
     if (w.skipped && w.role === "main") w.note = "nothing set against it - too short to stand a frame";
     walls.push(w);
   }
@@ -520,6 +575,7 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
     const w = legged[k], nx = legged[(k + 1) % legged.length];
     if (OPEN && k === legged.length - 1) { w.nextLegged = w.idx; if (legged.length === 1) w.prevLegged = w.idx; continue; }
     w.nextLegged = nx.idx; nx.prevLegged = w.idx;
+    if (w.role === "curve" || nx.role === "curve") { w.toNext = "curve"; nx.fromPrev = "curve"; continue; }
     // what sits between them
     let between: Wall[] = [];
     for (let j = (w.idx + 1) % n; j !== nx.idx; j = (j + 1) % n) between.push(walls[j]);
@@ -531,6 +587,15 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
     else junction = "inside";
     w.toNext = junction; nx.fromPrev = junction;
   }
+
+  /** The frame a leg at d on this wall would stand: wall side point and back point. */
+  const frameOf = (w: Wall, d: number) => {
+    const b = { x: w.a.x + w.along.x * d, y: w.a.y + w.along.y * d };
+    return [
+      { x: b.x + w.normal.x * w.off, y: b.y + w.normal.y * w.off },
+      { x: b.x + w.normal.x * (w.off + W * puf), y: b.y + w.normal.y * (w.off + W * puf) },
+    ] as [PlanPoint, PlanPoint];
+  };
 
   // 5. Anchors and the march, wall by wall, in order round the loop.
   const BAYS_px = BAYS.map(b => b * puf);
@@ -549,8 +614,32 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
     //    width in is the anchor the run marches from; nothing else is fixed by it.
     let startAt: number;
     let mirrorFirst: number | undefined;
+    if (w.role === "curve" && w.curve) {
+      // square bays round the arc, each with its own two frames; the straight
+      // walls either side meet it a foot clear
+      w.curve.layout = layoutCurve(w.curve.arc, w.curve.side, { puf, bayFt: CURVE_BAY, frameWidthFt: W, standoffFt: G, clearanceFt: CLEAR, standardBays: BAYS, maxSpanFt: MAXSPAN });
+      w.positions = w.curve.layout.bays.flatMap(b => b.frames.map(f => (f.wallPoint.x - w.a.x) * w.along.x + (f.wallPoint.y - w.a.y) * w.along.y));
+      const nxc = walls[w.nextLegged!];
+      if (nxc !== w) { nxc.continueFrom = undefined; nxc.cornerLegFromPrev = undefined; }
+      continue;
+    }
     if (w.freeStart) {
       startAt = 0; w.fixedFirst = 0;                               // the end of the stroke: a leg, no float
+    } else if (w.fromPrev === "curve") {
+      // out of a curve: a leg a foot past its end, pushed on until it clears
+      // the curve's last frame by a foot at the nearest point
+      const pv = walls[w.prevLegged!];
+      const lastFrame = pv.curve?.layout?.bays.length ? pv.curve.layout.bays[pv.curve.layout.bays.length - 1].frames[1] : undefined;
+      let d = G_px;
+      if (lastFrame) {
+        let guard = 0;
+        while (guard++ < 40) {
+          const [f1, f2] = frameOf(w, d);
+          if (frameGap(f1, f2, lastFrame.wallPoint, lastFrame.tickTip) >= CLEAR * puf - 1e-6) break;
+          d += puf * 0.25;
+        }
+      }
+      startAt = d; w.fixedFirst = d;
     } else if (w.role === "followBack") {
       startAt = G_px; w.fixedFirst = G_px;                       // a foot off the side wall
     } else if (w.fromPrev === "continuous" && w.continueFrom) {
@@ -598,6 +687,7 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
       else { w.fixedLast = crossing; w.marchLimit = crossing; }     // ends a foot off the return
     }
     else if (w.toNext === "wrap") w.marchLimit = w.len;             // a full bay may land in the last foot
+    else if (w.toNext === "curve") w.marchLimit = w.len;            // into a curve: the gap to its first frame is planked
     else w.marchLimit = crossing;                                   // inside: stop at the crossing
     const mirrorLast = TA && w.fixedLast !== undefined && w.role !== "followBack" && !w.freeEnd ? w.fixedLast - W_px : undefined;
 
@@ -665,13 +755,6 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
 
   // 6. The corner pass: measured frame to frame, trimmed to the span, a leg added
   //    only where the plank genuinely cannot reach.
-  const frameOf = (w: Wall, d: number) => {
-    const b = { x: w.a.x + w.along.x * d, y: w.a.y + w.along.y * d };
-    return [
-      { x: b.x + w.normal.x * w.off, y: b.y + w.normal.y * w.off },
-      { x: b.x + w.normal.x * (w.off + W * puf), y: b.y + w.normal.y * (w.off + W * puf) },
-    ] as [PlanPoint, PlanPoint];
-  };
   const spanFt = (w: Wall, d: number, nx: Wall): number => {
     if (w.toNext === "inside") {
       // the deck runs along the wall into the corner leg: leg to leg
@@ -688,6 +771,11 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
   const deckGap = (w: Wall, d: number, nx: Wall) => {
     const [a1, a2] = frameOf(w, d);
     let best: { dist: number; p: PlanPoint; q: PlanPoint } = { dist: Infinity, p: a1, q: a1 };
+    if (nx.role === "curve") {
+      const f = nx.curve?.layout?.bays[0]?.frames[0];
+      if (!f) return best;
+      return closest(a1, a2, f.wallPoint, f.tickTip);
+    }
     if (nx.positions.length < 2) {
       const [b1, b2] = frameOf(nx, nx.positions[0]);
       best = closest(a1, a2, b1, b2);
@@ -702,7 +790,7 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
   };
   for (const w of legged) {
     const nx = walls[w.nextLegged!];
-    if (nx === w) continue;
+    if (nx === w || w.role === "curve") continue;
     // trim: drop any trailing leg we can lose and still plank back. Through a
     // followed inset the span is a bay with a jog in it, not a gap, so the
     // limit there is the bay rather than the plank.
@@ -732,6 +820,20 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
   for (const w of walls) {
     if (w.skipped) { results.push(emptyResult(w)); continue; }
     const nx = walls[w.nextLegged!];
+    if (w.role === "curve" && w.curve?.layout) {
+      const run = curveRunFromLayout(w.idx, w.curve.arc, w.curve.layout, puf, W, BAYS, CURVE_BAY, w.a, w.b, w.normal);
+      // the gap from the curve's last frame to the next wall's first leg is planked
+      if (nx !== w && nx.positions.length && run.legs.length) {
+        const lastLeg = run.legs[run.legs.length - 1];
+        const nf = leg(nx, nx.positions[0], nx.off, W * puf, true, false);
+        const gap = frameGap(lastLeg.wallPoint, lastLeg.tickTip, nf.wallPoint, nf.tickTip) / puf;
+        if (gap > G + 0.05) {
+          run.tail = { a0: lastLeg.wallPoint, a1: lastLeg.tickTip, b0: nf.wallPoint, b1: nf.tickTip, isBay: false, beside: false, lengthFt: gap, kind: gap <= MAXSPAN + 1e-6 ? "rail" : "bastard" };
+        }
+      }
+      results.push(run);
+      continue;
+    }
     const real = w.positions.filter(p => !w.mirrors.has(p));
     const legs = w.positions.map(d => {
       const l = leg(w, d, w.off, W * puf, d === real[0], d === real[real.length - 1]);
@@ -857,6 +959,278 @@ export function setOut(outlineIn: PlanPoint[], opts: SetOutOptions): SegmentLegs
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// ── Curves and tanks ──────────────────────────────────────────────────────────
+//
+// Frames are straight, so a curved wall is built as square bays - each with
+// its own two frames, set square to its own chord - and the wedge between one
+// bay and the next is planked across. Neighbouring frames are never closer
+// than a foot at their nearest point: on the outside of a curve that is the
+// wall side and the wedge opens outward; on the inside it is the far end and
+// the wedge opens at the wall. Bays on a curve are 5' unless the estimator
+// says otherwise, whatever the radius. A tank is the same rule round a
+// circle, outside, inside or both.
+
+export type CurveSide = "outside" | "inside";
+
+export type CurveArc = {
+  /** Centre and radius of the wall itself, px. */
+  cx: number; cy: number; r: number;
+  /** Start angle and signed sweep, radians. A full circle sweeps 2 pi. */
+  a0: number; sweep: number;
+  closed: boolean;
+};
+
+export type CurveFrame = { wallPoint: PlanPoint; tickTip: PlanPoint };
+export type CurveBay = { frames: [CurveFrame, CurveFrame]; chordFt: number };
+export type CurveWedge = { nearFt: number; farFt: number };
+
+export type CurveLayout = {
+  side: CurveSide;
+  bays: CurveBay[];
+  /** wedges[i] sits between bays[i] and bays[i + 1]; on a closed curve the last one closes the ring and takes the leftover. */
+  wedges: CurveWedge[];
+  /** On an open curve: what is left between the last bay and the end of the arc, measured along the leg line, ft. */
+  leftoverFt: number;
+  legLineRadiusFt: number;
+};
+
+/**
+ * Square bays round an arc.
+ *
+ * The bay is a chord of the leg line. The step from one bay to the next is
+ * solved so the nearest ends of neighbouring frames are exactly the clearance
+ * apart - at the wall outside a curve, at the far end inside one.
+ */
+export function layoutCurve(arc: CurveArc, side: CurveSide, opts: {
+  puf: number; bayFt: number; frameWidthFt: number; standoffFt?: number; clearanceFt?: number;
+  /** Shorter standard bays the end of the curve may use, and the widest gap a plank may bridge. */
+  standardBays?: number[]; maxSpanFt?: number;
+}): CurveLayout {
+  const { puf } = opts;
+  const G = (opts.standoffFt ?? 1) * puf, W = opts.frameWidthFt * puf;
+  const BAY = opts.bayFt * puf, CLEAR = (opts.clearanceFt ?? 1) * puf;
+  const MAXSPAN = (opts.maxSpanFt ?? 8) * puf;
+  const LADDER = (opts.standardBays ?? [4, 5, 6, 7, 8, 10]).map(b => b * puf).filter(b => b < BAY - 1e-6).sort((a, b) => b - a);
+  const outside = side === "outside";
+  const Rl = outside ? arc.r + G : arc.r - G;              // the leg line
+  const empty: CurveLayout = { side, bays: [], wedges: [], leftoverFt: 0, legLineRadiusFt: Math.max(0, Rl) / puf };
+  if (Rl <= BAY / 2 + 1e-6 || arc.r <= 0) return empty;    // too tight to stand a bay in
+  const dir = Math.sign(arc.sweep) || 1;
+  const thetaOf = (chord: number) => 2 * Math.asin(Math.min(1, chord / (2 * Rl)));
+  const thetaBay = thetaOf(BAY);
+  const bayAt = (a: number, chord = BAY): CurveBay => {
+    const a1 = a + dir * thetaOf(chord);
+    const p0 = { x: arc.cx + Rl * Math.cos(a), y: arc.cy + Rl * Math.sin(a) };
+    const p1 = { x: arc.cx + Rl * Math.cos(a1), y: arc.cy + Rl * Math.sin(a1) };
+    const mx = (p0.x + p1.x) / 2 - arc.cx, my = (p0.y + p1.y) / 2 - arc.cy, l = Math.hypot(mx, my) || 1;
+    const n = outside ? { x: mx / l, y: my / l } : { x: -mx / l, y: -my / l };
+    const q0 = { x: p0.x + n.x * W, y: p0.y + n.y * W }, q1 = { x: p1.x + n.x * W, y: p1.y + n.y * W };
+    return { frames: [{ wallPoint: p0, tickTip: q0 }, { wallPoint: p1, tickTip: q1 }], chordFt: chord / puf };
+  };
+  const d = (p: PlanPoint, q: PlanPoint) => Math.hypot(p.x - q.x, p.y - q.y);
+  const gaps = (b0: CurveBay, b1: CurveBay) => ({
+    wall: d(b0.frames[1].wallPoint, b1.frames[0].wallPoint),
+    far: d(b0.frames[1].tickTip, b1.frames[0].tickTip),
+  });
+  // the step from a bay to the next one that puts exactly CLEAR between their frames at the nearest point
+  const stepTo = (fromChord: number, toChord: number) => {
+    let lo = thetaOf(fromChord), hi = thetaOf(fromChord) + Math.PI / 2;
+    for (let k = 0; k < 60; k++) {
+      const mid = (lo + hi) / 2;
+      const g = gaps(bayAt(0, fromChord), bayAt(dir * mid, toChord));
+      if (Math.min(g.wall, g.far) < CLEAR) lo = mid; else hi = mid;
+    }
+    return hi;
+  };
+  const step = stepTo(BAY, BAY);
+  const sweep = Math.abs(arc.sweep);
+  let n: number;
+  if (arc.closed) n = Math.floor(2 * Math.PI / step);
+  else n = sweep + 1e-9 >= thetaBay ? Math.floor((sweep - thetaBay) / step) + 1 : 0;
+  if (n <= 0) return empty;
+  const bays: CurveBay[] = [];
+  for (let k = 0; k < n; k++) bays.push(bayAt(arc.a0 + dir * k * step));
+  // What is left at the end must still be plankable. If the closing gap would
+  // be wider than a plank can bridge, a shorter standard bay goes in first -
+  // longest that fits - the way a leftover on a straight run gets a leg.
+  const lastStart = () => arc.a0 + dir * (n - 1) * step;
+  const closingWidth = (last: CurveBay) => {
+    if (arc.closed) { const g = gaps(last, bays[0]); return Math.max(g.wall, g.far); }
+    const used = Math.abs((Math.atan2(last.frames[1].wallPoint.y - arc.cy, last.frames[1].wallPoint.x - arc.cx) - arc.a0));
+    const usedAngle = ((used % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    return (sweep - usedAngle) * Rl + CLEAR;
+  };
+  if (closingWidth(bays[bays.length - 1]) > MAXSPAN + 1e-6) {
+    for (const b of LADDER) {
+      const at = lastStart() + dir * stepTo(BAY, b);
+      const endAngle = at + dir * thetaOf(b);
+      const fits = arc.closed
+        ? gaps(bayAt(at, b), bays[0]).wall >= CLEAR - 1e-6 && gaps(bayAt(at, b), bays[0]).far >= CLEAR - 1e-6 && Math.abs(endAngle - arc.a0) <= 2 * Math.PI
+        : Math.abs(endAngle - arc.a0) <= sweep + 1e-9;
+      if (!fits) continue;
+      const extra = bayAt(at, b);
+      if (closingWidth(extra) <= MAXSPAN + 1e-6) { bays.push(extra); break; }
+    }
+  }
+  const wedges: CurveWedge[] = [];
+  for (let k = 0; k + 1 < bays.length; k++) {
+    const g = gaps(bays[k], bays[k + 1]);
+    wedges.push({ nearFt: Math.min(g.wall, g.far) / puf, farFt: Math.max(g.wall, g.far) / puf });
+  }
+  let leftoverFt = 0;
+  if (arc.closed) {
+    const g = gaps(bays[bays.length - 1], bays[0]);
+    wedges.push({ nearFt: Math.min(g.wall, g.far) / puf, farFt: Math.max(g.wall, g.far) / puf });
+  } else {
+    const lastEnd = bays[bays.length - 1].frames[1].wallPoint;
+    let used = Math.abs(Math.atan2(lastEnd.y - arc.cy, lastEnd.x - arc.cx) - arc.a0);
+    used = ((used % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    leftoverFt = Math.max(0, (sweep - used) * Rl) / puf;
+  }
+  return { side, bays, wedges, leftoverFt, legLineRadiusFt: Rl / puf };
+}
+
+/** A curve layout as a run: two legs a bay, bays and wedges alternating, the closing wedge as the tail on a ring. */
+function curveRunFromLayout(
+  segIndex: number, arc: CurveArc, layout: CurveLayout, puf: number, W: number, BAYS: number[], bayFt: number,
+  a: PlanPoint, b: PlanPoint, normal: PlanPoint,
+): SegmentLegs {
+  const legs: LegResult[] = [];
+  const bays: BaySpan[] = [];
+  const asLeg = (f: CurveFrame, start: boolean, end: boolean): LegResult => {
+    const dx = f.tickTip.x - f.wallPoint.x, dy = f.tickTip.y - f.wallPoint.y, l = Math.hypot(dx, dy) || 1;
+    return {
+      wallPoint: f.wallPoint, tickTip: f.tickTip,
+      labelPoint: { x: f.tickTip.x + (dx / l) * puf, y: f.tickTip.y + (dy / l) * puf },
+      isTurnaroundMirror: false, isStartLeg: start, isEndLeg: end,
+    };
+  };
+  layout.bays.forEach((bay, k) => {
+    legs.push(asLeg(bay.frames[0], k === 0, false));
+    legs.push(asLeg(bay.frames[1], false, k === layout.bays.length - 1 && !arc.closed));
+    bays.push({ segIndex, lengthFt: bay.chordFt, kind: isStandard(bay.chordFt, BAYS) ? "braced" : "bastard" });
+    if (k + 1 < layout.bays.length) {
+      const wedge = layout.wedges[k];
+      bays.push({ segIndex, lengthFt: wedge.farFt, kind: "rail" });
+    }
+  });
+  const run: SegmentLegs = {
+    segIndex, legs, bays, a, b, normal, kind: "curve",
+    curve: {
+      radiusFt: arc.r / puf, sweepDeg: Math.abs(arc.sweep) * 180 / Math.PI, side: layout.side, bayFt,
+      closed: arc.closed, wedges: layout.wedges.length, leftoverFt: layout.leftoverFt,
+    },
+    note: `${arc.closed ? "tank" : "curve"}, ${fmt(arc.r / puf)} radius - ${layout.bays.length} square ${fmt(bayFt)} bays, ${layout.side}, wedges planked`,
+  };
+  if (arc.closed && layout.bays.length > 1) {
+    // the ring closes on itself: the last wedge, leftover and all, is the tail
+    const last = legs[legs.length - 1], first = legs[0];
+    const wedge = layout.wedges[layout.wedges.length - 1];
+    run.tail = { a0: last.wallPoint, a1: last.tickTip, b0: first.wallPoint, b1: first.tickTip, isBay: false, beside: false, lengthFt: wedge.farFt, kind: wedge.farFt <= 8 + 1e-6 ? "rail" : "bastard" };
+  }
+  void W;
+  return run;
+}
+
+/** A tank side: the whole ring, laid and returned as one run. */
+function curveRun(
+  segIndex: number, c: DetectedCurve, side: CurveSide,
+  opts: { puf: number; bayFt: number; frameWidthFt: number; standoffFt: number; clearanceFt: number; standardBays: number[]; maxSpanFt: number }, BAYS: number[],
+): SegmentLegs {
+  const layout = layoutCurve(c.arc, side, opts);
+  const normal = { x: side === "outside" ? 1 : -1, y: 0 };
+  return curveRunFromLayout(segIndex, c.arc, layout, opts.puf, opts.frameWidthFt, BAYS, opts.bayFt, c.start, c.end, normal);
+}
+
+/** Least-squares circle through a run of points (Kasa fit). */
+function fitCircle(pts: PlanPoint[]): { cx: number; cy: number; r: number } | null {
+  const n = pts.length;
+  if (n < 3) return null;
+  let sx = 0, sy = 0;
+  for (const p of pts) { sx += p.x; sy += p.y; }
+  const mx = sx / n, my = sy / n;
+  let suu = 0, suv = 0, svv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
+  for (const p of pts) {
+    const u = p.x - mx, v = p.y - my;
+    suu += u * u; suv += u * v; svv += v * v;
+    suuu += u * u * u; svvv += v * v * v; suvv += u * v * v; svuu += v * u * u;
+  }
+  const det = suu * svv - suv * suv;
+  if (Math.abs(det) < 1e-9) return null;
+  const b1 = (suuu + suvv) / 2, b2 = (svvv + svuu) / 2;
+  const uc = (b1 * svv - b2 * suv) / det, vc = (b2 * suu - b1 * suv) / det;
+  const r = Math.sqrt(uc * uc + vc * vc + (suu + svv) / n);
+  return { cx: mx + uc, cy: my + vc, r };
+}
+
+export type DetectedCurve = {
+  /** Indices into the outline it was read from: the stretch runs from `from` to `to` inclusive, wrapping. */
+  from: number; to: number;
+  arc: CurveArc;
+  /** The chord, start to end, for a closed curve the same point. */
+  start: PlanPoint; end: PlanPoint;
+};
+
+/**
+ * Finds the curved stretches of an outline: three or more vertices in a row
+ * that each turn gently the same way. A traced curve is a string of short
+ * clicks; a highlighter stroke round a bend is the same thing; a tank is a
+ * ring of them. A chamfer or a single angled wall is not a curve.
+ */
+export function detectCurves(pts: PlanPoint[], opts?: { maxTurnDeg?: number; minTurnDeg?: number; minBends?: number; open?: boolean }): DetectedCurve[] {
+  const n = pts.length;
+  if (n < 4) return [];
+  const open = !!opts?.open;
+  const MAX = ((opts?.maxTurnDeg ?? 35) * Math.PI) / 180, MIN = ((opts?.minTurnDeg ?? 1) * Math.PI) / 180;
+  const MIN_BENDS = opts?.minBends ?? 3;
+  const turn = (i: number) => {
+    const p = pts[(i - 1 + n) % n], v = pts[i], q = pts[(i + 1) % n];
+    const ax = v.x - p.x, ay = v.y - p.y, bx = q.x - v.x, by = q.y - v.y;
+    return Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+  };
+  const turns = pts.map((_, i) => (open && (i === 0 || i === n - 1) ? 0 : turn(i)));
+  const bend = turns.map(t => Math.abs(t) >= MIN && Math.abs(t) <= MAX ? Math.sign(t) : 0);
+  if (bend.every(b => b !== 0 && b === bend[0])) {
+    const fit = fitCircle(pts);
+    if (!fit) return [];
+    const a0 = Math.atan2(pts[0].y - fit.cy, pts[0].x - fit.cx);
+    return [{ from: 0, to: n - 1, arc: { ...fit, a0, sweep: bend[0] * 2 * Math.PI, closed: true }, start: pts[0], end: pts[0] }];
+  }
+  // start scanning at a vertex that is not a bend, so no stretch is split by the wrap
+  let s0 = bend.findIndex(b => b === 0);
+  if (s0 < 0) s0 = 0;
+  const out: DetectedCurve[] = [];
+  let i = 0;
+  while (i < n) {
+    const idx = (s0 + i) % n;
+    if (bend[idx] === 0) { i++; continue; }
+    const sign = bend[idx];
+    let j = i;
+    while (j + 1 < n && bend[(s0 + j + 1) % n] === sign) j++;
+    const count = j - i + 1;
+    if (count >= MIN_BENDS) {
+      const run: number[] = [];
+      for (let k = i; k <= j; k++) run.push((s0 + k) % n);
+      const fit = fitCircle(run.map(k => pts[k]));
+      if (fit && fit.r > 0) {
+        const start = pts[run[0]], end = pts[run[run.length - 1]];
+        const a0 = Math.atan2(start.y - fit.cy, start.x - fit.cx);
+        let sweep = 0;
+        for (const k of run) sweep += turns[k];
+        // the stretch's turning is the arc's sweep less the half bends at its ends, near enough; take it from the chord instead
+        const a1 = Math.atan2(end.y - fit.cy, end.x - fit.cx);
+        let delta = a1 - a0;
+        while (delta * sign < 0) delta += sign * 2 * Math.PI;
+        while (Math.abs(delta) > 2 * Math.PI) delta -= sign * 2 * Math.PI;
+        sweep = delta;
+        out.push({ from: run[0], to: run[run.length - 1], arc: { ...fit, a0, sweep, closed: false }, start, end });
+      }
+    }
+    i = j + 1;
+  }
+  return out;
+}
 
 // ── Strokes and drawn runs ────────────────────────────────────────────────────
 //

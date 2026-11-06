@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
 import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
@@ -1113,11 +1113,11 @@ export default function SetScaffoldV2Inner() {
 
   const frameHeight       = 6.333;
   const workerReachHeight = getBackendSettings()?.scaffold?.workerReachHeight ?? 6;
-  const screwJackMaxExtensionIn = getBackendSettings()?.scaffold?.screwJackMaxExtension ?? 12;
+  const screwJackMaxExtensionIn = getBackendSettings()?.scaffold?.screwJackMaxExtension ?? DEFAULT_SCREW_JACK_MAX_IN;
   // Material rules come from backend settings so each company can encode
   // its own standard; the defaults are standard practice.
   const MATERIAL_RULES = useMemo(() => {
-    const sc = (getBackendSettings()?.scaffold ?? {}) as Record<string, number | undefined>;
+    const sc = (getBackendSettings()?.scaffold ?? {}) as unknown as Record<string, number | undefined>;
     return {
       crossBracesPerBayPerLift: sc.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift,
       guardrailTopPerBay: sc.guardrailTopPerBay ?? MATERIAL_RULE_DEFAULTS.guardrailTopPerBay,
@@ -1143,7 +1143,7 @@ export default function SetScaffoldV2Inner() {
   const typedTier = (elevation?.activeTier ?? estimateDepth) === "quick-bid";
   /** The steel the selected trades call for - the worst of them, field by field. */
   const finishRule = governingFinishRule(elevation?.finishes ?? [], getBackendSettings());
-  const puf      = elevation?.scale?.pageUnitsPerFoot ?? (isAerial ? 4 : typedTier ? 1 : null);
+  const puf      = (elevation?.scale as { pageUnitsPerFoot?: number } | null | undefined)?.pageUnitsPerFoot ?? (isAerial ? 4 : typedTier ? 1 : null);
   const scaleOk  = (puf != null && puf > 0) || isAerial;
   const effPuf   = puf ?? 4;
 
@@ -1362,6 +1362,22 @@ export default function SetScaffoldV2Inner() {
     saveActiveElevation(next);
   }
 
+  /*
+   * Bays on a curve. A curved wall is built as square bays, two frames each,
+   * the wedge between them planked - 5' bays whatever the radius, unless the
+   * estimator says otherwise for this job. A tank is the same rule round a
+   * circle, outside, inside or both; the Quick Bid says which.
+   */
+  type CurveSettings = { curveBayFt?: number; curveSides?: "outside" | "inside" | "both" };
+  const curveBayFt = (elevation as (ProjectElevation & CurveSettings) | null)?.curveBayFt ?? 5;
+  const curveSides = (elevation as (ProjectElevation & CurveSettings) | null)?.curveSides ?? "outside";
+  function setCurveBayFt(bayFt: number) {
+    if (!elevation) return;
+    const next = { ...elevation, curveBayFt: bayFt } as ProjectElevation;
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+
   // The set-out: every leg, bay and gap on the traced plan, from the engine.
   const tracedSegmentLegs = useMemo<SegmentLegs[]>(() => {
     if (!scaleOk || !outline.length || effPuf <= 0 || bayLengthFt <= 0) return [];
@@ -1373,8 +1389,10 @@ export default function SetScaffoldV2Inner() {
       interiorWalls,
       standardBays: [...STANDARD_BAY_LENGTHS],
       turnaround: turnaroundBays,
+      curveBayFt,
+      curveSides,
     });
-  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, interiorWalls, legStandoffFt, turnaroundBays]);
+  }, [outline, scaffoldWidthFt, bayLengthFt, scaleOk, effPuf, interiorWalls, legStandoffFt, turnaroundBays, curveBayFt, curveSides]);
 
   /*
    * Strokes that meet are one scaffold turning a corner, and it is set out by
@@ -1396,10 +1414,11 @@ export default function SetScaffoldV2Inner() {
         standoffFt: legStandoffFt,
         standardBays: [...STANDARD_BAY_LENGTHS],
         turnaround: turnaroundBays,
+        curveBayFt,
       },
       8 * effPuf,
     );
-  }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt, legStandoffFt, turnaroundBays]);
+  }, [drawnRuns, scaleOk, effPuf, bayLengthFt, scaffoldWidthFt, legStandoffFt, turnaroundBays, curveBayFt]);
 
   /** Everything the engine set out: the traced plan and the chained strokes. */
   const allSegmentLegs = useMemo<SegmentLegs[]>(
@@ -1410,7 +1429,7 @@ export default function SetScaffoldV2Inner() {
   /** Frames per leg on a stroke's walls - a stroke carries its own height. */
   const strokeTallBySeg = useMemo(() => {
     const reach = getBackendSettings()?.scaffold?.workerReachHeight ?? 6;
-    const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+    const jack = screwJackMaxExtensionIn;
     const m = new Map<number, number>();
     for (const seg of strokeSetOut.segments) {
       const run = drawnRuns.find(r => r.id === seg.runId);
@@ -1548,7 +1567,7 @@ export default function SetScaffoldV2Inner() {
     const wall = elevation?.wallHeight ?? 0;
     if (wall > 0) {
       const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
-      const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+      const jack = screwJackMaxExtensionIn;
       const makeup = computeFrameMakeup(Math.max(0, wall - reach), jack);
       if (makeup.frameTall > 0) return makeup.frameTall;
     }
@@ -2033,7 +2052,7 @@ export default function SetScaffoldV2Inner() {
      * tile while the drawing showed a scaffold.
      */
     const reachFt = getBackendSettings().scaffold.workerReachHeight ?? 6;
-    const jackIn = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+    const jackIn = screwJackMaxExtensionIn;
     for (const run of drawnRunLegs) {
       if (run.fromEngine) continue;   // counted above, with the engine's walls
       const source = drawnRuns.find(r => r.id === run.id);
@@ -2524,19 +2543,35 @@ export default function SetScaffoldV2Inner() {
 
     // Frames, by the actual makeup of a leg rather than one tall stack.
     const makeup = qe.frameMakeup ?? [];
+    /*
+     * Legs under a pedestrian tunnel stand on a canopy frame in place of
+     * their bottom frame, and their stack above is re-figured to the same
+     * height - so they are billed their own makeup, and the canopy itself
+     * rides on the tunnel's own line. The ledger used to bill those legs the
+     * full stack and the canopy on top.
+     */
+    const tunnel = el.tunnel;
+    const tunnelLegs = tunnel && tunnel.legs > 0 && tunnel.makeup.length > 0 ? Math.min(legs, tunnel.legs) : 0;
+    const standardLegs = legs - tunnelLegs;
+    const frameFor = (label: string) =>
+      label.startsWith("6") ? parts.frame : label.startsWith("5") ? parts.frame5 : parts.frame3;
     if (makeup.length > 0) {
       makeup.forEach((piece) => {
-        const partNo = piece.label.startsWith("6")
-          ? parts.frame
-          : piece.label.startsWith("5")
-          ? parts.frame5
-          : parts.frame3;
         entries.push({
-          partNo,
-          qty: piece.qty * legs,
-          note: `${piece.qty} per leg x ${legs} legs`,
+          partNo: frameFor(piece.label),
+          qty: piece.qty * standardLegs,
+          note: `${piece.qty} per leg x ${standardLegs} legs`,
         });
       });
+      if (tunnelLegs > 0 && tunnel) {
+        tunnel.makeup.forEach((piece) => {
+          entries.push({
+            partNo: frameFor(piece.label),
+            qty: piece.qty * tunnelLegs,
+            note: `${piece.qty} per leg x ${tunnelLegs} legs under the tunnel, on a canopy frame`,
+          });
+        });
+      }
     } else {
       entries.push({ partNo: parts.frame, qty: qe.frameCount });
     }
@@ -2555,7 +2590,7 @@ export default function SetScaffoldV2Inner() {
      * a mixed makeup.
      */
     const bracesPerBayPerJump =
-      (getBackendSettings()?.scaffold as Record<string, number | undefined> | undefined)
+      (getBackendSettings()?.scaffold as unknown as Record<string, number | undefined> | undefined)
         ?.crossBracesPerBayPerLift ?? MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift;
     if (makeup.length > 0 && bracedCount > 0) {
       makeup.forEach((piece) => {
@@ -2592,7 +2627,16 @@ export default function SetScaffoldV2Inner() {
     }
     entries.push({ partNo: "BP1", qty: qe.basePlateCount });
     entries.push({ partNo: "AL1S", qty: qe.screwJackCount });
-    entries.push({ partNo: "CPS", qty: qe.couplingPinCount ?? 0 });
+    /*
+     * Coupling pins at every frame joint but the top. A tunnel leg has a
+     * different number of joints, and its canopy-to-frame joint is saddle
+     * pins, not these.
+     */
+    const pinsPerJoint = MATERIAL_RULES.couplingPinsPerFrame;
+    const tunnelPinShift = tunnelLegs > 0 && tunnel
+      ? tunnelLegs * (Math.max(0, tunnel.frameTall - 1) - Math.max(0, (qe.frameTall ?? 1) - 1)) * pinsPerJoint
+      : 0;
+    entries.push({ partNo: "CPS", qty: Math.max(0, (qe.couplingPinCount ?? 0) + tunnelPinShift) });
 
     /*
      * Drawn runs are runs. Their legs, frames and decks count exactly as a
@@ -2605,7 +2649,7 @@ export default function SetScaffoldV2Inner() {
     if (drawnLegs > 0) {
       const drawnJumps = drawnRuns.reduce((sum, run) => {
         const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
-        const mk = computeFrameMakeup(Math.max(0, run.heightFt - reach), si.screwJackMaxExtension ?? 18);
+        const mk = computeFrameMakeup(Math.max(0, run.heightFt - reach), screwJackMaxExtensionIn);
         return sum + Math.max(1, mk.frameTall);
       }, 0) / Math.max(1, drawnRuns.length);
       const jumps = Math.max(1, Math.round(drawnJumps));
@@ -3256,6 +3300,14 @@ export default function SetScaffoldV2Inner() {
               if (by("outline")) parts.push(`${by("outline")} deep enough to follow wall by wall`);
               flags.push({ tone: "note", text: `${recesses.length} inset${recesses.length === 1 ? "" : "s"} in this plan - ${parts.join(", ")}. Under 8" I run straight past.` });
             }
+            const curveRuns = allSegmentLegs.filter(seg => seg.kind === "curve" && seg.curve);
+            if (curveRuns.length > 0) {
+              const bays = curveRuns.reduce((s, seg) => s + seg.bays.filter(b => b.kind !== "rail").length, 0);
+              const wedges = curveRuns.reduce((s, seg) => s + (seg.curve?.wedges ?? 0), 0);
+              const where = curveRuns.map(seg => `${seg.curve!.closed ? "tank" : "curve"} ${seg.curve!.radiusFt.toFixed(0)}' radius ${seg.curve!.side}`).join(", ");
+              const wide = curveRuns.some(seg => seg.tail?.kind === "bastard");
+              flags.push({ tone: wide ? "warn" : "note", text: `Korban found a ${where} - ${bays} square ${curveBayFt}' bays, two frames each, ${wedges} wedges planked between. Bay on curve is ${curveBayFt}' - change it beside Turnaround bays.${wide ? " One closing gap is wider than a plank can bridge - it is marked dashed; a shorter bay size may close it." : ""}` });
+            }
             if (turnaroundBays) {
               const mirrors = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.filter(l => l.isTurnaroundMirror).length, 0);
               flags.push({ tone: "note", text: `Turnaround bays on - ${mirrors} corner frame${mirrors === 1 ? "" : "s"} added, every run re-set from its corner.` });
@@ -3518,6 +3570,17 @@ export default function SetScaffoldV2Inner() {
                   className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600 hover:border-orange-500/40"}`}>
                   Turnaround bays
                 </button>
+                {allSegmentLegs.some(seg => seg.kind === "curve") && (
+                  <span className="flex items-center gap-1 rounded-lg border border-zinc-800 px-1.5 py-0.5" title="Korban found a curve. Bays on a curve are square, two frames each, the wedge between planked. 5' is the rule; pick another size only if the job calls for it.">
+                    <span className="font-mono text-[8.5px] uppercase tracking-[0.12em] text-zinc-500">Bay on curve</span>
+                    {[4, 5, 6, 7, 8, 10].map(b => (
+                      <button key={b} onClick={() => setCurveBayFt(b)} disabled={!elevation}
+                        className={`rounded px-1.5 py-0.5 text-[9px] font-bold disabled:opacity-30 ${curveBayFt === b ? "bg-orange-500/15 text-orange-300" : "text-zinc-600 hover:text-zinc-300"}`}>
+                        {b}&apos;
+                      </button>
+                    ))}
+                  </span>
+                )}
                 <button onClick={() => { setEditMode(m => !m); setMeasureMode(false); setAddRunMode(false); }} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "\u2713 Editing" : "Edit Bay"}</button>
                 <button onClick={() => { setAddRunMode(m => !m); setEditMode(false); setMeasureMode(false); setRunStart(null); setRunEnd(null); }}
                   title="Draw a run anywhere on the plan"
@@ -3895,7 +3958,7 @@ export default function SetScaffoldV2Inner() {
                       // A drawn run carries its own height, so its frame count
                       // is its own - not the elevation's.
                       const reach = getBackendSettings().scaffold.workerReachHeight ?? 6;
-                      const jack = elevation?.scaffoldInput?.screwJackMaxExtension ?? 18;
+                      const jack = screwJackMaxExtensionIn;
                       const tall = Math.max(1, computeFrameMakeup(Math.max(0, run.heightFt - reach), jack).frameTall);
                       return (
                         <g key={i}>
@@ -3986,6 +4049,18 @@ export default function SetScaffoldV2Inner() {
                        * the foreman is told this one bay is built differently
                        * before he gets there and finds out.
                        */
+                      /*
+                       * A wedge between square bays on a curve. No brace -
+                       * the two frames are not parallel - it is planked
+                       * across, so it is drawn as the planked gap it is.
+                       */
+                      if (segBays?.[i]?.kind === "rail") {
+                        return (
+                          <polygon key={`wedge-${i}`}
+                            points={`${leg.wallPoint.x + o1.dx},${leg.wallPoint.y + o1.dy} ${leg.tickTip.x + o1.dx},${leg.tickTip.y + o1.dy} ${next.tickTip.x + o2.dx},${next.tickTip.y + o2.dy} ${next.wallPoint.x + o2.dx},${next.wallPoint.y + o2.dy}`}
+                            fill="currentColor" fillOpacity="0.08" stroke="currentColor" strokeWidth="0.5" opacity="0.6" />
+                        );
+                      }
                       if (segBays?.[i]?.kind === "bastard") {
                         return (
                           <line key={`bastard-${i}`}

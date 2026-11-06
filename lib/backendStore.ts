@@ -56,10 +56,10 @@ export type ScaffoldDefaults = {
   frameHeight: number;
   workerReachHeight: number;
   /**
-   * Maximum screw jack extension in inches. Range 1"-18". Default 12" (1 foot).
+   * Maximum screw jack extension in inches. 12" of exposed thread is the limit (Cal-OSHA Title 8 s1646); default 12.
    * Frame Configuration uses this to calculate the base frame arrangement -
    * the remaining height after frames is covered by the screw jack up to this
-   * maximum. 12" keeps a safe margin below the 18" physical limit.
+   * maximum.
    */
   screwJackMaxExtension: number;
   jumpLogic: string;
@@ -416,7 +416,7 @@ function buildDefaultStock(): StockItem[] {
   // partNo, description, category, column (1-3 as they print on the form)
   const rows: [string, string, string, number][] = [
     // -- Column one: frames, jacks, bases, putlogs, spreaders --------------
-    ["FO7CP", "7' Pedestrian Canopy", "", 1],
+    ["FO7CF", "7'-6\" H - 6' W Pedestrian Canopy Frame", "Frames", 1],
     ["FO6L3", "6'-4\" H - 3' W Frame", "Frames", 1],
     ["FO5L3", "5' H - 3' W Frame", "Frames", 1],
     ["FM33", "3' H - 3' W Frame", "Frames", 1],
@@ -434,7 +434,7 @@ function buildDefaultStock(): StockItem[] {
     ["AL1S", "Screw Jack w/ Base Plate", "Screw Jacks", 1],
     ["BP1", "Fixed Base Plate", "Base Plates", 1],
     ["BP2", "Swivel Base Plate", "Base Plates", 1],
-    ["BP3", "Curved Base Plate", "Base Plates", 1],
+    ["BP3/CBP", "Curved Base Plate - saddle pin for canopy frames", "Base Plates", 1],
     ["SJS", "Swivel Jacks", "Screw Jacks", 1],
     ["", "12\" Sleeves", "", 1],
     ["", "Stud Clamps", "", 1],
@@ -879,7 +879,9 @@ function normalizeScaffold(value: unknown): ScaffoldDefaults {
     bracePattern: asEnum(r.bracePattern, d.bracePattern, ["Every Bay", "Every Other Bay", "Custom"] as const),
     frameHeight: asNumber(r.frameHeight, d.frameHeight),
     workerReachHeight: asNumber(r.workerReachHeight, d.workerReachHeight),
-    screwJackMaxExtension: Math.min(18, Math.max(1, asNumber(r.screwJackMaxExtension, d.screwJackMaxExtension))),
+    // 12" of exposed thread is the ceiling - Cal-OSHA Title 8 s1646 and every
+    // manufacturer's spec. A setting that was saved higher comes back at 12.
+    screwJackMaxExtension: Math.min(12, Math.max(1, asNumber(r.screwJackMaxExtension, d.screwJackMaxExtension))),
     jumpLogic: asString(r.jumpLogic, d.jumpLogic),
   };
 }
@@ -917,8 +919,11 @@ function normalizeStock(value: unknown): StockItem[] {
     if (key) stored.set(key, row);
   });
 
+  // Parts that changed number keep what was entered against the old one.
+  const formerly: Record<string, string[]> = { "FO7CF": ["FO7CP"], "BP3/CBP": ["BP3", "CBP"] };
   const merged = defaults.map((fallback) => {
-    const row = stored.get(fallback.id) ?? stored.get(fallback.partNo);
+    const row = stored.get(fallback.id) ?? stored.get(fallback.partNo)
+      ?? (formerly[fallback.partNo] ?? []).map((old) => stored.get(old)).find(Boolean);
     if (!row) return fallback;
     return {
       ...fallback,
@@ -931,7 +936,7 @@ function normalizeStock(value: unknown): StockItem[] {
   });
 
   // Parts a company added themselves survive alongside the standard catalog.
-  const known = new Set(defaults.flatMap((row) => [row.id, row.partNo]).filter(Boolean));
+  const known = new Set([...defaults.flatMap((row) => [row.id, row.partNo]), ...Object.values(formerly).flat()].filter(Boolean));
   const custom = value
     .filter((row): row is Record<string, unknown> => {
       if (!isRecord(row)) return false;

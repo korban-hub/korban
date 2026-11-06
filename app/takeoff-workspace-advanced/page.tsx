@@ -361,6 +361,14 @@ export default function TakeoffWorkspaceAdvancedPage() {
   const [highlightsComplete, setHighlightsComplete] = useState(false);
   /** Lights the height boxes for a few seconds after the overlay is completed. */
   const [heightsPulse, setHeightsPulse] = useState(false);
+  /**
+   * Whether the second and third coverage areas are on screen.
+   *
+   * A face usually needs one. Showing three empty cards made a simple
+   * elevation look like a form and pushed the grip buttons off the bottom, so
+   * the other two stay folded away until a face actually steps.
+   */
+  const [showExtraAreas, setShowExtraAreas] = useState(false);
   /** The top of the strokes list, to come back to for the second pass. */
   const highlightsTopRef = useRef<HTMLDivElement|null>(null);
   /**
@@ -1137,7 +1145,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
     const lf=parseFloat((w/puf).toFixed(1));
     const heightFt=parseFloat((h/puf).toFixed(1));
     const reach=backendSettings?.scaffold?.workerReachHeight??6;
-    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??12;
     const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
     // Same frame engine the rest of the app uses, so a grip can't disagree
     // with Set Scaffold about how many frames a leg takes.
@@ -1205,7 +1213,7 @@ export default function TakeoffWorkspaceAdvancedPage() {
 
     const bayLen=backendSettings?.scaffold?.defaultBayLength??10;
     const reach=backendSettings?.scaffold?.workerReachHeight??6;
-    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??18;
+    const jackMax=backendSettings?.scaffold?.screwJackMaxExtension??12;
 
     const rules=backendSettings?.material?.rules;
     const bracesPerBayPerJump=rules?.crossBracesPerBayPerJump??2;
@@ -2074,6 +2082,10 @@ export default function TakeoffWorkspaceAdvancedPage() {
   useEffect(() => {
     if (depthTab === "full-bid" && activeTab !== "floor") setActiveTab("floor");
   }, [depthTab, activeTab]);
+
+  /* Each face folds back up on arrival - the one before it stepping is no
+     reason to expect this one to. */
+  useEffect(() => { setShowExtraAreas(false); }, [selectedElev, activeZone]);
 
   /*
    * Faces follow the strokes.
@@ -4098,7 +4110,25 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     : `${selectedElev}${depthTab==="korban-bid" ? " - Coverage Areas" : " Elevation"}`}
                 </p>
 
-                {(depthTab==="full-bid" ? currentElevData.areas.slice(0,1) : currentElevData.areas).map((area,aIdx)=>{
+                {/*
+                  * Area one, then the rest only when they are wanted.
+                  *
+                  * Every face carries three coverage areas, and most faces
+                  * use one. Three full cards stacked down the panel made a
+                  * simple elevation look like a form to fill in, and pushed
+                  * the grip controls off the bottom of the screen. Two and
+                  * three are a single line until something is in them or the
+                  * estimator asks for them.
+                  */}
+                {(() => {
+                  const areas = depthTab==="full-bid"
+                    ? currentElevData.areas.slice(0,1)
+                    : currentElevData.areas;
+                  const extras = areas.slice(1);
+                  const extrasInUse = extras.some(a=>(a.rect&&a.lf>0) || selectedArea===a.areaIndex);
+                  if (extras.length === 0 || extrasInUse || showExtraAreas) return areas;
+                  return areas.slice(0,1);
+                })().map((area,aIdx)=>{
                   const hasData=area.rect&&area.lf>0;
                   const isSelected=selectedArea===area.areaIndex;
                   return (
@@ -4210,6 +4240,17 @@ export default function TakeoffWorkspaceAdvancedPage() {
                     </div>
                   );
                 })}
+
+                {/* The rest of the coverage areas, one line until asked for. */}
+                {depthTab!=="full-bid"&&!showExtraAreas&&
+                 currentElevData.areas.length>1&&
+                 !currentElevData.areas.slice(1).some(a=>(a.rect&&a.lf>0)||selectedArea===a.areaIndex)&&(
+                  <button
+                    onClick={()=>setShowExtraAreas(true)}
+                    className="w-full rounded-lg border border-dashed border-zinc-800 py-1.5 font-mono text-[9px] uppercase tracking-[0.1em] text-zinc-600 transition hover:border-orange-500/40 hover:text-orange-300">
+                    + {currentElevData.areas.length-1} more coverage area{currentElevData.areas.length-1===1?"":"s"} &mdash; for a face at two heights
+                  </button>
+                )}
 
                 {/* Multiple areas per elevation are a Korban Bid capability.
                     Full Bid keeps it to one grip per elevation. */}

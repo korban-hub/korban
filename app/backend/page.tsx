@@ -215,8 +215,8 @@ export default function BackendPage() {
           <FieldRow label="Worker Reach Height" hint="The top deck doesn't need to reach full wall height. Adjust for crew height - some companies use 5'.">
             <FeetInput value={scaffold.workerReachHeight} onChange={(v) => setScaffold({ ...scaffold, workerReachHeight: v })} />
           </FieldRow>
-          <FieldRow label="Screw Jack Max Extension" hint={`Range 1"-18". Default 12" keeps a safe margin below the physical limit.`}>
-            <InchesInput value={scaffold.screwJackMaxExtension} onChange={(v) => setScaffold({ ...scaffold, screwJackMaxExtension: Math.min(18, Math.max(1, v)) })} min={1} max={18} />
+          <FieldRow label="Screw Jack Max Extension" hint={`12" of exposed thread is the limit - Cal-OSHA Title 8 1646 and the manufacturers. Every stack on every page is figured with this number.`}>
+            <InchesInput value={scaffold.screwJackMaxExtension} onChange={(v) => setScaffold({ ...scaffold, screwJackMaxExtension: Math.min(12, Math.max(1, v)) })} min={1} max={12} />
           </FieldRow>
           <FieldRow label="Brace Pattern">
             <SegmentedControl value={scaffold.bracePattern} options={["Every Bay", "Every Other Bay", "Custom"]} onChange={(v) => setScaffold({ ...scaffold, bracePattern: v as ScaffoldDefaults["bracePattern"] })} />

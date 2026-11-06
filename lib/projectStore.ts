@@ -1,3 +1,5 @@
+import { layoutCurve, type CurveSide } from "@/lib/scaffoldSetOut";
+
 export type ScaffoldInput = {
   scaffoldWidth: number;
   standardBayLength: number;
@@ -5,6 +7,8 @@ export type ScaffoldInput = {
   plankCountPerBay: number;
   bracePattern: string;
   wallOffset: number;
+  /** Once read as a per-job jack travel; the jack is a Backend rule now and nothing reads this. Kept so old records load. */
+  screwJackMaxExtension?: number;
 };
 
 export type QuantityEngineInput = {
@@ -46,11 +50,9 @@ export type QuantityEngineInput = {
    */
   workerReachHeight?: number;
   /**
-   * Screw jack max travel in inches (physical range 0"-18"), used for
-   * final fine adjustment when stacking frames. Optional for backward
-   * compatibility; defaults to 18" (the full physical range) when not
-   * provided — callers can pass the backend's more conservative default
-   * (12") if they want a safety margin below the physical max.
+   * Screw jack max travel in inches, used for final fine adjustment when
+   * stacking frames. 12" of exposed thread is the limit; Backend holds the
+   * number and DEFAULT_SCREW_JACK_MAX_IN stands in when it is not passed.
    */
   screwJackMaxExtensionIn?: number;
 };
@@ -70,15 +72,28 @@ export type QuantityEngineOutput = {
   couplingPinCount: number;
   /** Realistic physical frame stack (6'-4"/5'/3' pieces) for the optimal option — see computeFrameMakeup. */
   frameMakeup: FrameMakeupPiece[];
-  /** Screw jack extension used for final fine adjustment, in inches (0–18). */
+  /** Screw jack extension used for final fine adjustment, in inches, within the Backend limit. */
   screwJackExtensionIn: number;
 };
+
+/**
+ * How a leg's stack is figured, when nothing better is known.
+ *
+ * The stack is the wall height less how far down the deck sits (the worker's
+ * reach), filled with frames, with the screw jack making up the last inches.
+ * Both numbers belong to Backend - these are only what stands in when a
+ * caller has no settings in hand, and they match Backend's own defaults. Every
+ * figure used to carry its own 18" of jack, so the Quick Bid and Set Scaffold
+ * could put a different frame on top of the same wall.
+ */
+export const DEFAULT_WORKER_REACH_FT = 6;
+export const DEFAULT_SCREW_JACK_MAX_IN = 12;
 
 export type FrameMakeupPiece = { size: number; label: string; qty: number };
 
 export type FrameMakeupResult = {
   pieces: FrameMakeupPiece[];
-  /** Screw jack extension used for final fine adjustment, in inches (0–18). */
+  /** Screw jack extension used for final fine adjustment, in inches, within the Backend limit. */
   screwJackExtensionIn: number;
   /** Total number of frame pieces stacked — this is what "frames tall" / level count means downstream. */
   frameTall: number;
@@ -568,8 +583,14 @@ export type ProjectRecord = {
    */
   onSiteContactName: string;
   onSiteContactPhone: string;
-  /** When the bid is due. Printed as the proposal date. */
+  /** When the bid is due. Printed in the proposal's project block as "Bid due". */
   bidDueDate: string;
+  /**
+   * The day the proposal went out, as yyyy-mm-dd. Stamped the first time it
+   * is printed, shared or sent, and editable after; empty until then, which
+   * is what makes a proposal a draft. Printed under the proposal number.
+   */
+  proposalIssuedDate: string;
   /** Union or non-union for this job. Defaults from Backend, overridable here. */
   unionStatus: string;
   /**
@@ -694,16 +715,58 @@ export type FreestandingPlan = {
  *
  * Where a walkway has to stay open, the base of every leg it passes is a
  * canopy frame - 6' wide to span the path, 7'-6" tall to clear a person -
- * rather than a standard one. The coverage question decided how many legs
- * that is; until now it decided nothing at all.
+ * in place of the bottom standard frame. The stack above is re-figured from
+ * 7'-6" up to reach the same height: one 6'-4" fewer, usually a 5' and a
+ * couple of inches of jack. The canopy's double pins take two crosses a
+ * side, its top is planked out, and the frames above sit on saddle pins.
  */
 export type TunnelPlan = {
   /** Legs the tunnel passes, which is how many canopy frames it takes. */
   legs: number;
+  /** Bays between those legs: braced and planked at the canopy lift. */
+  bays: number;
   /** "lineal", "elevation" or "full" - how the run was described. */
   coverage: string;
+  /** The standard frames above the canopy on a tunnel leg. */
+  makeup: FrameMakeupPiece[];
+  frameTall: number;
+  screwJackExtensionIn: number;
   parts: { partNo: string; qty: number; note?: string }[];
 };
+
+/** The pedestrian canopy frame and what goes with it. */
+export const CANOPY = {
+  partNo: "FO7CF",
+  heightFt: 7.5,
+  widthFt: 6,
+  /** Double pins: two crosses a side, every bay, at the canopy lift. Same brace the bay already uses. */
+  bracesPerBay: 4,
+  /** The canopy is planked out on top, over and above the decking of the lifts. */
+  planksPerBay: 8,
+  /** Saddle pins, two a leg. The frames above sit on these, so that joint takes no coupling pins. */
+  saddlePinPartNo: "BP3/CBP",
+  saddlePinsPerLeg: 2,
+} as const;
+
+/** The stack above a canopy frame: the same height, re-figured from 7'-6" up. */
+export function canopyStack(effectiveStackHeightFt: number, screwJackMaxExtensionIn = DEFAULT_SCREW_JACK_MAX_IN): FrameMakeupResult {
+  return computeFrameMakeup(Math.max(0, effectiveStackHeightFt - CANOPY.heightFt), screwJackMaxExtensionIn);
+}
+
+/** What a tunnel adds, as parts. The frames it takes away come off the scaffold's own frame line. */
+export function tunnelParts(legs: number, bays: number, bayLengthFt: number, scaffoldWidthFt: number) {
+  if (legs <= 0) return [];
+  const parts = partsForConfiguration(scaffoldWidthFt, bayLengthFt);
+  const out: { partNo: string; qty: number; note?: string }[] = [
+    { partNo: CANOPY.partNo, qty: legs, note: `Canopy frame, 6'-0" x 7'-6" - one per leg under the tunnel, in place of the bottom frame` },
+    { partNo: CANOPY.saddlePinPartNo, qty: legs * CANOPY.saddlePinsPerLeg, note: "Saddle pins, two a leg - the frames above sit on these" },
+  ];
+  if (bays > 0) {
+    out.push({ partNo: parts.brace, qty: bays * CANOPY.bracesPerBay, note: "Canopy lift - double pins, two crosses a side" });
+    out.push({ partNo: parts.plank, qty: bays * CANOPY.planksPerBay, note: "Canopy planked out, 8 a bay" });
+  }
+  return out;
+}
 
 /**
  * What working around obstructions costs - carried, not buried.
@@ -763,7 +826,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asString(value: unknown, fallback: string) {
+function asString(value: unknown, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
@@ -1037,7 +1100,7 @@ const FRAME_SIZES: { size: number; label: string }[] = [
 
 /**
  * Finds realistic physical frame stacks (combinations of 6'-4", 5', and
- * 3' frames, fine-tuned by a screw jack with 0"-18" travel) that reach a
+ * 3' frames, fine-tuned by a screw jack within its allowed travel) that reach a
  * given effective height. Returns up to `maxOptions` distinct valid
  * combinations, ranked by fewest total pieces first (most practical to
  * assemble), so callers can offer the optimal stack plus real
@@ -1053,7 +1116,7 @@ const FRAME_SIZES: { size: number; label: string }[] = [
  */
 export function findFrameMakeupOptions(
   effectiveHeightFt: number,
-  screwJackMaxExtensionIn = 18,
+  screwJackMaxExtensionIn = DEFAULT_SCREW_JACK_MAX_IN,
   maxOptions = 3,
 ): FrameMakeupResult[] {
   const jackMaxFt = Math.max(0, screwJackMaxExtensionIn) / 12;
@@ -1117,7 +1180,7 @@ export function findFrameMakeupOptions(
 }
 
 /** Convenience wrapper — just the single best (fewest-piece) frame makeup. */
-export function computeFrameMakeup(effectiveHeightFt: number, screwJackMaxExtensionIn = 18): FrameMakeupResult {
+export function computeFrameMakeup(effectiveHeightFt: number, screwJackMaxExtensionIn = DEFAULT_SCREW_JACK_MAX_IN): FrameMakeupResult {
   return findFrameMakeupOptions(effectiveHeightFt, screwJackMaxExtensionIn, 1)[0];
 }
 
@@ -1146,8 +1209,14 @@ export const MATERIAL_RULE_DEFAULTS = {
  * default of 2, and a UI helper returning 3/4/6. Both are corrected here
  * to the single source of truth.
  */
+/**
+ * Plank a level by frame width: 3 on a 3', 4 on a 3'-6", 6 on a 5'. The
+ * frame width comes from the frame type selected or from what the finish
+ * rule picks, so the plank count follows the frame automatically. The 5'
+ * figure was 5 here and 6 on the page; 6 is the yard's number.
+ */
 export function planksPerBayForWidth(scaffoldWidthFt: number): number {
-  if (scaffoldWidthFt >= 5) return 5;
+  if (scaffoldWidthFt >= 5) return 6;
   if (scaffoldWidthFt >= 3.5) return 4;
   return 3;
 }
@@ -1157,8 +1226,8 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
   const wallHeight = Math.max(0, asNumber(input.wallHeight, 0));
   const standardBayLength = Math.max(1, asNumber(input.standardBayLength, defaultScaffoldInput.standardBayLength));
   const scaffoldWidth = Math.max(0, asNumber(input.scaffoldWidth, defaultScaffoldInput.scaffoldWidth));
-  const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, 6));
-  const screwJackMaxExtensionIn = Math.max(0, asNumber(input.screwJackMaxExtensionIn, 18));
+  const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, DEFAULT_WORKER_REACH_FT));
+  const screwJackMaxExtensionIn = Math.max(0, asNumber(input.screwJackMaxExtensionIn, DEFAULT_SCREW_JACK_MAX_IN));
 
   const bracesPerBayPerLift = Math.max(0, asNumber(input.crossBracesPerBayPerLift, MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift));
   const railTop = Math.max(0, asNumber(input.guardrailTopPerBay, MATERIAL_RULE_DEFAULTS.guardrailTopPerBay));
@@ -1220,6 +1289,63 @@ export function calculateQuantityEngine(input: QuantityEngineInput): QuantityEng
     couplingPinCount,
     frameMakeup: makeup.pieces,
     screwJackExtensionIn: makeup.screwJackExtensionIn,
+  };
+}
+
+/**
+ * A tank, by the curve rule.
+ *
+ * Square bays round the shell - each with its own two frames, set square to
+ * its own chord - and the wedge between one bay and the next planked across.
+ * Neighbouring frames never closer than a foot at their nearest point. 5'
+ * bays unless the estimator says otherwise. Outside, inside or both; the
+ * inside is its own ring on its own radius. Every bay buys braces and plank;
+ * every wedge buys plank and two rails a level and nothing else.
+ */
+export function calculateTankQuantityEngine(input: QuantityEngineInput & {
+  outsideRadiusFt: number;
+  insideRadiusFt?: number;
+  sides: CurveSide | "both";
+  curveBayFt?: number;
+}): QuantityEngineOutput & { wedgeCount: number; bayFt: number; faces: { side: CurveSide; bays: number; wedges: number; radiusFt: number }[] } {
+  const wallHeight = Math.max(0, asNumber(input.wallHeight, 0));
+  const scaffoldWidth = Math.max(0, asNumber(input.scaffoldWidth, defaultScaffoldInput.scaffoldWidth));
+  const workerReachHeight = Math.max(0, asNumber(input.workerReachHeight, DEFAULT_WORKER_REACH_FT));
+  const screwJackMaxExtensionIn = Math.max(0, asNumber(input.screwJackMaxExtensionIn, DEFAULT_SCREW_JACK_MAX_IN));
+  const bracesPerBayPerLift = Math.max(0, asNumber(input.crossBracesPerBayPerLift, MATERIAL_RULE_DEFAULTS.crossBracesPerBayPerLift));
+  const railTop = Math.max(0, asNumber(input.guardrailTopPerBay, MATERIAL_RULE_DEFAULTS.guardrailTopPerBay));
+  const railMid = Math.max(0, asNumber(input.guardrailIntermediatePerBay, MATERIAL_RULE_DEFAULTS.guardrailIntermediatePerBay));
+  const pinsPerFrame = Math.max(0, asNumber(input.couplingPinsPerFrame, MATERIAL_RULE_DEFAULTS.couplingPinsPerFrame));
+  const planksPerBay = input.plankCountPerBay > 0 ? Math.ceil(asNumber(input.plankCountPerBay, 0)) : planksPerBayForWidth(scaffoldWidth);
+  const bayFt = Math.max(1, input.curveBayFt ?? 5);
+  const standoff = Math.max(0, asNumber(input.wallOffset, 1));
+
+  const makeup = computeFrameMakeup(Math.max(0, wallHeight - workerReachHeight), screwJackMaxExtensionIn);
+  const lifts = Math.max(1, makeup.frameTall);
+
+  const sides: CurveSide[] = input.sides === "both" ? ["outside", "inside"] : [input.sides];
+  const faces: { side: CurveSide; bays: number; wedges: number; radiusFt: number }[] = [];
+  let bayCount = 0, wedgeCount = 0;
+  for (const side of sides) {
+    const r = side === "inside" ? (input.insideRadiusFt ?? input.outsideRadiusFt) : input.outsideRadiusFt;
+    if (!(r > 0)) continue;
+    const layout = layoutCurve({ cx: 0, cy: 0, r, a0: 0, sweep: 2 * Math.PI, closed: true }, side, {
+      puf: 1, bayFt, frameWidthFt: scaffoldWidth, standoffFt: standoff, clearanceFt: 1,
+    });
+    faces.push({ side, bays: layout.bays.length, wedges: layout.wedges.length, radiusFt: r });
+    bayCount += layout.bays.length; wedgeCount += layout.wedges.length;
+  }
+  const legCount = bayCount * 2;                                   // two frames a bay, none shared
+  const frameCount = legCount * lifts;
+  const couplingPinCount = legCount * Math.max(0, lifts - 1) * pinsPerFrame;
+  const crossBraceCount = bayCount * lifts * bracesPerBayPerLift;
+  const plankCount = (bayCount + wedgeCount) * lifts * planksPerBay;
+  const guardrailCount = bayCount * (railTop + Math.max(0, lifts - 1) * railMid) + wedgeCount * lifts * 2;
+  return {
+    bayCount, legCount, jumps: lifts, frameTall: lifts, frameCount, plankCount, crossBraceCount, guardrailCount,
+    basePlateCount: legCount, screwJackCount: legCount, couplingPinCount,
+    frameMakeup: makeup.pieces, screwJackExtensionIn: makeup.screwJackExtensionIn,
+    wedgeCount, bayFt, faces,
   };
 }
 
@@ -1356,6 +1482,7 @@ export function createEmptyProject(
     onSiteContactName: "",
     onSiteContactPhone: "",
     bidDueDate: "",
+    proposalIssuedDate: "",
     unionStatus: "",
     bidStatus: "Draft",
     updatedAt: nowIso(),
@@ -1389,6 +1516,7 @@ function createDemoProject(): ProjectRecord {
     contactEmail: "estimating@turner.com",
     contactPhone: "(510) 555-0138",
     bidDueDate: "06/14/26",
+    proposalIssuedDate: "",
     unionStatus: "Union",
     bidStatus: "Ready To Send",
     estimateDepth: "korban-bid",
@@ -1484,7 +1612,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
      * the shape of the record changed underneath them.
      */
     sectionViews: (() => {
-      const stored = normalizeSectionViews(value.sectionViews);
+      const stored = normalizeSectionViews(record.sectionViews);
       if (stored.length > 0) return stored;
       const outline = asArray<unknown>(sectionRecord.wallOutline)
         .map(normalizePoint).filter((p): p is StoredPoint => Boolean(p));
@@ -1533,8 +1661,19 @@ function normalizeElevation(value: unknown): ProjectElevation {
           if (!partNo || qty <= 0) return null;
           return { partNo, qty, note: typeof row.note === "string" ? row.note : undefined };
         })
-        .filter((row): row is { partNo: string; qty: number; note?: string } => Boolean(row));
-      return { legs: asNumber(t.legs, 0), coverage: asString(t.coverage, "full"), parts };
+        .flatMap((row) => (row ? [row] : []));
+      const makeup = asArray<unknown>(t.makeup)
+        .map((row) => (isRecord(row) ? { size: asNumber(row.size, 0), label: asString(row.label, ""), qty: asNumber(row.qty, 0) } : null))
+        .filter((row): row is FrameMakeupPiece => Boolean(row && row.qty > 0));
+      return {
+        legs: asNumber(t.legs, 0),
+        bays: asNumber(t.bays, 0),
+        coverage: asString(t.coverage, "full"),
+        makeup,
+        frameTall: asNumber(t.frameTall, makeup.reduce((sum, piece) => sum + piece.qty, 0)),
+        screwJackExtensionIn: asNumber(t.screwJackExtensionIn, 0),
+        parts,
+      };
     })(),
     freestanding: (() => {
       const fs = record.freestanding;
@@ -1547,7 +1686,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
           if (!partNo || qty <= 0) return null;
           return { partNo, qty, note: typeof row.note === "string" ? row.note : undefined };
         })
-        .filter((row): row is { partNo: string; qty: number; note?: string } => Boolean(row));
+        .flatMap((row) => (row ? [row] : []));
       return {
         mode: asString(fs.mode, "none"),
         runs: asNumber(fs.runs, 0),
@@ -1625,6 +1764,7 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     onSiteContactName: asString(record.onSiteContactName),
     onSiteContactPhone: asString(record.onSiteContactPhone),
     bidDueDate: asString(record.bidDueDate, fallback.bidDueDate),
+    proposalIssuedDate: asString(record.proposalIssuedDate),
     unionStatus: asString(record.unionStatus, fallback.unionStatus),
     bidStatus: (BID_STATUSES as readonly string[]).includes(record.bidStatus as string)
       ? (record.bidStatus as BidStatus)
@@ -1996,10 +2136,14 @@ export function layoutSection(options: {
    * drawn 6'-4" and the section overshoots the wall it is meant to fit.
    */
   jumpHeightsFt?: number[];
+  /** How far down the deck sits from the top of a band, and the jack travel that makes up the rest. Backend's numbers. */
+  workerReachFt?: number;
+  screwJackMaxIn?: number;
 }): SectionDraftingItem[] {
   const {
     profile, pageUnitsPerFoot: puf,
     frameHeightFt = 6.333, scaffoldWidthFt, planksPerDeck, side = "left",
+    workerReachFt = DEFAULT_WORKER_REACH_FT, screwJackMaxIn = DEFAULT_SCREW_JACK_MAX_IN,
   } = options;
   const jumpsFt = options.jumpHeightsFt && options.jumpHeightsFt.length > 0
     ? options.jumpHeightsFt
@@ -2271,8 +2415,8 @@ export function layoutSection(options: {
     const floating = !standsOnLedge;
     const frontBracket = offsetFt > MAX_OFFSET_FT + 1e-6 ? bracketFor(offsetFt) : null;
 
-    const deckFt = Math.max(0, bandFt - 6);
-    const makeup = computeFrameMakeup(deckFt, 18);
+    const deckFt = Math.max(0, bandFt - workerReachFt);
+    const makeup = computeFrameMakeup(deckFt, screwJackMaxIn);
     const heights: number[] = [];
     [...makeup.pieces].sort((m, n) => n.size - m.size)
       .forEach((piece) => { for (let i = 0; i < piece.qty; i++) heights.push(piece.size); });
@@ -2606,9 +2750,9 @@ export function computeElevationOnlyTotals(
   },
 ): ElevationOnlyTotals {
   const bayLen = Math.max(1, opts?.bayLengthFt ?? elevation?.scaffoldInput?.standardBayLength ?? 10);
-  const reach = Math.max(0, opts?.workerReachHeight ?? 6);
+  const reach = Math.max(0, opts?.workerReachHeight ?? DEFAULT_WORKER_REACH_FT);
   const ppb = Math.max(0, opts?.plankCountPerBay ?? planksPerBayForWidth(elevation?.scaffoldInput?.scaffoldWidth ?? 3));
-  const jackMax = opts?.screwJackMaxExtensionIn ?? 18;
+  const jackMax = opts?.screwJackMaxExtensionIn ?? DEFAULT_SCREW_JACK_MAX_IN;
 
   type Run = { lf: number; heightFt: number };
   const runs: Run[] = [];

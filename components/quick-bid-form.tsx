@@ -17,8 +17,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  calculateQuantityEngine, getActiveElevation, partsForConfiguration,
-  planksPerBayForWidth, saveActiveElevation,
+  calculateQuantityEngine, calculateTankQuantityEngine, canopyStack, DEFAULT_SCREW_JACK_MAX_IN, DEFAULT_WORKER_REACH_FT,
+  getActiveElevation, partsForConfiguration, planksPerBayForWidth, saveActiveElevation,
+  tunnelParts as tunnelParts_,
 } from "@/lib/projectStore";
 import {
   getBackendSettings,
@@ -37,7 +38,7 @@ const FACES: FaceKey[] = ["north", "east", "south", "west"];
 type TunnelCoverage = "lineal" | "elevation" | "full";
 
 type Form = {
-  placement: "exterior" | "interior";
+  placement: "exterior" | "interior" | "both";
   coverage: "full" | "partial";
   faces: Record<FaceKey, boolean>;
   /** Lineal feet per face. Entered side by side so a plan can be drawn. */
@@ -59,6 +60,8 @@ type Form = {
   tankLengthFt: string;
   tankHeightFt: string;
   tankInnerFt: string;
+  /** Bays on the shell: square bays round the curve, 5' unless the estimator says otherwise. */
+  tankBayFt: number;
   floor: "flat" | "sloped";
   access: "manhole" | "door";
 
@@ -96,6 +99,7 @@ const BLANK: Form = {
   tankLengthFt: "",
   tankHeightFt: "",
   tankInnerFt: "",
+  tankBayFt: 5,
   floor: "flat",
   access: "manhole",
   obstructions: "none",
@@ -533,6 +537,10 @@ export default function QuickBidForm() {
 
   const derived = useMemo(() => {
     const backend = getBackendSettings();
+    // How far down the deck sits and how much the jack can make up: Backend's
+    // numbers, the same ones Set Scaffold and the section view figure with.
+    const reachFt = backend.scaffold.workerReachHeight ?? DEFAULT_WORKER_REACH_FT;
+    const jackMaxIn = backend.scaffold.screwJackMaxExtension ?? DEFAULT_SCREW_JACK_MAX_IN;
     const rule = governingFinishRule(form.finishes, backend);
 
     // Planks follow the finish unless width was set by hand, in which case
@@ -559,13 +567,15 @@ export default function QuickBidForm() {
     let height = 0;
     const perFace: { face: string; lf: number; ht: number }[] = [];
 
+    let tankOutsideR = 0, tankInsideR = 0;
     if (structure === "tank") {
-      lf = parseFloat(form.tankLengthFt) || 0;
-      if (form.measureBy === "radius") lf = 2 * Math.PI * lf;
-      if (form.placement === "interior") {
-        const inner = parseFloat(form.tankInnerFt) || 0;
-        if (inner > 0) lf = form.measureBy === "radius" ? 2 * Math.PI * inner : inner;
-      }
+      const outer = parseFloat(form.tankLengthFt) || 0;
+      const inner = parseFloat(form.tankInnerFt) || 0;
+      tankOutsideR = form.measureBy === "radius" ? outer : outer / (2 * Math.PI);
+      tankInsideR = inner > 0 ? (form.measureBy === "radius" ? inner : inner / (2 * Math.PI)) : tankOutsideR;
+      lf = 2 * Math.PI * tankOutsideR;
+      if (form.placement === "interior") lf = 2 * Math.PI * tankInsideR;
+      if (form.placement === "both") lf = 2 * Math.PI * (tankOutsideR + tankInsideR);
       height = parseFloat(form.tankHeightFt) || 0;
     } else {
       FACES.forEach((face) => {
@@ -593,7 +603,33 @@ export default function QuickBidForm() {
 
     // Each face is counted at its own height, then summed - a stepped
     // building priced at its tallest wall is a building priced wrong.
-    const engines = perFace.length
+    /*
+     * A tank is not a straight run of its circumference. It is square bays
+     * round a curve - two frames each, wedges planked between - outside,
+     * inside or both, each ring on its own radius. The curve rule in
+     * lib/scaffoldSetOut lays it; this counts it.
+     */
+    const tankEngine = structure === "tank" && tankOutsideR > 0
+      ? calculateTankQuantityEngine({
+          linearFeet: lf,
+          wallHeight: height,
+          standardBayLength: form.bayFt,
+          scaffoldWidth: form.widthFt,
+          frameHeight: 6.333,
+          plankCountPerBay: planksPerJump,
+          bracePattern: "Every Bay",
+          wallOffset: 1,
+          workerReachHeight: reachFt,
+          screwJackMaxExtensionIn: jackMaxIn,
+          outsideRadiusFt: tankOutsideR,
+          insideRadiusFt: tankInsideR,
+          sides: form.placement === "both" ? "both" : form.placement === "interior" ? "inside" : "outside",
+          curveBayFt: form.tankBayFt,
+        })
+      : null;
+    const engines = tankEngine
+      ? [tankEngine]
+      : perFace.length
       ? perFace.map((row) =>
           calculateQuantityEngine({
             linearFeet: row.lf,
@@ -604,7 +640,8 @@ export default function QuickBidForm() {
             plankCountPerBay: planksPerJump,
             bracePattern: "Every Bay",
             wallOffset: 1,
-            workerReachHeight: 6,
+            workerReachHeight: reachFt,
+            screwJackMaxExtensionIn: jackMaxIn,
           })
         )
       : [
@@ -617,7 +654,8 @@ export default function QuickBidForm() {
             plankCountPerBay: planksPerJump,
             bracePattern: "Every Bay",
             wallOffset: 1,
-            workerReachHeight: 6,
+            workerReachHeight: reachFt,
+            screwJackMaxExtensionIn: jackMaxIn,
           }),
         ];
 
@@ -886,31 +924,46 @@ export default function QuickBidForm() {
      * does not. How many legs that is, is exactly what the coverage question
      * was asking - it just had nothing to do with the answer until now.
      */
-    const legsFor = (runLf: number) =>
-      runLf > 0 ? Math.ceil(runLf / Math.max(1, form.bayFt)) + 1 : 0;
+    const baysFor = (runLf: number) => (runLf > 0 ? Math.ceil(runLf / Math.max(1, form.bayFt)) : 0);
+    const legsFor = (runLf: number) => (runLf > 0 ? baysFor(runLf) + 1 : 0);
+    const tunnelFaces = FACES.filter((face) => form.tunnelFaces[face]);
+    const faceLf = (face: string) => perFace.find((row) => row.face === face)?.lf ?? 0;
     const tunnelLegs = !form.pedestrian
       ? 0
       : form.tunnelCoverage === "full"
         ? q.legCount
         : form.tunnelCoverage === "lineal"
           ? legsFor(parseFloat(form.tunnelLf) || 0)
-          : FACES.filter((face) => form.tunnelFaces[face]).reduce(
-              (sum, face) => sum + legsFor(perFace.find((row) => row.face === face)?.lf ?? 0),
-              0,
-            );
-    const tunnelParts = tunnelLegs > 0
-      ? [{
-          partNo: "FO7CF",
-          qty: tunnelLegs,
-          note: `Canopy frame, 6'-0" x 7'-6" - one per leg under the tunnel`,
-        }]
-      : [];
+          : tunnelFaces.reduce((sum, face) => sum + legsFor(faceLf(face)), 0);
+    const tunnelBays = !form.pedestrian
+      ? 0
+      : form.tunnelCoverage === "full"
+        ? q.bayCount
+        : form.tunnelCoverage === "lineal"
+          ? baysFor(parseFloat(form.tunnelLf) || 0)
+          : tunnelFaces.reduce((sum, face) => sum + baysFor(faceLf(face)), 0);
+    /*
+     * A tunnel leg stands on a canopy frame in place of its bottom frame, and
+     * the stack above is re-figured from 7'-6" up to reach the same height -
+     * one 6'-4" fewer, usually a 5' and a couple of inches of jack. The
+     * canopy takes double crosses, eight planks a bay and two saddle pins a
+     * leg; the frames it displaces come off the frame count below.
+     */
+    const tunnelStack = tunnelLegs > 0 ? canopyStack(Math.max(0, height - reachFt), jackMaxIn) : null;
+    const tunnelParts = tunnelLegs > 0 ? tunnelParts_(tunnelLegs, tunnelBays, form.bayFt, form.widthFt) : [];
+    const framesDisplaced = tunnelStack ? tunnelLegs * Math.max(0, q.frameTall - tunnelStack.frameTall) : 0;
 
     return {
       free,
       freeParts,
+      tankEngine,
+      tankOutsideR,
+      tankInsideR,
       tunnelLegs,
+      tunnelBays,
+      tunnelStack,
       tunnelParts,
+      framesDisplaced,
       obstructionHours,
       materialPercent,
       lf: Math.round(lf * 10) / 10,
@@ -1030,10 +1083,43 @@ export default function QuickBidForm() {
         const hasRealScale = typeof storedPuf === "number" && storedPuf > 0;
         const puf = hasRealScale ? storedPuf : 1;
 
-        const tunnelPlan = derived.tunnelParts.length > 0
-          ? { legs: derived.tunnelLegs, coverage: form.tunnelCoverage, parts: derived.tunnelParts }
+        const tunnelPlan = derived.tunnelParts.length > 0 && derived.tunnelStack
+          ? {
+              legs: derived.tunnelLegs,
+              bays: derived.tunnelBays,
+              coverage: form.tunnelCoverage,
+              makeup: derived.tunnelStack.pieces,
+              frameTall: derived.tunnelStack.frameTall,
+              screwJackExtensionIn: derived.tunnelStack.screwJackExtensionIn,
+              parts: derived.tunnelParts,
+            }
           : null;
 
+        /*
+         * A tank goes to Set Scaffold as the circle it is - traced as a ring of
+         * short clicks, which is what the engine reads a curve from - so the
+         * page lays the square bays and wedges round it instead of a straight
+         * run of the circumference.
+         */
+        const tankRow = derived.tankEngine && derived.tankOutsideR > 0
+          ? [{
+              id: 1,
+              isKeyFloor: true,
+              overlayType: "Level",
+              level: "Main Level",
+              points: Array.from({ length: 72 }, (_, k) => {
+                const a = (k / 72) * 2 * Math.PI;
+                const r = derived.tankOutsideR * puf;
+                return { x: r + r * Math.cos(a), y: r + r * Math.sin(a) };
+              }),
+              closed: true,
+              linealFeet: 2 * Math.PI * derived.tankOutsideR,
+              color: "#f97316",
+              pageNumber: 1,
+              refPoint: null,
+              alignedPoints: [],
+            }]
+          : [];
         const planRow = derived.plan
           ? [{
               id: 1,
@@ -1053,7 +1139,7 @@ export default function QuickBidForm() {
               refPoint: null,
               alignedPoints: [],
             }]
-          : [];
+          : tankRow;
 
         /*
          * Everything else in overlayGeometry is left exactly as it was - the
@@ -1084,6 +1170,13 @@ export default function QuickBidForm() {
             plankCountPerBay: derived.planksPerJump,
           },
           quantityEngine: { ...elevation.quantityEngine, ...derived.q },
+          /*
+           * How the curve is built, for Set Scaffold to lay the same bays: the
+           * bay size on the shell and which sides get a ring.
+           */
+          ...(derived.tankEngine
+            ? { curveBayFt: form.tankBayFt, curveSides: form.placement === "both" ? "both" : form.placement === "interior" ? "inside" : "outside" }
+            : {}),
           /*
            * What the scaffold is for. Never stored before, so the proposal and
            * the load list could not say which trades the steel was built to
@@ -1177,11 +1270,15 @@ export default function QuickBidForm() {
 
           <div className="space-y-5">
             <Group step="01" title="Scope">
-              <Row label="Scaffold placement">
-                <Segmented
+              <Row label="Scaffold placement" hint={structure === "tank" ? "A tank can take a ring outside, inside, or both" : undefined}>
+                <Segmented<Form["placement"]>
                   value={form.placement}
                   onChange={(v) => set("placement", v)}
-                  options={[{ v: "exterior", label: "Exterior" }, { v: "interior", label: "Interior" }]}
+                  options={[
+                    { v: "exterior", label: structure === "tank" ? "Outside" : "Exterior" },
+                    { v: "interior", label: structure === "tank" ? "Inside" : "Interior" },
+                    ...(structure === "tank" ? [{ v: "both" as const, label: "Both" }] : []),
+                  ]}
                 />
               </Row>
               <Row label="Coverage" hint={structure === "tank" ? "Whole shell or a section" : "Whole building or selected sides"}>
@@ -1264,11 +1361,18 @@ export default function QuickBidForm() {
                   <Row label={form.measureBy === "radius" ? "Outside radius" : "Outside circumference"}>
                     <NumField value={form.tankLengthFt} onChange={(v) => set("tankLengthFt", v)} unit="ft" placeholder="0" />
                   </Row>
-                  {form.placement === "interior" && (
-                    <Row label={form.measureBy === "radius" ? "Inside radius" : "Inside circumference"}>
+                  {form.placement !== "exterior" && (
+                    <Row label={form.measureBy === "radius" ? "Inside radius" : "Inside circumference"} hint="Leave blank for a thin shell - the outside figure is used">
                       <NumField value={form.tankInnerFt} onChange={(v) => set("tankInnerFt", v)} unit="ft" placeholder="0" />
                     </Row>
                   )}
+                  <Row label="Bay size on the shell" hint="Square bays round the curve, each with its own two frames, the wedge between planked. 5' is the rule; change it only if the job calls for it.">
+                    <Segmented
+                      value={String(form.tankBayFt)}
+                      onChange={(v) => set("tankBayFt", Number(v))}
+                      options={[4, 5, 6, 7, 8, 10].map((b) => ({ v: String(b), label: `${b}'` }))}
+                    />
+                  </Row>
                   <Row label="Shell height">
                     <NumField value={form.tankHeightFt} onChange={(v) => set("tankHeightFt", v)} unit="ft" placeholder="0" />
                   </Row>
@@ -1418,8 +1522,10 @@ export default function QuickBidForm() {
                         </div>
                       )}
                       <p className="text-[10px] leading-4 text-zinc-600">
-                        A tunnel adds canopy frames where it runs, and goes on the
-                        proposal as an alternate.
+                        A canopy frame takes the place of the bottom frame on every leg
+                        the tunnel passes; the stack above is re-figured to the same height.
+                        Double crosses and eight planks a bay at the canopy, two saddle pins
+                        a leg. Goes on the proposal as an alternate.
                       </p>
                     </div>
                   </Row>
@@ -1596,7 +1702,10 @@ export default function QuickBidForm() {
 
                 <div className="mt-4 space-y-1">
                   {[
-                    ["Scaffold frame", derived.q.frameCount],
+                    ...(derived.tankEngine
+                      ? ([[`Square ${derived.tankEngine.bayFt}' bays round the shell`, derived.tankEngine.bayCount], ["Wedges planked between bays", derived.tankEngine.wedgeCount]] as [string, number][])
+                      : []),
+                    ["Scaffold frame", derived.q.frameCount - derived.framesDisplaced],
                     ["Wood plank", derived.q.plankCount + derived.bracketPlankCount],
                     ["Cross brace", derived.q.crossBraceCount],
                     ["Guard rail", derived.q.guardrailCount],
@@ -1604,7 +1713,12 @@ export default function QuickBidForm() {
                     ["Base plate", derived.q.basePlateCount],
                     ["Screw jack", derived.q.screwJackCount],
                     ...(derived.tunnelLegs > 0
-                      ? ([["Canopy frame FO7CF", derived.tunnelLegs]] as [string, number][])
+                      ? ([
+                          ["Canopy frame FO7CF", derived.tunnelLegs],
+                          ["Saddle pin BP3/CBP", derived.tunnelLegs * 2],
+                          ["Canopy cross brace", derived.tunnelBays * 4],
+                          ["Canopy plank", derived.tunnelBays * 8],
+                        ] as [string, number][])
                       : []),
                     ...(derived.brackets > 0
                       ? ([[`Side bracket ${derived.bracketPartNo}`, derived.brackets]] as [string, number][])
@@ -1677,6 +1791,38 @@ export default function QuickBidForm() {
                           </div>
                         );
                       })}
+                      {derived.tunnelStack && derived.tunnelLegs > 0 && (
+                        <div className="mt-1.5 border-t border-white/8 pt-1 space-y-0.5">
+                          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-600">
+                            Under the tunnel - {derived.tunnelLegs} legs
+                          </p>
+                          <div className="grid grid-cols-[58px_1fr_34px] items-baseline gap-2">
+                            <span className="font-mono text-[10px] font-bold text-orange-400">FO7CF</span>
+                            <span className="truncate text-[11.5px] text-zinc-300">Canopy frame 7&apos;-6&quot; x 6&apos;, in place of the bottom frame</span>
+                            <span className="text-right font-mono text-[12px] font-bold text-orange-300">1</span>
+                          </div>
+                          {derived.tunnelStack.pieces.map((piece) => {
+                            const parts = partsForConfiguration(form.widthFt, form.bayFt);
+                            const partNo = piece.label.startsWith("6")
+                              ? parts.frame
+                              : piece.label.startsWith("5")
+                              ? parts.frame5
+                              : parts.frame3;
+                            return (
+                              <div key={`tunnel-${piece.label}`} className="grid grid-cols-[58px_1fr_34px] items-baseline gap-2">
+                                <span className="font-mono text-[10px] font-bold text-orange-400">{partNo}</span>
+                                <span className="truncate text-[11.5px] text-zinc-300">{frameName(piece.label, form.widthFt)}</span>
+                                <span className="text-right font-mono text-[12px] font-bold text-orange-300">{piece.qty}</span>
+                              </div>
+                            );
+                          })}
+                          {derived.tunnelStack.screwJackExtensionIn > 0.5 && (
+                            <p className="text-[10px] text-zinc-600">
+                              {Math.round(derived.tunnelStack.screwJackExtensionIn)}&quot; of jack to make the height
+                            </p>
+                          )}
+                        </div>
+                      )}
                       {(() => {
                         const parts = partsForConfiguration(form.widthFt, form.bayFt);
                         const perLeg: [string, string, number][] = [
