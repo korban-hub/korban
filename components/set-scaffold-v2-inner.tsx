@@ -6,11 +6,12 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, stockingHours } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
 import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 import { readInsets, setOut, setOutRuns, type BaySpan, type LegResult, type PlanPoint, type SegmentLegs } from "@/lib/scaffoldSetOut";
+import { buildScaffoldModel, hatchBoardPart, pickHatchBays, type LegStack, type PartKind, type ScaffoldModel, type Vec3 } from "@/lib/scaffoldModel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 // PlanPoint, LegResult, BaySpan and SegmentLegs come from the set-out engine
@@ -154,57 +155,48 @@ function legLabelSize(tickLenPx: number): number {
 // This file used to carry its own version and every rule in it was a guess
 // that happened to work on rectangles. Now it asks the engine and draws.
 
-// ── Three.js 3D model — full building perimeter ───────────────────────────────
-function ScaffoldModel3D({
-  outline, segments = [], puf, bayFt, widthFt, frameTall, scaffoldWidthFt, interiorWalls = []
-}: {
-  outline: PlanPoint[];
-  /** Open runs, for a job whose plan is highlighter strokes rather than a trace. */
-  segments?: { a: PlanPoint; b: PlanPoint }[];
-  puf: number; bayFt: number; widthFt: number;
-  frameTall: number; scaffoldWidthFt: number;
-  /** Walls where the scaffold sits interior, by index on the outline. */
-  interiorWalls?: number[];
-}) {
+// ── Three.js 3D model — the engine's scaffold in the air ──────────────────────
+/*
+ * Draws lib/scaffoldModel's pieces: every post, ledger, brace, plank, rail,
+ * jack, bracket, hatch board and ladder the plan set out, each run at its own
+ * height. It used to re-figure its own scaffold from the outline - equal bays
+ * on every wall, one height everywhere, no corners, insets, turnarounds or
+ * curves - so it was a picture of a scaffold, not the scaffold. Now it draws
+ * the same legs and bays the plan draws.
+ *
+ * Each kind of part is one geometry stamped once per piece (InstancedMesh),
+ * so a job of a few thousand pieces costs the GPU what a few dozen did when
+ * every tube was its own mesh - which is what froze the browser on big jobs.
+ */
+function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLImageElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const frameRef = useRef<number>(0);
   const [rotating, setRotating] = useState(true);
   const [zoom, setZoom] = useState(1);
-  const [snapshot, setSnapshot] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!mountRef.current) return;
+    if (!mountRef.current || !model || model.pieces.length === 0) return;
     const W = mountRef.current.clientWidth, H = mountRef.current.clientHeight;
-    // If the container has no size yet (can happen right as a tab/panel
-    // becomes visible, before layout settles), clamp to a safe minimum
-    // instead of building a scene with a NaN/zero camera aspect ratio —
-    // that produces a canvas that looks frozen/static even though the
-    // render loop is technically still running. The resize observer
-    // below corrects the real size as soon as layout settles.
+    // No size yet (the panel is still laying out): a safe minimum rather than
+    // a NaN camera; the resize observer below corrects it as soon as it settles.
     const initialW = W || 400, initialH = H || 300;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x080604);
-    scene.fog = new THREE.FogExp2(0x080604, 0.018);
 
-    const camera = new THREE.PerspectiveCamera(50, initialW / initialH, 0.1, 500);
+    const camera = new THREE.PerspectiveCamera(50, initialW / initialH, 0.1, 2000);
 
-    // WebGLRenderer creation throws if the browser can't get a GPU
-    // context. Separately, this machine has a CONFIRMED compositing
-    // failure: a live, correctly-sized canvas with a healthy render loop
-    // still displays blank white (verified via Inspect — canvas exists,
-    // three.js initialized, loop runs, no context-lost event). So this
-    // uses the most conservative rendering path available: no antialias
-    // (heaviest compositing feature, common trigger on flaky drivers),
-    // no shadow maps, pixel ratio capped at 1, low-power GPU preference
-    // (avoids discrete-GPU driver bugs on Windows laptops/desktops), and
-    // preserveDrawingBuffer for a stable backbuffer instead of the fast-swap
-    // path some drivers white out on. It was removed once on the mistaken
-    // belief that it only existed for reading frames back, and the canvas
-    // went straight back to blank white on the machine it was written for.
+    /*
+     * The most conservative rendering path there is. This machine has a
+     * confirmed compositing failure - a live, correctly-sized canvas with a
+     * healthy render loop displays blank white - so: no antialias, no shadow
+     * maps, pixel ratio 1, low-power GPU, and preserveDrawingBuffer so the
+     * frame can be copied to the <img> below. Removing any of it brought the
+     * white canvas back.
+     */
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -214,28 +206,19 @@ function ScaffoldModel3D({
         preserveDrawingBuffer: true,
       });
     } catch (err) {
-      console.error("[3D model] Failed to create WebGL renderer — likely out of GPU contexts. Try fully restarting the browser.", err);
+      console.error("[3D model] Failed to create WebGL renderer - likely out of GPU contexts. Try fully restarting the browser.", err);
       setRenderError("3D view unavailable right now (couldn't get a GPU context). Try fully closing and reopening the browser, then reload this page.");
       return;
     }
     renderer.setSize(initialW, initialH);
     renderer.setPixelRatio(1);
     renderer.shadowMap.enabled = false;
-    /*
-     * Fill the mount, whatever size it turns out to be.
-     *
-     * Three.js sizes the canvas in attributes, which is the size it renders at
-     * - not the size it occupies. Mounted before layout settles, those numbers
-     * are the 400x300 fallback and the canvas sits at that size in a corner of
-     * a panel several times larger, which reads as nothing being there at all.
-     */
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
     renderer.domElement.style.display = "block";
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // And keep it right as the panel changes size.
     const mountEl = mountRef.current;
     const observer = new ResizeObserver(() => {
       const w = mountEl.clientWidth, h = mountEl.clientHeight;
@@ -247,218 +230,124 @@ function ScaffoldModel3D({
     });
     observer.observe(mountEl);
 
-    // TEMPORARY DIAGNOSTIC — the render loop was proven to be running
-    // correctly (angle/frame count incrementing on schedule) while the
-    // view stayed visually frozen. That specific pattern is the known
-    // signature of a lost/exhausted WebGL context — render() keeps
-    // getting called and doesn't throw, but the browser silently stops
-    // compositing it. These listeners confirm it directly. Safe to
-    // remove once confirmed either way.
     const canvas = renderer.domElement;
-    const onContextLost = (e: Event) => {
-      e.preventDefault();
-      console.error("[3D model] WEBGL CONTEXT LOST", e);
-    };
-    const onContextRestored = () => {
-      console.warn("[3D model] WebGL context restored");
-    };
+    const onContextLost = (e: Event) => { e.preventDefault(); console.error("[3D model] WEBGL CONTEXT LOST", e); };
     canvas.addEventListener("webglcontextlost", onContextLost, false);
-    canvas.addEventListener("webglcontextrestored", onContextRestored, false);
-
-    // Keep the renderer/camera matched to the container if it resizes
-    // later (e.g. switching tabs, resizing the window) — a stale size
-    // here is the other common cause of a 3D view that looks frozen.
-    const resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const w = entry.contentRect.width, h = entry.contentRect.height;
-      if (w <= 0 || h <= 0) return;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    });
-    resizeObserver.observe(mountRef.current);
 
     // Lights
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const sun = new THREE.DirectionalLight(0xfff5e0, 1.4);
-    sun.position.set(20, 30, 15); sun.castShadow = true; scene.add(sun);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const sun = new THREE.DirectionalLight(0xfff5e0, 1.3);
+    sun.position.set(20, 30, 15); scene.add(sun);
     const fill = new THREE.DirectionalLight(0x8080ff, 0.3);
     fill.position.set(-10, 5, -5); scene.add(fill);
-    const orange = new THREE.PointLight(0xf97316, 0.5, 60);
-    orange.position.set(0, 10, 10); scene.add(orange);
 
-    // Materials
-    const frameMat = new THREE.MeshStandardMaterial({ color: 0xbababa, metalness: 0.85, roughness: 0.25 });
-    const plankMat = new THREE.MeshStandardMaterial({ color: 0x7c5c1a, roughness: 0.9 });
-    const braceMat = new THREE.MeshStandardMaterial({ color: 0x909090, metalness: 0.7, roughness: 0.4 });
-    const wallMat  = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 });
-    const groundMat= new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 1.0 });
+    // One foot is 0.3 scene units - the scale the old model drew a frame at.
+    const S = 0.3;
 
-    const BAY_H = 6.333 * 0.3; // frame height in scene units
-    const SCAF_D = scaffoldWidthFt * 0.3; // scaffold depth
-    const jumps = Math.min(frameTall, 20);
+    // Materials, by what the part is. Brackets read green, as on the plan.
+    const steel = (color: number, roughness = 0.3) => new THREE.MeshStandardMaterial({ color, metalness: 0.8, roughness });
+    const wood = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
+    const MAT: Record<PartKind, THREE.Material> = {
+      post: steel(0xc4c8cc), ledger: steel(0xb4b9be), brace: steel(0x8f979f, 0.4), rail: steel(0xd8dde2),
+      jack: steel(0x9aa3ad, 0.5), plate: steel(0x6b7480, 0.7), guardPost: steel(0xc4c8cc),
+      bracket: steel(0x4ade80, 0.4), bracketPlank: wood(0x86efac),
+      plank: wood(0x8a6a2a), hatchBoard: steel(0x8fa3b8, 0.5), hatchDoor: steel(0xb7c7d8, 0.5), ladder: steel(0xc9d3dc, 0.45),
+    };
+    const quadMat: Partial<Record<PartKind, THREE.Material>> = {};
+    const quadMatFor = (part: PartKind) => {
+      if (!quadMat[part]) {
+        const base = MAT[part] as THREE.MeshStandardMaterial;
+        quadMat[part] = new THREE.MeshStandardMaterial({ color: base.color, roughness: 0.9, side: THREE.DoubleSide });
+      }
+      return quadMat[part]!;
+    };
 
-    // Auto-scale: normalize outline to reasonable scene size regardless of SVG coordinate range
-    /*
-     * The walls to build.
-     *
-     * A traced plan gives a closed perimeter, so its sides are each point to
-     * the next and round to the start. A highlighted plan gives open runs that
-     * do not join up - walking those as a loop drew a wall back across the
-     * building, so they are taken as they are.
-     */
-    const wallPairs: [PlanPoint, PlanPoint][] = outline.length >= 3
-      ? outline.map((p, i) => [p, outline[(i + 1) % outline.length]] as [PlanPoint, PlanPoint])
-      : segments.map(seg => [seg.a, seg.b] as [PlanPoint, PlanPoint]);
-    if (wallPairs.length === 0) return;
-    const wallPoints = wallPairs.flatMap(pair => pair);
-
-    const allX = wallPoints.map(p => p.x), allZ = wallPoints.map(p => p.y);
-    const bldgW = Math.max(...allX) - Math.min(...allX);
-    const bldgH = Math.max(...allZ) - Math.min(...allZ);
-    const maxDim = Math.max(bldgW, bldgH, 1);
-    const targetSize = 28; // scene units
-    const sceneScale = targetSize / maxDim;
-
-    // Convert outline to scene coords centered on centroid
-    const cx = wallPoints.reduce((t, p) => t + p.x, 0) / wallPoints.length;
-    const cy = wallPoints.reduce((t, p) => t + p.y, 0) / wallPoints.length;
-    const scaled = (p: PlanPoint) => ({ x: (p.x - cx) * sceneScale, z: (p.y - cy) * sceneScale });
-
-    // Ground
-    const gSize = 120;
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(gSize, gSize), groundMat);
-    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-
-    // Build wall and scaffold around perimeter
     const group = new THREE.Group();
 
-    for (let si = 0; si < wallPairs.length; si++) {
-      const [rawA, rawB] = wallPairs[si];
-      const p1 = scaled(rawA), p2 = scaled(rawB);
-      const dx = p2.x - p1.x, dz = p2.z - p1.z;
-      const segLen = Math.sqrt(dx * dx + dz * dz);
-      if (segLen < 0.1) continue;
-      const ax = dx / segLen, az = dz / segLen;
-      // Outward normal computed on the ORIGINAL (unscaled) outline, using
-      // the same winding-aware test the Floor Plan panel uses — a naive
-      // 90° rotation here doesn't know which side is actually outside the
-      // building, and was putting scaffold on the interior whenever a
-      // trace happened to wind the "wrong" way.
-      // A traced perimeter knows which side is outside. Open runs do not, so
-      // they face away from the middle of the job, as they do on the plan.
-      const outwardNormal = outline.length >= 3
-        ? computeOutwardNormal(rawA, rawB, outline, interiorWalls.includes(si) ? "interior" : "exterior")
-        : (() => {
-            const mx = (rawA.x + rawB.x) / 2, my = (rawA.y + rawB.y) / 2;
-            const ex = rawB.x - rawA.x, ey = rawB.y - rawA.y;
-            const elen = Math.hypot(ex, ey) || 1;
-            const right = { x: -ey / elen, y: ex / elen };
-            const away = ((mx - cx) * right.x + (my - cy) * right.y) >= 0 ? 1 : -1;
-            return { x: right.x * away, y: right.y * away };
-          })();
-      const nx = outwardNormal.x, nz = outwardNormal.y;
-
-      // Wall panel
-      const wallH = jumps * BAY_H;
-      const wallGeo = new THREE.BoxGeometry(segLen, wallH, 0.08);
-      const wall = new THREE.Mesh(wallGeo, wallMat);
-      wall.position.set((p1.x + p2.x) / 2, wallH / 2, (p1.z + p2.z) / 2);
-      wall.rotation.y = -Math.atan2(dz, dx);
-      group.add(wall);
-
-      // Scaffold along this segment
-      const bayPx = bayFt * puf;
-      const segPx = segLen / sceneScale;
-      const numBays = Math.max(1, Math.round(segPx / bayPx));
-      const actualBayLen = segLen / numBays;
-      const wallOff = 1 * puf * sceneScale;
-
-      for (let b = 0; b <= numBays; b++) {
-        const t = b / numBays;
-        const lx = p1.x + dx * t + nx * wallOff;
-        const lz = p1.z + dz * t + nz * wallOff;
-        const ox = lx + nx * SCAF_D;
-        const oz = lz + nz * SCAF_D;
-
-        for (let j = 0; j < jumps; j++) {
-          const y = j * BAY_H;
-          // Inner leg (wall side)
-          const legGeo = new THREE.CylinderGeometry(0.025, 0.025, BAY_H, 6);
-          const leg1 = new THREE.Mesh(legGeo, frameMat); leg1.position.set(lx, y + BAY_H / 2, lz); leg1.castShadow = true; group.add(leg1);
-          // Outer leg
-          const leg2 = new THREE.Mesh(legGeo, frameMat); leg2.position.set(ox, y + BAY_H / 2, oz); leg2.castShadow = true; group.add(leg2);
-          // Frame crossbar
-          const cbGeo = new THREE.CylinderGeometry(0.018, 0.018, SCAF_D, 5);
-          const cb = new THREE.Mesh(cbGeo, frameMat);
-          cb.rotation.x = Math.PI / 2;
-          cb.position.set((lx + ox) / 2, y + BAY_H * 0.65, (lz + oz) / 2); group.add(cb);
-          // Screw jacks
-          if (j === 0) {
-            const jkGeo = new THREE.CylinderGeometry(0.03, 0.04, 0.2, 5);
-            const jk1 = new THREE.Mesh(jkGeo, frameMat); jk1.position.set(lx, 0.1, lz); group.add(jk1);
-            const jk2 = new THREE.Mesh(jkGeo, frameMat); jk2.position.set(ox, 0.1, oz); group.add(jk2);
-          }
-        }
-
-        // Cross braces and planks between bays
-        if (b < numBays) {
-          const nx2 = p1.x + dx * ((b + 1) / numBays) + nx * wallOff;
-          const nz2 = p1.z + dz * ((b + 1) / numBays) + nz * wallOff;
-          const ox2 = nx2 + nx * SCAF_D;
-          const oz2 = nz2 + nz * SCAF_D;
-
-          for (let j = 0; j < jumps; j++) {
-            const y = j * BAY_H;
-            // X brace front
-            const bl = Math.sqrt(actualBayLen ** 2 + BAY_H ** 2);
-            const brGeo = new THREE.CylinderGeometry(0.015, 0.015, bl, 4);
-            const ang = Math.atan2(BAY_H, actualBayLen);
-            const brMid = new THREE.Vector3((lx + nx2) / 2, y + BAY_H / 2, (lz + nz2) / 2);
-            const br = new THREE.Mesh(brGeo, braceMat);
-            br.position.copy(brMid);
-            br.rotation.z = ang;
-            br.rotation.y = -Math.atan2(dz, dx);
-            group.add(br);
-
-            // Planks
-            const ppb = planksPerBay(scaffoldWidthFt >= 5 ? "5'" : scaffoldWidthFt >= 3.5 ? "3'-6\"" : "3'");
-            const plankW = actualBayLen * 0.95;
-            for (let p = 0; p < Math.min(ppb, 4); p++) {
-              const pt = (p + 0.5) / ppb;
-              const px = lx + ax * actualBayLen * 0.5 + nx * (wallOff + SCAF_D * pt);
-              const pz = lz + az * actualBayLen * 0.5 + nz * (wallOff + SCAF_D * pt);
-              const plGeo = new THREE.BoxGeometry(plankW, 0.04, SCAF_D / ppb * 0.85);
-              const pl = new THREE.Mesh(plGeo, plankMat);
-              pl.position.set(px, y + BAY_H + 0.02, pz);
-              pl.rotation.y = -Math.atan2(dz, dx);
-              pl.castShadow = true; pl.receiveShadow = true; group.add(pl);
-            }
-
-            // Guardrail
-            const grGeo = new THREE.CylinderGeometry(0.012, 0.012, actualBayLen, 4);
-            const gr = new THREE.Mesh(grGeo, frameMat);
-            gr.position.set((ox + ox2) / 2, j * BAY_H + BAY_H + 0.8, (oz + oz2) / 2);
-            gr.rotation.z = Math.PI / 2; gr.rotation.y = -Math.atan2(dz, dx); group.add(gr);
-          }
-        }
+    // Stamp the pieces: one unit tube and one unit box, a matrix per piece.
+    const tubeGeo = new THREE.CylinderGeometry(1, 1, 1, 6);
+    const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+    const tubes = new Map<PartKind, THREE.Matrix4[]>();
+    const boxes = new Map<PartKind, THREE.Matrix4[]>();
+    const quads = new Map<PartKind, number[]>();
+    const up = new THREE.Vector3(0, 1, 0);
+    const pos = new THREE.Vector3(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), dir = new THREE.Vector3();
+    const V = (p: Vec3) => new THREE.Vector3(p.x * S, p.y * S, p.z * S);
+    for (const piece of model.pieces) {
+      if (piece.kind === "tube") {
+        const a = V(piece.a), b = V(piece.b);
+        dir.subVectors(b, a);
+        const len = dir.length();
+        if (len < 1e-6) continue;
+        dir.divideScalar(len);
+        pos.addVectors(a, b).multiplyScalar(0.5);
+        q.setFromUnitVectors(up, dir);
+        scl.set(piece.r * S, len, piece.r * S);
+        const m = new THREE.Matrix4().compose(pos, q, scl);
+        (tubes.get(piece.part) ?? tubes.set(piece.part, []).get(piece.part)!).push(m);
+      } else if (piece.kind === "box") {
+        pos.copy(V(piece.c));
+        q.setFromAxisAngle(up, piece.yaw);
+        scl.set(piece.len * S, piece.thick * S, piece.wid * S);
+        const m = new THREE.Matrix4().compose(pos, q, scl);
+        (boxes.get(piece.part) ?? boxes.set(piece.part, []).get(piece.part)!).push(m);
+      } else {
+        const [p0, p1, p2, p3] = piece.p.map(V);
+        const list = quads.get(piece.part) ?? quads.set(piece.part, []).get(piece.part)!;
+        list.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p0.x, p0.y, p0.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z);
       }
     }
+    const stamp = (geo: THREE.BufferGeometry, byPart: Map<PartKind, THREE.Matrix4[]>) => {
+      byPart.forEach((mats, part) => {
+        const mesh = new THREE.InstancedMesh(geo, MAT[part], mats.length);
+        mats.forEach((m, i) => mesh.setMatrixAt(i, m));
+        mesh.instanceMatrix.needsUpdate = true;
+        group.add(mesh);
+      });
+    };
+    stamp(tubeGeo, tubes);
+    stamp(boxGeo, boxes);
+    quads.forEach((verts, part) => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+      geo.computeVertexNormals();
+      group.add(new THREE.Mesh(geo, quadMatFor(part)));
+    });
 
+    // The building: each wall at its own height.
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 });
+    for (const w of model.walls) {
+      const dx = (w.b.x - w.a.x) * S, dz = (w.b.z - w.a.z) * S;
+      const len = Math.hypot(dx, dz);
+      if (len < 1e-3 || w.heightFt <= 0) continue;
+      const h = w.heightFt * S;
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(len, h, 0.5 * S), wallMat);
+      wall.position.set((w.a.x + w.b.x) / 2 * S, h / 2, (w.a.z + w.b.z) / 2 * S);
+      wall.rotation.y = -Math.atan2(dz, dx);
+      group.add(wall);
+    }
     scene.add(group);
-    scene.add(new THREE.GridHelper(gSize, 40, 0x111111, 0x111111));
 
-    // Camera orbit
+    // Ground and grid, sized to the job.
+    const bx = (model.bounds.max.x - model.bounds.min.x) * S, bz = (model.bounds.max.z - model.bounds.min.z) * S;
+    const gSize = Math.max(bx, bz) * 3 + 20;
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(gSize, gSize), new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 1.0 }));
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set((model.bounds.min.x + model.bounds.max.x) / 2 * S, -0.01, (model.bounds.min.z + model.bounds.max.z) / 2 * S);
+    scene.add(ground);
+    const grid = new THREE.GridHelper(gSize, Math.max(10, Math.round(gSize / (10 * S))), 0x111111, 0x111111);
+    grid.position.copy(ground.position);
+    scene.add(grid);
+
+    // Camera orbit round the job.
     const bbox = new THREE.Box3().setFromObject(group);
     const center = bbox.getCenter(new THREE.Vector3());
     const size = bbox.getSize(new THREE.Vector3());
-    const camSize = Math.max(size.x, size.z);
-    const camDist = camSize * 1.5 + 5;
-    camera.position.set(center.x + camDist, camDist * 0.6, center.z + camDist);
-    camera.lookAt(center.x, center.y * 0.5, center.z);
+    const camSize = Math.max(size.x, size.z, size.y * 1.5);
+    const camDist = camSize * 1.35 + 5;
+    scene.fog = new THREE.FogExp2(0x080604, 0.55 / camDist);
 
-    let angle = Math.atan2(camDist, camDist);
+    let angle = Math.PI / 4;
     let isRotating = true;
     let zoomFactor = 1;
     (mountRef.current as any).__setRotating = (v: boolean) => { isRotating = v; };
@@ -468,37 +357,19 @@ function ScaffoldModel3D({
     let lastMirror = 0;
     function animate() {
       frameRef.current = requestAnimationFrame(animate);
-      // TEMPORARY DIAGNOSTIC — logs once every ~2 seconds so we can see in
-      // the browser console whether this loop is actually running and
-      // what isRotating/angle actually are, instead of guessing again.
-      // Safe to remove once rotation is confirmed working.
-      if (isRotating) {
-        angle += 0.004;
-        camera.position.set(
-          center.x + Math.sin(angle) * camDist * zoomFactor,
-          camDist * 0.55 * zoomFactor,
-          center.z + Math.cos(angle) * camDist * zoomFactor
-        );
-        camera.lookAt(center.x, center.y * 0.4, center.z);
-      } else {
-        // Still respond to zoom changes while paused, using the last angle.
-        camera.position.set(
-          center.x + Math.sin(angle) * camDist * zoomFactor,
-          camDist * 0.55 * zoomFactor,
-          center.z + Math.cos(angle) * camDist * zoomFactor
-        );
-        camera.lookAt(center.x, center.y * 0.4, center.z);
-      }
+      if (isRotating) angle += 0.004;
+      camera.position.set(
+        center.x + Math.sin(angle) * camDist * zoomFactor,
+        camDist * 0.55 * zoomFactor,
+        center.z + Math.cos(angle) * camDist * zoomFactor,
+      );
+      camera.lookAt(center.x, center.y * 0.4, center.z);
       renderer.render(scene, camera);
 
       /*
-       * Copy the frame to an image, a few times a second.
-       *
-       * On the machine this was built on, the WebGL canvas composites as blank
-       * white while drawing perfectly - verified - and an <img> displays fine.
-       * It used to copy every fifth frame, twelve times a second, which on a
-       * scene with thousands of pieces froze the browser. Five a second on a
-       * scene of sane size costs a few milliseconds and keeps it visible.
+       * Copy the frame to an image a few times a second. On the machine this
+       * was built on the WebGL canvas composites as blank white while drawing
+       * perfectly - verified - and an <img> displays fine.
        */
       const now = performance.now();
       if (now - lastMirror > 200 && document.visibilityState === "visible") {
@@ -507,37 +378,28 @@ function ScaffoldModel3D({
         if (img) {
           try {
             img.src = renderer.domElement.toDataURL("image/jpeg", 0.8);
-            // Hidden until it has a picture, so the browser never shows its
-            // broken-image icon in the gap before the first frame.
             img.style.visibility = "visible";
           } catch { /* skip a frame */ }
         }
       }
-      // IMAGE-MIRROR WORKAROUND — this machine's browser compositing of
-      // live WebGL canvases is broken (confirmed: the Capture PNG shows a
-      // perfect scene while the on-screen canvas displays blank white; the
-      // GPU draws fine, only the final canvas→screen step fails). Ordinary
     }
     animate();
 
     return () => {
       cancelAnimationFrame(frameRef.current);
-      resizeObserver.disconnect();
       canvas.removeEventListener("webglcontextlost", onContextLost);
-      canvas.removeEventListener("webglcontextrestored", onContextRestored);
+      tubeGeo.dispose(); boxGeo.dispose();
+      Object.values(MAT).forEach(m => m.dispose());
+      Object.values(quadMat).forEach(m => m?.dispose());
+      group.traverse(obj => { const g = (obj as THREE.Mesh).geometry; if (g && g !== tubeGeo && g !== boxGeo) g.dispose(); });
       renderer.dispose();
-      // forceContextLoss() depends on the WEBGL_lose_context extension,
-      // which isn't guaranteed to exist on every browser/GPU — an
-      // unguarded call here was throwing and taking down the whole
-      // render tree on systems without it. dispose() above already does
-      // the important cleanup; this is a best-effort extra that must
-      // never be allowed to crash anything.
-      try { renderer.forceContextLoss(); } catch { /* not supported here — safe to ignore */ }
+      // forceContextLoss needs an extension not every browser has; never let it throw.
+      try { renderer.forceContextLoss(); } catch { /* not supported here */ }
       try { observer.disconnect(); } catch { /* already gone */ }
       if (mountRef.current?.contains(renderer.domElement)) mountRef.current.removeChild(renderer.domElement);
       rendererRef.current = null;
     };
-  }, [outline, segments, bayFt, widthFt, frameTall, scaffoldWidthFt, puf, interiorWalls]);
+  }, [model]);
 
   useEffect(() => {
     if (mountRef.current) (mountRef.current as any).__setRotating?.(rotating);
@@ -567,21 +429,19 @@ function ScaffoldModel3D({
     );
   }
 
+  const c = model?.counts;
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#080604]" style={{ minHeight: 0 }}>
-        {/*
-          * The canvas renders underneath; the image on top shows what it drew.
-          * See the note in the render loop for why - in short, on some Windows
-          * drivers a WebGL canvas displays white no matter what it draws.
-          */}
+        {/* The canvas renders underneath; the image on top shows what it drew (see the render loop). */}
         <div ref={mountRef} className="absolute inset-0 opacity-0" />
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img ref={mirrorRef} alt="" style={{ visibility: "hidden" }} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
-        {renderError && (
-          <div className="absolute inset-0 flex items-center justify-center p-4 text-center">
-            <p className="max-w-xs text-[11px] leading-[1.6] text-zinc-500">{renderError}</p>
-          </div>
+        {c && (
+          <p className="pointer-events-none absolute left-2 bottom-1.5 font-mono text-[8.5px] text-zinc-500">
+            {Math.round(c.posts / 2)} frames &middot; {c.braces} braces &middot; {c.planks} planks &middot; {c.rails} rails
+            {c.hatchBoards > 0 ? ` · ${c.hatchBoards} hatch decks` : ""}{c.brackets > 0 ? ` · ${c.brackets} brackets` : ""}
+          </p>
         )}
       </div>
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0b0b0b] border-t border-zinc-900 flex-shrink-0">
@@ -1452,6 +1312,85 @@ export default function SetScaffoldV2Inner() {
     return strokeTallBySeg.get(segIndex) ?? frameTall;
   };
 
+  /*
+   * Ladder hatch bays.
+   *
+   * One 10' bay per 100' of run takes the ladder - or one per elevation where
+   * the job does not allow the 100' rule. One steel hatch deck at every lift
+   * in place of the planks, opening in the middle; the ladder leans up from
+   * one end of the deck below, the foot alternating ends lift by lift so the
+   * climb zig-zags. Saved with the elevation, like turnaround bays.
+   */
+  type HatchSettings = { ladderHatchMode?: "per100" | "perElevation" };
+  const ladderHatchMode = (elevation as (ProjectElevation & HatchSettings) | null)?.ladderHatchMode ?? "per100";
+  /** Truck access, per elevation. No access means stocking labor in and out - see STOCKING. */
+  function setTruckAccess(truckAccess: boolean) {
+    if (!elevation) return;
+    const next = { ...elevation, truckAccess };
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+  function setLadderHatchMode(mode: "per100" | "perElevation") {
+    if (!elevation) return;
+    const next = { ...elevation, ladderHatchMode: mode } as ProjectElevation;
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+  const hatchBays = useMemo(
+    () => pickHatchBays(allSegmentLegs, { mode: ladderHatchMode, bayFt: bayLengthFt }),
+    [allSegmentLegs, ladderHatchMode, bayLengthFt],
+  );
+  /** Hatch decks: one per hatch bay per lift, the bay governed by its shorter leg. */
+  const hatchBoardCount = useMemo(() => hatchBays.reduce((sum, h) => {
+    const seg = allSegmentLegs.find(x => x.segIndex === h.segIndex);
+    if (!seg || !seg.legs[h.bayIndex + 1]) return sum;
+    return sum + Math.min(getFrameTallForLeg(h.segIndex, h.bayIndex), getFrameTallForLeg(h.segIndex, h.bayIndex + 1));
+  }, 0), [hatchBays, allSegmentLegs, overriddenFC, strokeTallBySeg, frameTall]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /*
+   * The scaffold in the air, for the 3D model: the engine's runs as edited on
+   * the plan (deleted legs gone, dragged legs moved), each leg's real stack.
+   */
+  const scaffoldModel = useMemo<ScaffoldModel | null>(() => {
+    if (!scaleOk || effPuf <= 0 || allSegmentLegs.length === 0) return null;
+    const runs: SegmentLegs[] = allSegmentLegs.filter(seg => !seg.skipped).map(seg => {
+      const kept = seg.legs.map((leg, i) => ({ leg, i })).filter(({ i }) => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
+      if (kept.length === seg.legs.length && kept.every(({ i }) => !legOffsets[`${seg.segIndex}-${i}`])) return seg;
+      const legs = kept.map(({ leg, i }) => {
+        const off = legOffsets[`${seg.segIndex}-${i}`] ?? { dx: 0, dy: 0 };
+        return { ...leg, wallPoint: { x: leg.wallPoint.x + off.dx, y: leg.wallPoint.y + off.dy }, tickTip: { x: leg.tickTip.x + off.dx, y: leg.tickTip.y + off.dy } };
+      });
+      // A bay between legs that were neighbours keeps its kind; one that lost a leg between them is braced at its new length.
+      const bays: BaySpan[] = [];
+      for (let k = 0; k + 1 < kept.length; k++) {
+        const a = kept[k].i, b = kept[k + 1].i;
+        const lengthFt = Math.hypot(legs[k + 1].wallPoint.x - legs[k].wallPoint.x, legs[k + 1].wallPoint.y - legs[k].wallPoint.y) / effPuf;
+        bays.push(b === a + 1 ? { ...(seg.bays[a] ?? { segIndex: seg.segIndex, kind: "braced", lengthFt }) } : { segIndex: seg.segIndex, lengthFt, kind: "braced" });
+      }
+      return { ...seg, legs, bays, lead: kept[0]?.i === 0 ? seg.lead : undefined, tail: kept.length && kept[kept.length - 1].i === seg.legs.length - 1 ? seg.tail : undefined };
+    });
+    const heightOf = (segIndex: number) => {
+      const strokeSeg = strokeSetOut.segments.find(x => x.segIndex === segIndex);
+      const run = strokeSeg ? drawnRuns.find(r => r.id === strokeSeg.runId) : undefined;
+      return run?.heightFt ?? (elevation?.wallHeight ?? 0);
+    };
+    const stackFor = (segIndex: number, legIndex: number): LegStack => {
+      const heightFt = heightOf(segIndex);
+      const mk = heightFt > 0 ? computeFrameMakeup(Math.max(0, heightFt - workerReachHeight), screwJackMaxExtensionIn) : null;
+      // Biggest frames at the bottom, the 5' or 3' on top.
+      let frames = mk ? [...mk.pieces].sort((m, n) => n.size - m.size).flatMap(piece => new Array<number>(piece.qty).fill(piece.size)) : [];
+      if (!frames.length) frames = new Array<number>(Math.max(1, frameTall)).fill(6.333);
+      const want = overriddenFC[`${segIndex}-${legIndex}`];
+      if (want && want !== frames.length) frames = want > frames.length ? [...frames, ...new Array<number>(want - frames.length).fill(6.333)] : frames.slice(0, want);
+      return { frames, jackIn: mk?.screwJackExtensionIn ?? 0 };
+    };
+    const walls = [
+      ...(outline.length >= 3 ? outline.map((p, i) => ({ a: p, b: outline[(i + 1) % outline.length], heightFt: elevation?.wallHeight ?? 0 })) : []),
+      ...drawnRuns.map(r => ({ a: r.a, b: r.b, heightFt: r.heightFt })),
+    ];
+    return buildScaffoldModel({ runs, puf: effPuf, frameWidthFt: scaffoldWidthFt, planksPerLift: ppb, stackFor, hatchBays, walls });
+  }, [scaleOk, effPuf, allSegmentLegs, deletedLegKeys, legOffsets, strokeSetOut, drawnRuns, elevation, workerReachHeight, screwJackMaxExtensionIn, frameTall, overriddenFC, outline, scaffoldWidthFt, ppb, hatchBays]);
+
   // A leg counts as "broken free" from the parallel track once its stored
   // offset has a perpendicular (off-wall) component beyond the same
   // breakout distance used while dragging. Used to hide the cross-brace
@@ -2078,6 +2017,13 @@ export default function SetScaffoldV2Inner() {
       railCount += runBays * (MATERIAL_RULES.guardrailTopPerBay + Math.max(0, frameTall - 1) * MATERIAL_RULES.guardrailIntermediatePerBay);
     }
 
+    /*
+     * End rails: across a top-lift frame where the deck stops and a step
+     * beyond lands on nothing - the end of a run, the outer end of a corner
+     * turned on a turnaround frame. Two per end, from the model, which is
+     * the one thing that knows where every deck is.
+     */
+    const endRails = scaffoldModel?.counts.endRails ?? 0;
     return {
       legs: legs + courtyardContribution.legs,
       bays: bays + courtyardContribution.bays,
@@ -2085,13 +2031,17 @@ export default function SetScaffoldV2Inner() {
       brackets: bracketCount + manualBracketCount,
       planks: plankCount + courtyardContribution.planks,
       braces: braceCount + courtyardContribution.braces,
-      guardrails: railCount + courtyardContribution.guardrails,
+      guardrails: railCount + endRails + courtyardContribution.guardrails,
+      endRails,
       couplingPins: pinCount + courtyardContribution.couplingPins,
       // Building-only figures, kept so the UI can show what a courtyard adds
       buildingLegs: legs,
       buildingFrames: totalFrames + manualFrameCount,
+      // Ladder access: a steel hatch deck at every lift of every hatch bay.
+      hatchBays: hatchBays.length,
+      hatchBoards: hatchBoardCount,
     };
-  }, [isQuickBid, quickTotals, allSegmentLegs, drawnRunLegs, drawnRuns, levelRunLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution, MATERIAL_RULES]);
+  }, [isQuickBid, quickTotals, allSegmentLegs, drawnRunLegs, drawnRuns, levelRunLegs, frameTall, ppb, deletedLegKeys, overriddenFC, elevation, manualFrameCount, manualBracketCount, courtyardContribution, MATERIAL_RULES, hatchBays, hatchBoardCount, scaffoldModel]);
 
   /*
    * The ledger has to follow the level runs, not just the configuration.
@@ -2705,6 +2655,22 @@ export default function SetScaffoldV2Inner() {
       });
     });
 
+    /*
+     * Ladder access. One hatch bay per 100' of run (or one per elevation), one
+     * steel hatch deck at every lift of it, ladder included. On the truck the
+     * deck takes the place of that lift's planks; in the labor it is still a
+     * bay of plank, because it is handled like one - so the planks come off
+     * the load list below and stay in the counts the hours are figured from.
+     */
+    const hatchPlanksDisplaced = hatchBoardCount * planksPerBayForWidth(widthUsed);
+    if (hatchBoardCount > 0) {
+      entries.push({
+        partNo: hatchBoardPart(bayLengthUsed),
+        qty: hatchBoardCount,
+        note: `${hatchBays.length} hatch bay${hatchBays.length === 1 ? "" : "s"}, one deck per lift; replaces ${hatchPlanksDisplaced} planks here, still planks for labor`,
+      });
+    }
+
     // Anything dropped onto the section drawing is real material too.
     const drafted = el.sectionView?.draftingAdditions ?? [];
     const bracketCounts = new Map<string, number>();
@@ -2769,7 +2735,7 @@ export default function SetScaffoldV2Inner() {
     };
 
     squareTo(totals.frames, (partNo) => /^(FO|FM)/.test(partNo));
-    squareTo(totals.planks, (partNo) => /^WP/.test(partNo));
+    squareTo(Math.max(0, totals.planks - hatchPlanksDisplaced), (partNo) => /^WP/.test(partNo));
     squareTo(totals.braces, (partNo) => /^B\d/.test(partNo));
     setTo(parts.guardrail, totals.guardrails);
     setTo("BP1", totals.legs);
@@ -3312,6 +3278,17 @@ export default function SetScaffoldV2Inner() {
               const mirrors = allSegmentLegs.reduce((sum, seg) => sum + seg.legs.filter(l => l.isTurnaroundMirror).length, 0);
               flags.push({ tone: "note", text: `Turnaround bays on - ${mirrors} corner frame${mirrors === 1 ? "" : "s"} added, every run re-set from its corner.` });
             }
+            if (hatchBays.length > 0) {
+              flags.push({ tone: "note", text: `${hatchBays.length} hatch bay${hatchBays.length === 1 ? "" : "s"} (${ladderHatchMode === "per100" ? "one per 100'" : "one per elevation"}), ${hatchBoardCount} hatch decks. Those lifts' planks come off the load list.` });
+            }
+            if (elevation?.truckAccess === false) {
+              const h = stockingHours(totals.frames);
+              flags.push({ tone: "note", text: `No truck access: stock in ${h} hrs, stock out ${h} hrs.` });
+            }
+            if ((scaffoldModel?.counts.endRails ?? 0) > 0) {
+              const ends = (scaffoldModel?.counts.endRails ?? 0) / 2;
+              flags.push({ tone: "note", text: `${ends} open end${ends === 1 ? "" : "s"}: end rails added, ${scaffoldModel?.counts.endRails} rails in the count.` });
+            }
             const skippedWalls = allSegmentLegs.filter(seg => seg.skipped && seg.kind === "outer").length;
             if (skippedWalls > 0) {
               flags.push({ tone: "note", text: `${skippedWalls} wall${skippedWalls === 1 ? "" : "s"} too short to stand a frame against - the runs either side carry past and plank back.` });
@@ -3570,6 +3547,24 @@ export default function SetScaffoldV2Inner() {
                   className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${turnaroundBays ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-600 hover:border-orange-500/40"}`}>
                   Turnaround bays
                 </button>
+                <span className="flex items-center gap-1 rounded-lg border border-zinc-800 px-1.5 py-0.5" title="Can the truck get to this elevation? No access: the crew hand-carries the material, 2 men per 40 frames, in and again out.">
+                  <span className="font-mono text-[8.5px] uppercase tracking-[0.12em] text-zinc-500">Truck</span>
+                  {([[true, "access"], [false, "no access"]] as const).map(([v, label]) => (
+                    <button key={label} onClick={() => setTruckAccess(v)} disabled={!elevation}
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-bold disabled:opacity-30 ${(elevation?.truckAccess !== false) === v ? "bg-orange-500/15 text-orange-300" : "text-zinc-600 hover:text-zinc-300"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </span>
+                <span className="flex items-center gap-1 rounded-lg border border-zinc-800 px-1.5 py-0.5" title="Ladder hatch bays: one 10' bay per 100' of run takes the ladder, a steel hatch deck at every lift. Where the job does not allow the 100' rule, one per elevation.">
+                  <span className="font-mono text-[8.5px] uppercase tracking-[0.12em] text-zinc-500">Hatch</span>
+                  {([["per100", "per 100'"], ["perElevation", "per elev."]] as const).map(([mode, label]) => (
+                    <button key={mode} onClick={() => setLadderHatchMode(mode)} disabled={!elevation}
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-bold disabled:opacity-30 ${ladderHatchMode === mode ? "bg-orange-500/15 text-orange-300" : "text-zinc-600 hover:text-zinc-300"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </span>
                 {allSegmentLegs.some(seg => seg.kind === "curve") && (
                   <span className="flex items-center gap-1 rounded-lg border border-zinc-800 px-1.5 py-0.5" title="Korban found a curve. Bays on a curve are square, two frames each, the wedge between planked. 5' is the rule; pick another size only if the job calls for it.">
                     <span className="font-mono text-[8.5px] uppercase tracking-[0.12em] text-zinc-500">Bay on curve</span>
@@ -4362,16 +4357,7 @@ export default function SetScaffoldV2Inner() {
                 </div>
               )}
               {mounted && (hasPlan || drawnRuns.length > 0) && (
-                <ScaffoldModel3D
-                  outline={outline}
-                  segments={drawnRuns.map(run => ({ a: run.a, b: run.b }))}
-                  puf={effPuf}
-                  bayFt={bayLengthFt}
-                  widthFt={scaffoldWidthFt}
-                  frameTall={liveFrameTall}
-                  scaffoldWidthFt={scaffoldWidthFt}
-                  interiorWalls={interiorWalls}
-                />
+                <ScaffoldModel3D model={scaffoldModel} />
               )}
             </div>
           </div>

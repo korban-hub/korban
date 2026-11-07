@@ -36,6 +36,7 @@ import {
 } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
 import { clearEstimateState, loadEstimateState, type EstimateDerived } from "@/lib/estimateState";
+import { BidRoundHistory, BidRoundPicker, BidRoundRevise } from "@/components/bid-round";
 
 const menuLinks: KorbanMenuLink[] = [
   { href: "/dashboard", label: "Bid Room" },
@@ -224,8 +225,9 @@ export default function ProjectPlanDeskPage() {
   const bidRounds = (["quick-bid", "full-bid", "korban-bid"] as EstimateDepth[]).map((tier) => {
     const snap = readTier(elevation, tier);
     const rows = snap.overlayGeometry?.elevationHeights ?? [];
+    // Footage per gripped elevation, where the grip recorded it.
     const measured = rows.reduce(
-      (sum: number, row: { totalLF?: number }) => sum + (row.totalLF ?? 0),
+      (sum: number, row) => sum + (Number((row as unknown as { totalLF?: unknown }).totalLF) || 0),
       0,
     );
     const linearFeet = measured > 0 ? measured : (snap.linearFeet ?? 0);
@@ -420,6 +422,14 @@ export default function ProjectPlanDeskPage() {
               </div>
             }
           >
+            {/*
+              * Back on a job that already went out: a new round released?
+              * Revise freezes the round that went out, letters the number
+              * (2041 -> 2041A) and moves the job to the new round. Nothing
+              * about the takeoff changes.
+              */}
+            <BidRoundRevise project={project} onRevised={setProject} />
+
             {!complete && (
               <p className="mb-2 border-l-2 border-orange-500/50 bg-orange-500/[0.05] py-1.5 pl-2.5 text-[10.5px] leading-[1.5] text-zinc-400">
                 Everything the proposal prints starts here. Blank fields stay blank
@@ -435,9 +445,35 @@ export default function ProjectPlanDeskPage() {
                   placeholder={row.placeholder}
                   hint={row.hint}
                   value={String(project[row.key] ?? "")}
-                  onCommit={(value) => setField(row.key, value)}
+                  onCommit={(value) => {
+                    /*
+                     * The number as entered is the base the revision letter is
+                     * added to. Typing a new number resets that base, so the
+                     * next revision letters the new number, not the old one.
+                     */
+                    if (row.key === "proposalNumber") {
+                      setProject(updateActiveProject({ proposalNumber: value, proposalNumberBase: "" }));
+                      return;
+                    }
+                    setField(row.key, value);
+                  }}
                 />
               ))}
+
+              {/*
+                * Which round this job is bidding - part of the job from day one,
+                * printed beside the proposal number. The GC's own name for a
+                * round goes in under Other.
+                */}
+              <div className="grid grid-cols-[132px_1fr] items-center gap-3 border-t border-zinc-900/70 px-1 py-1.5">
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600"
+                  title="Budget, Bid Round 1, GMP - whatever round the GC has this job in. Printed beside the proposal number. When a new round is released, use Revise above to move to it."
+                >
+                  Bid round
+                </span>
+                <BidRoundPicker value={project.bidRound} onChange={(title) => setField("bidRound", title)} />
+              </div>
 
               {/*
                 * Field info - filled in once the job is won.
@@ -465,6 +501,9 @@ export default function ProjectPlanDeskPage() {
                   onCommit={(value) => setField("onSiteContactPhone", value)}
                 />
               </div>
+
+              {/* The rounds this job has been through, once there is more than the current one. */}
+              <BidRoundHistory project={project} />
 
               <div className="grid grid-cols-[132px_1fr] items-center gap-3 border-t border-zinc-900/70 px-1 py-1.5">
                 <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">

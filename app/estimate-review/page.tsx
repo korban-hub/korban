@@ -13,7 +13,11 @@ import {
   readTier,
   saveActiveElevation,
   updateActiveProject,
+  stockingHours,
+  type BidRoundFigures,
+  type ProjectRecord,
 } from "@/lib/projectStore";
+import { BidRoundHistory, BidRoundRevise } from "@/components/bid-round";
 import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
 import { buildPresentationUrl } from "@/lib/presentationLink";
@@ -92,6 +96,10 @@ const EMPTY_ESTIMATE = {
   /** yyyy-mm-dd, the day the proposal went out. Empty until it does. */
   issuedDate: "",
   proposalNumber: "",
+  /** Which bid round this is - Budget, Bid Round 2, GMP. Printed under the number. */
+  bidRound: "",
+  /** Can the truck get to the work? False adds stocking hours in and out. */
+  truckAccess: true,
   projectType: "",
   unionStatus: "",
   totalLinearFeet: 0,
@@ -464,6 +472,8 @@ export default function EstimateReviewPage() {
         bidDate: project.bidDueDate,
         issuedDate: project.proposalIssuedDate ?? "",
         proposalNumber: project.proposalNumber,
+        bidRound: project.bidRound ?? "",
+        truckAccess: elevation.truckAccess !== false,
         projectType: backendSettings.scaffold.scaffoldType ?? "",
         unionStatus: project.unionStatus || backendSettings.company.unionDefault,
         totalLinearFeet: elevation.linearFeet ?? 0,
@@ -659,8 +669,26 @@ export default function EstimateReviewPage() {
    */
   const setIssuedDate = (iso: string) => {
     setStoredEstimate((prev) => (prev ? { ...prev, issuedDate: iso } : prev));
-    updateActiveProject({ proposalIssuedDate: iso });
+    setProjectRecord(updateActiveProject({ proposalIssuedDate: iso }));
   };
+
+  /*
+   * The job itself, for the round prompt and the round history. Read once
+   * the estimate is hydrated and again whenever a revision changes it.
+   */
+  const [projectRecord, setProjectRecord] = useState<ProjectRecord | null>(null);
+  useEffect(() => {
+    if (!isHydrated) return;
+    try { setProjectRecord(getActiveProject()); } catch { /* storage unavailable */ }
+  }, [isHydrated]);
+
+  /** A revision moves the number and the round; the sheet follows. */
+  function onRevised(next: ProjectRecord) {
+    setProjectRecord(next);
+    setStoredEstimate((prev) => (prev ? {
+      ...prev, proposalNumber: next.proposalNumber, bidRound: next.bidRound, issuedDate: next.proposalIssuedDate,
+    } : prev));
+  }
 
   /**
    * Every alternate is priced from the takeoff, selected or not, so the tiles
@@ -784,7 +812,15 @@ export default function EstimateReviewPage() {
     // Travel follows the loads this job actually ships.
     const travel = computeTravel(estimate.planks, siteMiles);
     const travelCost = travel.cost;
-    const laborCost = erectCost + dismantleCost + travelCost;
+    /*
+     * Stocking. Where the truck can't get to the work the crew hand-carries
+     * the material: 2 men per 40 frames, a day, in - and the same again out.
+     */
+    const stockInHours = estimate.truckAccess ? 0 : stockingHours(estimate.frames);
+    const stockOutHours = stockInHours;
+    const stockInCost = stockInHours * erectRate;
+    const stockOutCost = stockOutHours * erectRate;
+    const laborCost = erectCost + dismantleCost + travelCost + stockInCost + stockOutCost;
     const laborRevenue = Math.round(laborCost * (1 + laborMarkupPercent / 100));
 
     /*
@@ -839,6 +875,7 @@ export default function EstimateReviewPage() {
       rentalMonths, frameRental, plankRental, consumablesRevenue, rentalsRevenue,
       productionDays, phaseDays, erectHours, dismantleHours,
       erectCost, dismantleCost, travelCost, laborCost, travel,
+      stockInHours, stockOutHours, stockInCost, stockOutCost,
       obstructionHours, obstructionCost, obstructionLevel,
       contingencyLaborRevenue, contingencyMaterialRevenue, contingencyTotal,
       billedRentals, billedLabor,
@@ -850,6 +887,39 @@ export default function EstimateReviewPage() {
     frameRate, laborMarkupPercent, miscRevenue, phaseModeOn, phases, plankRate,
     rentalDays, plan, jumps, siteMiles, travelRate,
   ]);
+
+  /*
+   * What this round currently stands at, kept on the job.
+   *
+   * A revision freezes these figures as the round that went out. They are
+   * written here, not read back, so Plan Desk can freeze a round without
+   * this page open - and so the dashboard can set rounds beside each other.
+   */
+  const currentFigures = useMemo<BidRoundFigures | null>(() => {
+    if (!isHydrated || !storedEstimate) return null;
+    const lf = storedEstimate.totalLinearFeet;
+    return {
+      finalBid: totals.finalBid,
+      baseBid: totals.finalBid - totals.alternateRevenue,
+      linearFeet: lf,
+      pricePerLf: lf > 0 ? totals.finalBid / lf : 0,
+      laborHours: totals.erectHours + totals.dismantleHours + totals.travel.hours + totals.stockInHours + totals.stockOutHours,
+      laborRevenue: totals.billedLabor,
+      rentalsRevenue: totals.billedRentals,
+      alternates: [...approvedAlternates],
+      bidLevel,
+    };
+  }, [isHydrated, storedEstimate, totals, approvedAlternates, bidLevel]);
+  const figuresKey = currentFigures ? JSON.stringify(currentFigures) : "";
+  useEffect(() => {
+    if (!currentFigures) return;
+    try {
+      const live = getActiveProject();
+      if (JSON.stringify(live.currentFigures) === figuresKey) return;
+      updateActiveProject({ currentFigures });
+    } catch { /* storage unavailable */ }
+  }, [figuresKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
 
   // -- Persist ----------------------------------------------------------------
   useEffect(() => {
@@ -1030,7 +1100,7 @@ export default function EstimateReviewPage() {
         <KorbanHeader
           title="Estimate"
           subtitle={
-            [estimate.projectName, estimate.proposalNumber].filter(Boolean).join(" \u00b7 ") ||
+            [estimate.projectName, estimate.proposalNumber, estimate.bidRound].filter(Boolean).join(" \u00b7 ") ||
             "No project loaded"
           }
           menuLinks={estimateMenuLinks}
@@ -1116,6 +1186,10 @@ export default function EstimateReviewPage() {
                 erectCost={totals.erectCost}
                 dismantleCost={totals.dismantleCost}
                 travelCost={totals.travelCost}
+                stockInHours={totals.stockInHours}
+                stockOutHours={totals.stockOutHours}
+                stockInCost={totals.stockInCost}
+                stockOutCost={totals.stockOutCost}
                 laborCost={totals.laborCost}
                 dismantlePercent={dismantlePercent}
               />
@@ -1206,6 +1280,9 @@ export default function EstimateReviewPage() {
           setMiscRevenue={setMiscRevenue}
           alternateRevenue={totals.alternateRevenue}
           finalBid={totals.finalBid}
+          projectRecord={projectRecord}
+          onRevised={onRevised}
+          currentFigures={currentFigures}
           approvedAlternates={approvedAlternates}
           toggleAlternate={toggleAlternate}
           alternatePricing={alternatePricing}
@@ -1729,8 +1806,10 @@ function LaborPanel({
   erectHours, dismantleHours, travel, siteMiles, setSiteMiles,
   erectRate, setErectRate, travelRate, setTravelRate,
   erectCost, dismantleCost, travelCost, laborCost, dismantlePercent,
+  stockInHours, stockOutHours, stockInCost, stockOutCost,
 }: {
   erectHours: number; dismantleHours: number;
+  stockInHours: number; stockOutHours: number; stockInCost: number; stockOutCost: number;
   travel: { loads: number; legs: number; legHours: number; hours: number; cost: number };
   siteMiles: number;
   setSiteMiles: (miles: number) => void;
@@ -1749,15 +1828,24 @@ function LaborPanel({
         </div>
       }
     >
-      <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1 opacity-45">
-        <span className="text-[11px] text-zinc-500">Stock in</span>
-        <span className="font-mono text-[9px] text-zinc-700">set by Korban Review</span>
-        <span className="text-right font-mono text-[11px] text-zinc-700">—</span>
+      {/* Hand-carry where the truck can't reach: 2 men per 40 frames, in and out. Dim when the truck gets there. */}
+      <div className={`grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1 ${stockInHours > 0 ? "" : "opacity-45"}`}>
+        <span className="text-[11px] text-zinc-300">Stock in</span>
+        <span className="font-mono text-[9px] text-zinc-600">
+          {stockInHours > 0 ? `${stockInHours.toLocaleString()} hrs × $${erectRate}` : "truck access"}
+        </span>
+        <span className="text-right font-mono text-[11px] font-bold text-zinc-200">
+          {stockInHours > 0 ? formatMoney(stockInCost) : "—"}
+        </span>
       </div>
-      <div className="grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1 opacity-45">
-        <span className="text-[11px] text-zinc-500">Stock out</span>
-        <span className="font-mono text-[9px] text-zinc-700">set by Korban Review</span>
-        <span className="text-right font-mono text-[11px] text-zinc-700">—</span>
+      <div className={`grid grid-cols-[1fr_auto_88px] items-center gap-3 px-1 py-1 ${stockOutHours > 0 ? "" : "opacity-45"}`}>
+        <span className="text-[11px] text-zinc-300">Stock out</span>
+        <span className="font-mono text-[9px] text-zinc-600">
+          {stockOutHours > 0 ? `${stockOutHours.toLocaleString()} hrs × $${erectRate}` : "truck access"}
+        </span>
+        <span className="text-right font-mono text-[11px] font-bold text-zinc-200">
+          {stockOutHours > 0 ? formatMoney(stockOutCost) : "—"}
+        </span>
       </div>
 
       <div className="my-1.5 h-px bg-zinc-800" />
@@ -2351,7 +2439,7 @@ function ProposalTab({
   estimate, bidLevel, erectDays, dismantleDays, crewSize, erectHours, dismantleHours,
   elevationBreakdownRows, planOutline, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
   company, backend, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
-  miscRevenue, setMiscRevenue, alternateRevenue, finalBid,
+  miscRevenue, setMiscRevenue, alternateRevenue, finalBid, projectRecord, onRevised, currentFigures,
   approvedAlternates, toggleAlternate, alternatePricing, alternateSettings,
   updateAlternateSettings, proposalNotes, setProposalNotes, finishes, toggleFinish, proposalStatus, setProposalStatus, bidRoundPhase, setBidRoundPhase,
   setIssuedDate,
@@ -2380,6 +2468,9 @@ function ProposalTab({
   setMiscRevenue: (value: number) => void;
   alternateRevenue: number;
   finalBid: number;
+  projectRecord: ProjectRecord | null;
+  onRevised: (next: ProjectRecord) => void;
+  currentFigures: BidRoundFigures | null;
   approvedAlternates: AlternateId[];
   toggleAlternate: (id: AlternateId) => void;
   alternatePricing: Record<AlternateId, AlternateResult>;
@@ -2494,9 +2585,16 @@ function ProposalTab({
               <InfoRow label="Bid due" value={estimate.bidDate} />
               <DateRow label="Issued" value={estimate.issuedDate} onChange={setIssuedDate}
                 placeholder="Stamped on first print" />
+              <InfoRow label="Bid round" value={estimate.bidRound || "Not set - pick it on Plan Desk"} />
               <InfoRow label="Coverage" value={`${estimate.totalLinearFeet.toLocaleString()} LF`} />
               <InfoRow label="Rental" value={`${rentalDays} days · ${rentalMonths} mo.`} />
             </div>
+            {projectRecord && (
+              <div className="mt-2">
+                <BidRoundRevise project={projectRecord} onRevised={onRevised} />
+                <BidRoundHistory project={projectRecord} current={currentFigures} />
+              </div>
+            )}
           </Panel>
 
           <Panel title="Price to client" scan={false}>
@@ -3260,6 +3358,9 @@ function ProposalSheet({
               <p className="font-mono text-[12px] font-bold text-orange-600">
                 {estimate.proposalNumber || "\u2014"}
               </p>
+              {estimate.bidRound && (
+                <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-[#5c5852]">{estimate.bidRound}</p>
+              )}
               {/* The day it went out. Until it has, the sheet says so. */}
               <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-[#8a857d]">
                 {estimate.issuedDate ? `Issued ${formatIssued(estimate.issuedDate)}` : "Draft \u2014 not yet issued"}

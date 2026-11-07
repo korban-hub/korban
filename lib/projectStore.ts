@@ -374,6 +374,8 @@ export type TierSnapshot = {
   quickBid?: Record<string, unknown> | null;
   /** Hours added for obstructions on the site this round was measured on. */
   obstruction?: ObstructionLabor | null;
+  /** Can the truck get to this elevation? False means the material is hand-carried in and out. */
+  truckAccess?: boolean;
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -502,6 +504,12 @@ export type ProjectElevation = {
   /** Hours added for working around obstructions. Null when the site is clear. */
   obstruction?: ObstructionLabor | null;
   /**
+   * Can the truck get to this elevation? When it can't, the crew hand-carries
+   * the material in and back out - see STOCKING. True unless the estimator
+   * says otherwise.
+   */
+  truckAccess: boolean;
+  /**
    * The Quick Bid form exactly as it was typed.
    *
    * The form kept its answers in component state and wrote out only what it
@@ -599,6 +607,30 @@ export type ProjectRecord = {
    * the elevation itself and is never stored, so it can't fall out of step.
    */
   bidStatus: BidStatus;
+  /**
+   * Which bid round this job is bidding. Part of the job from the day it is
+   * set up - Budget, Bid Round 1, GMP, or whatever the GC calls it - and
+   * printed beside the proposal number. Empty until the estimator picks one.
+   */
+  bidRound: string;
+  /**
+   * The rounds this job has already been through. When a new round is
+   * released and the estimator revises, the round that went out is frozen
+   * here with its number and its figures, and the job carries on under the
+   * new one. Oldest first.
+   */
+  bidRoundHistory: BidRoundRecord[];
+  /**
+   * The proposal number as the estimator entered it, without the revision
+   * letter. Revising adds a letter in order - 2041, 2041A, 2041B - and this
+   * is what the letter is added to.
+   */
+  proposalNumberBase: string;
+  /**
+   * The figures the estimate currently stands at, kept here by Estimate
+   * Review so a revision can freeze them without the estimate page open.
+   */
+  currentFigures: BidRoundFigures | null;
   updatedAt: string;
   schemaVersion: number;
   /**
@@ -628,6 +660,105 @@ export const BID_STATUSES = [
   "No Response",
 ] as const;
 export type BidStatus = (typeof BID_STATUSES)[number];
+
+/**
+ * The rounds a GC puts a job through. Picked at setup; anything else is typed
+ * in as its own title. No "Rebid" - a new round is a rebid by definition.
+ */
+export const BID_ROUND_OPTIONS = [
+  "Budget",
+  "Preliminary",
+  "Bid Round 1",
+  "Bid Round 2",
+  "Bid Round 3",
+  "Best & Final",
+  "GMP",
+  "VE Round",
+] as const;
+
+/**
+ * Stocking - hand-carrying material where the truck can't get to.
+ *
+ * Two men for a day per 40 frames or part of 40, on the way in; the same
+ * again on the way out at dismantle. 16 hours per 40 frames, each way.
+ */
+export const STOCKING = { men: 2, hoursPerMan: 8, framesPerCrew: 40 } as const;
+
+/** Hours to stock an elevation one way - in, or out - for this many frames. */
+export function stockingHours(frames: number): number {
+  if (frames <= 0) return 0;
+  return Math.ceil(frames / STOCKING.framesPerCrew) * STOCKING.men * STOCKING.hoursPerMan;
+}
+
+/** What a round stood at when it went out - enough to compare rounds, not to rebuild one. */
+export type BidRoundFigures = {
+  finalBid: number;
+  baseBid: number;
+  linearFeet: number;
+  pricePerLf: number;
+  laborHours: number;
+  laborRevenue: number;
+  rentalsRevenue: number;
+  alternates: string[];
+  bidLevel: string;
+};
+
+export type BidRoundRecord = {
+  /** The round's title - from the list or the estimator's own. */
+  title: string;
+  /** The number it went out under, letter and all. */
+  proposalNumber: string;
+  /** yyyy-mm-dd it was issued, or empty if it never went out. */
+  issuedDate: string;
+  /** When it was frozen, ISO. */
+  closedAt: string;
+  figures: BidRoundFigures | null;
+};
+
+/** A, B, ... Z, AA, AB ... for the nth revision (1-based). */
+export function revisionLetter(n: number): string {
+  if (n <= 0) return "";
+  let s = "";
+  let k = n;
+  while (k > 0) {
+    const r = (k - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    k = Math.floor((k - 1) / 26);
+  }
+  return s;
+}
+
+/**
+ * Freeze the round that went out and move the job to the next one.
+ *
+ * The current round, number and figures go into the history; the number
+ * gets its next letter; the new round is a draft again until it is issued.
+ * The takeoff and the estimate are untouched - this is bookkeeping, not a
+ * copy of the job.
+ */
+export function reviseBidRound(project: ProjectRecord, newRound: string): ProjectRecord {
+  const history = [
+    ...project.bidRoundHistory,
+    {
+      title: project.bidRound || "Original",
+      proposalNumber: project.proposalNumber,
+      issuedDate: project.proposalIssuedDate,
+      closedAt: nowIso(),
+      figures: project.currentFigures,
+    },
+  ];
+  const base = project.proposalNumberBase || project.proposalNumber;
+  const letter = revisionLetter(history.length);
+  return {
+    ...project,
+    bidRound: newRound,
+    bidRoundHistory: history,
+    proposalNumberBase: base,
+    proposalNumber: base ? `${base}${letter}` : "",
+    proposalIssuedDate: "",
+    bidStatus: "Draft",
+  };
+}
 
 /** Submitted or later means the bid has left the building. */
 export const SUBMITTED_STATUSES: BidStatus[] = [
@@ -1389,6 +1520,7 @@ function createEmptyElevation(): ProjectElevation {
     freestanding: null,
     tunnel: null,
     obstruction: null,
+    truckAccess: true,
     quickBid: null,
     tierSnapshots: {},
     /*
@@ -1449,6 +1581,7 @@ function createDemoElevation(): ProjectElevation {
     freestanding: null,
     tunnel: null,
     obstruction: null,
+    truckAccess: true,
     quickBid: null,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1485,6 +1618,10 @@ export function createEmptyProject(
     proposalIssuedDate: "",
     unionStatus: "",
     bidStatus: "Draft",
+    bidRound: "",
+    bidRoundHistory: [],
+    proposalNumberBase: "",
+    currentFigures: null,
     updatedAt: nowIso(),
     schemaVersion: 2,
     estimateDepth: "quick-bid",
@@ -1519,6 +1656,10 @@ function createDemoProject(): ProjectRecord {
     proposalIssuedDate: "",
     unionStatus: "Union",
     bidStatus: "Ready To Send",
+    bidRound: "Bid Round 1",
+    bidRoundHistory: [],
+    proposalNumberBase: "",
+    currentFigures: null,
     estimateDepth: "korban-bid",
     takeoff: {
       levels: [
@@ -1642,6 +1783,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
       (name): name is string => typeof name === "string" && name.trim() !== ""
     ),
     quickBid: isRecord(record.quickBid) ? record.quickBid : null,
+    truckAccess: record.truckAccess !== false,
     obstruction: (() => {
       const o = record.obstruction;
       if (!isRecord(o)) return null;
@@ -1730,6 +1872,20 @@ function normalizeElevation(value: unknown): ProjectElevation {
   };
 }
 
+function normalizeFigures(f: Record<string, unknown>): BidRoundFigures {
+  return {
+    finalBid: asNumber(f.finalBid, 0),
+    baseBid: asNumber(f.baseBid, 0),
+    linearFeet: asNumber(f.linearFeet, 0),
+    pricePerLf: asNumber(f.pricePerLf, 0),
+    laborHours: asNumber(f.laborHours, 0),
+    laborRevenue: asNumber(f.laborRevenue, 0),
+    rentalsRevenue: asNumber(f.rentalsRevenue, 0),
+    alternates: asArray<unknown>(f.alternates).map((a) => String(a)),
+    bidLevel: asString(f.bidLevel),
+  };
+}
+
 function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): ProjectRecord {
   // Blank, not the demo. A missing field means nobody entered it, and saying
   // so is the whole point - inheriting another job's customer is not a default,
@@ -1769,6 +1925,20 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     bidStatus: (BID_STATUSES as readonly string[]).includes(record.bidStatus as string)
       ? (record.bidStatus as BidStatus)
       : fallback.bidStatus,
+    bidRound: asString(record.bidRound),
+    bidRoundHistory: asArray<unknown>(record.bidRoundHistory).flatMap((row) => {
+      if (!isRecord(row)) return [];
+      const f = isRecord(row.figures) ? row.figures : null;
+      return [{
+        title: asString(row.title, "Original"),
+        proposalNumber: asString(row.proposalNumber),
+        issuedDate: asString(row.issuedDate),
+        closedAt: asString(row.closedAt),
+        figures: f ? normalizeFigures(f) : null,
+      }];
+    }),
+    proposalNumberBase: asString(record.proposalNumberBase),
+    currentFigures: isRecord(record.currentFigures) ? normalizeFigures(record.currentFigures) : null,
     updatedAt: asString(record.updatedAt, nowIso()),
     schemaVersion: asNumber(record.schemaVersion, 2),
     /*
@@ -3037,6 +3207,7 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     interiorWalls: elevation.interiorWalls,
     quickBid: elevation.quickBid,
     obstruction: elevation.obstruction,
+    truckAccess: elevation.truckAccess,
   };
 }
 

@@ -20,6 +20,7 @@ import {
   calculateQuantityEngine, calculateTankQuantityEngine, canopyStack, DEFAULT_SCREW_JACK_MAX_IN, DEFAULT_WORKER_REACH_FT,
   getActiveElevation, partsForConfiguration, planksPerBayForWidth, saveActiveElevation,
   tunnelParts as tunnelParts_,
+  stockingHours,
 } from "@/lib/projectStore";
 import {
   getBackendSettings,
@@ -67,6 +68,8 @@ type Form = {
 
   // Site
   obstructions: "none" | "moderate" | "heavy";
+  /** Can the truck get to this elevation? "no" adds stocking labor in and out. */
+  truckAccess: "yes" | "no";
 
   // Pedestrian tunnel
   pedestrian: boolean;
@@ -103,6 +106,7 @@ const BLANK: Form = {
   floor: "flat",
   access: "manhole",
   obstructions: "none",
+  truckAccess: "yes",
   pedestrian: false,
   tunnelCoverage: "lineal",
   tunnelLf: "",
@@ -872,6 +876,10 @@ export default function QuickBidForm() {
         text: `${form.obstructions === "heavy" ? "Heavy" : "Moderate"} obstructions. The counts below are the real counts - the ${pct}% material allowance and ${obstructionHours.toLocaleString()} labor hours carry to the Estimate as contingency, where they can be included in the bid or left out.`,
       });
     }
+    if (form.truckAccess === "no") {
+      const h = stockingHours(derived.q.frameCount);
+      flags.push({ tone: "note", text: `No truck access: stock in ${h} hrs, stock out ${h} hrs (2 men per 40 frames).` });
+    }
     if (structure === "tank" && form.floor === "sloped") {
       flags.push({
         tone: "note",
@@ -1190,6 +1198,8 @@ export default function QuickBidForm() {
            * even means.
            */
           quickBid: { ...form, structure },
+          /* Hand-carry or not. The Estimate adds the stocking hours from this. */
+          truckAccess: form.truckAccess !== "no",
           /*
            * The canopy frames, written down like any other part.
            *
@@ -1474,6 +1484,16 @@ export default function QuickBidForm() {
                     { v: "none", label: "Clear" },
                     { v: "moderate", label: "Moderate" },
                     { v: "heavy", label: "Heavy" },
+                  ]}
+                />
+              </Row>
+              <Row label="Truck access" hint="Can the truck get to this elevation? No access means the crew hand-carries the material: 2 men per 40 frames, in and again out.">
+                <Segmented
+                  value={form.truckAccess}
+                  onChange={(v) => set("truckAccess", v)}
+                  options={[
+                    { v: "yes", label: "Yes" },
+                    { v: "no", label: "No access" },
                   ]}
                 />
               </Row>
