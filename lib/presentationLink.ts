@@ -12,6 +12,10 @@
  * because a link that wraps across four lines of an email does not get
  * clicked. A typical Korban Bid lands around 1.2kB encoded; the practical
  * ceiling in every current browser is far higher.
+ *
+ * The outline travels in page units with the plan's scale beside it, so the
+ * proposal can set the scaffold out again at real size. A link made before
+ * the scale rode along still opens: the model sizes itself from the coverage.
  */
 
 import type { BidPresentationData } from "@/components/bid-presentation";
@@ -55,9 +59,20 @@ const KEYS: Record<keyof BidPresentationData, string> = {
   laborRevenue: "I",
   rentalDays: "J",
   finalBid: "K",
-  buildingLevels: "L",
   outline: "M",
   elevations: "N",
+  // The model on the proposal is rebuilt in the customer's browser from the
+  // outline, so the link carries what the engine needs to set it out again.
+  unitsPerFoot: "O",
+  turnaround: "P",
+  hatchMode: "Q",
+  netting: "R",
+  // What the number buys, in the proposal sheet's own words.
+  finish: "S",
+  proposalNotes: "T",
+  alternatesIncluded: "U",
+  alternateRevenue: "V",
+  rentalThereafter: "W",
 };
 
 const REVERSE: Record<string, string> = Object.fromEntries(
@@ -109,6 +124,7 @@ export function encodePresentation(data: BidPresentationData): string {
     if (value === undefined || value === null) return;
     if (typeof value === "number" && value === 0) return; // zero is the default
     if (typeof value === "string" && value === "") return;
+    if (value === false) return; // off is the default
     if (Array.isArray(value) && value.length === 0) return;
 
     if (field === "outline") {
@@ -188,9 +204,17 @@ export function decodePresentation(payload: string): BidPresentationData | null 
       laborRevenue: 0,
       rentalDays: 30,
       finalBid: 0,
-      buildingLevels: 1,
       outline: [],
       elevations: [],
+      unitsPerFoot: 0,
+      turnaround: false,
+      hatchMode: "per100",
+      netting: false,
+      finish: "general access",
+      proposalNotes: "",
+      alternatesIncluded: [],
+      alternateRevenue: 0,
+      rentalThereafter: 0,
       ...(data as Partial<BidPresentationData>),
     } as BidPresentationData;
   } catch {

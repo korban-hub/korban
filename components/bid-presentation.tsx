@@ -12,12 +12,21 @@
  * the estimator never traced a plan, the plan section says so plainly rather
  * than showing a drawing of a building that isn't theirs.
  *
+ * The one-page summary carries the job's real model: the engine sets the
+ * scaffold out again from the outline in the link (see ProposalModel), so the
+ * customer watches the scaffold they are buying turn under orange light.
+ *
  * TRADE LANGUAGE: this is a scaffold document. Vertical repetition is a
  * JUMP, never a "lift". A leg's frame arrangement is FRAMES PER LEG or
  * FRAME CONFIGURATION, never a "stack".
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { setOut, type PlanPoint, type SegmentLegs } from "@/lib/scaffoldSetOut";
+import { buildScaffoldModel, pickHatchBays, type ScaffoldModel } from "@/lib/scaffoldModel";
+import { buildScaffoldGroup, disposePalette, proposalPalette, FEET } from "@/lib/scaffoldScene";
+import { computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, DEFAULT_WORKER_REACH_FT, STANDARD_BAY_LENGTHS } from "@/lib/projectStore";
 
 export type BidLevel = "quick-bid" | "full-bid" | "korban-bid";
 
@@ -72,6 +81,36 @@ export type BidPresentationData = {
   /** Traced plan outline in page units. Empty until a plan is traced. */
   outline: { x: number; y: number }[];
   elevations: { elevation: string; linearFeet: number }[];
+
+  /*
+   * What the proposal's model needs to set the scaffold out again from the
+   * outline, the same way Set Scaffold did: the plan's scale, and the job's
+   * own choices. Zero scale means the link predates the model; it then sizes
+   * the plan from the coverage.
+   */
+  /** Page units per foot of the outline. */
+  unitsPerFoot: number;
+  /** Turnaround bays on every corner. */
+  turnaround: boolean;
+  /** Ladder hatch bays: one per 100' of run, or one per elevation. */
+  hatchMode: "per100" | "perElevation";
+  /** Debris netting on the outer face - the Netting add was taken. */
+  netting: boolean;
+
+  /*
+   * What the number buys, in the words the proposal sheet uses on its first
+   * line item, so the deck and the paper say the same thing.
+   */
+  /** The finish trades the scaffold serves: "stucco and paint". */
+  finish: string;
+  /** The estimator's note under line item 01. */
+  proposalNotes: string;
+  /** Titles of the alternates taken into the price. */
+  alternatesIncluded: string[];
+  /** What those alternates add, so the base can be stated on its own. */
+  alternateRevenue: number;
+  /** Rent per further rental period once the first one runs out. */
+  rentalThereafter: number;
 };
 
 type Slide = {
@@ -959,15 +998,24 @@ const closingSlide: Slide = {
  * The parts arrive in order rather than all at once, so an estimator can talk
  * over it, but nothing ever leaves the screen.
  */
-function RotatingScaffold({ data, spin }: { data: BidPresentationData; spin: number }) {
+function RotatingScaffold({ data }: { data: BidPresentationData }) {
   /*
-   * Drawn rather than modelled.
+   * Drawn rather than modelled: the stand-in when the real model cannot show.
    *
-   * A real 3D canvas composites blank white on some machines - the reason the
-   * model in Set Scaffold needs an image behind it - and a proposal is the last
-   * place to risk that. An isometric drawing spun about its centre reads as a
-   * building, prints, and cannot fail.
+   * The proposal's model (ProposalModel, below) is the engine's scaffold in
+   * three.js. When a machine cannot give it a GPU context, or the page is the
+   * printed copy before the live one has drawn a frame, this isometric
+   * drawing spun about its centre reads as a building, prints, and cannot
+   * fail.
    */
+  const [spin, setSpin] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const turn = () => { setSpin(s => (s + 0.25) % 360); raf = requestAnimationFrame(turn); };
+    raf = requestAnimationFrame(turn);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   const shape = data.outline.length >= 3 ? data.outline : [
     { x: 0, y: 0 }, { x: 120, y: 0 }, { x: 120, y: 78 }, { x: 0, y: 78 },
   ];
@@ -1015,15 +1063,412 @@ function RotatingScaffold({ data, spin }: { data: BidPresentationData; spin: num
   );
 }
 
-function OnePage({ data }: { data: BidPresentationData }) {
-  const [spin, setSpin] = useState(0);
-  useEffect(() => {
-    let raf = 0;
-    const turn = () => { setSpin(s => (s + 0.25) % 360); raf = requestAnimationFrame(turn); };
-    raf = requestAnimationFrame(turn);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+// ----------------------------------------------------------------------
+// The model on the proposal
+// ----------------------------------------------------------------------
 
+/**
+ * The scaffold the customer is buying, set out again from the link.
+ *
+ * The same engine and the same model builder as Set Scaffold: the outline is
+ * set out at the job's width and bay, every leg gets the frame make-up the
+ * wall height calls for, hatch bays land by the job's rule, netting goes on
+ * if the add was taken. Only what the link carries is used - nothing is read
+ * from this browser, because the customer's browser has none of it.
+ *
+ * With no traced plan the model stands on a representative footprint whose
+ * perimeter is the coverage, and says so.
+ */
+function proposalScaffold(data: BidPresentationData): { model: ScaffoldModel | null; representative: boolean } {
+  const traced = data.outline.length >= 3;
+  const outline: PlanPoint[] = traced ? data.outline : representativeOutline(data.linearFeet);
+  const perimeter = outline.reduce((sum, p, i) => {
+    const q = outline[(i + 1) % outline.length];
+    return sum + Math.hypot(q.x - p.x, q.y - p.y);
+  }, 0);
+  if (perimeter <= 0) return { model: null, representative: !traced };
+  // A link made before the scale rode along: the perimeter is the footage.
+  const puf = traced && data.unitsPerFoot > 0
+    ? data.unitsPerFoot
+    : perimeter / (data.linearFeet > 0 ? data.linearFeet : 200);
+  const widthFt = data.scaffoldWidth > 0 ? data.scaffoldWidth : 3;
+  const bayFt = data.bayLength > 0 ? data.bayLength : 10;
+  const planksPerLift = data.planksPerDeck > 0 ? data.planksPerDeck : 3;
+  let runs: SegmentLegs[];
+  try {
+    runs = setOut(outline, {
+      puf, frameWidthFt: widthFt, bayFt, standoffFt: 1,
+      standardBays: [...STANDARD_BAY_LENGTHS], turnaround: data.turnaround,
+    });
+  } catch {
+    return { model: null, representative: !traced };
+  }
+  if (!runs.length) return { model: null, representative: !traced };
+
+  // Every leg the same height: the wall's. Biggest frames at the bottom.
+  const heightFt = data.wallHeight > 0 ? data.wallHeight : data.jumps * 6.333 + 6;
+  const makeup = computeFrameMakeup(Math.max(0, heightFt - DEFAULT_WORKER_REACH_FT), DEFAULT_SCREW_JACK_MAX_IN);
+  let frames = [...makeup.pieces].sort((m, n) => n.size - m.size).flatMap(piece => new Array<number>(piece.qty).fill(piece.size));
+  if (!frames.length) frames = new Array<number>(Math.max(1, data.framesPerLeg || 1)).fill(6.333);
+  const stack = { frames, jackIn: makeup.screwJackExtensionIn ?? 0 };
+
+  const model = buildScaffoldModel({
+    runs, puf, frameWidthFt: widthFt, planksPerLift,
+    stackFor: () => stack,
+    hatchBays: pickHatchBays(runs, { mode: data.hatchMode, bayFt }),
+    walls: outline.map((p, i) => ({ a: p, b: outline[(i + 1) % outline.length], heightFt })),
+    netting: data.netting ? { addedHeightFt: 3 } : null,
+  });
+  return { model, representative: !traced };
+}
+
+/** A plain building of the job's coverage, in feet, for a bid with no traced plan. */
+function representativeOutline(linearFeet: number): PlanPoint[] {
+  const perimeter = linearFeet > 0 ? linearFeet : 200;
+  const long = (perimeter / 2) * (1.6 / 2.6), short = (perimeter / 2) * (1 / 2.6);
+  return [{ x: 0, y: 0 }, { x: long, y: 0 }, { x: long, y: short }, { x: 0, y: short }];
+}
+
+/*
+ * The last frame the live model drew, for the printed copy of the page. The
+ * printer's copy of the page is laid out hidden and never gets a GPU
+ * context; it prints this instead.
+ */
+let lastProposalFrame = "";
+
+function ProposalModel({ data }: { data: BidPresentationData }) {
+  /*
+   * Rebuilt only when something the model is made of changes. The page
+   * behind the deck re-renders as its numbers roll, and every re-render
+   * hands down a fresh data object; tearing the GPU scene down for that
+   * would restart the turn every few seconds.
+   */
+  const modelKey = JSON.stringify([
+    data.outline, data.unitsPerFoot, data.scaffoldWidth, data.bayLength, data.planksPerDeck,
+    data.wallHeight, data.jumps, data.framesPerLeg, data.turnaround, data.hatchMode, data.netting, data.linearFeet,
+  ]);
+  const built = useMemo(() => proposalScaffold(data), [modelKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const mountRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<HTMLImageElement>(null);
+  const stillRef = useRef<HTMLImageElement>(null);
+  /*
+   * live: the model turning. still: the printer's copy, showing the live
+   * one's last frame. drawn: no model or no GPU - the isometric drawing.
+   */
+  const [mode, setMode] = useState<"live" | "still" | "drawn">("live");
+  const [hasStill, setHasStill] = useState(Boolean(lastProposalFrame));
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+    if (!built.model || built.model.pieces.length === 0) { setMode("drawn"); return; }
+
+    // Laid out hidden: this is the printer's copy. Show the live frame when asked to print.
+    if (mount.clientWidth === 0 || mount.clientHeight === 0) {
+      setMode("still");
+      const show = () => {
+        if (!lastProposalFrame) return;
+        // Straight to the element as well as through state: the print snapshot may not wait for a render.
+        if (stillRef.current) { stillRef.current.src = lastProposalFrame; stillRef.current.classList.remove("hidden"); }
+        setHasStill(true);
+      };
+      show();
+      window.addEventListener("beforeprint", show);
+      const media = window.matchMedia("print");
+      const onMedia = (e: MediaQueryListEvent) => { if (e.matches) show(); };
+      media.addEventListener?.("change", onMedia);
+      return () => {
+        window.removeEventListener("beforeprint", show);
+        media.removeEventListener?.("change", onMedia);
+      };
+    }
+
+    const model = built.model;
+    const W = mount.clientWidth, H = mount.clientHeight;
+    const BG = 0x0a0a0b;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(BG);
+    const camera = new THREE.PerspectiveCamera(46, W / H, 0.1, 2000);
+
+    /*
+     * The same conservative path as Set Scaffold: no antialias, no shadow
+     * maps, pixel ratio 1, low-power, and the frame copied to an <img>,
+     * because a WebGL canvas composites blank white on some machines while
+     * drawing perfectly.
+     */
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "low-power", failIfMajorPerformanceCaveat: false, preserveDrawingBuffer: true });
+    } catch {
+      setMode("drawn");
+      return;
+    }
+    renderer.setSize(W, H);
+    renderer.setPixelRatio(1);
+    renderer.shadowMap.enabled = false;
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
+    mount.appendChild(renderer.domElement);
+    const canvas = renderer.domElement;
+    const onLost = (e: Event) => { e.preventDefault(); };
+    canvas.addEventListener("webglcontextlost", onLost, false);
+
+    const observer = new ResizeObserver(() => {
+      const w = mount.clientWidth, h = mount.clientHeight;
+      if (w > 0 && h > 0) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+    });
+    observer.observe(mount);
+
+    // The job: the shared stamping, in the proposal's palette, on dark walls.
+    const palette = proposalPalette();
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x2b2e34, roughness: 0.95 });
+    const build = buildScaffoldGroup(model, palette, { wallMaterial: wallMat });
+    scene.add(build.group);
+    const { center, size, camDist } = build;
+    scene.fog = new THREE.FogExp2(BG, 0.3 / camDist);
+
+    /*
+     * Orange treatment. A warm key light that sweeps round with the camera,
+     * a cool rim from behind, a pool of orange light on the ground, a glow
+     * behind the building and embers drifting up through the scaffold. The
+     * rails are lit from the palette, so the top lift reads as a line of
+     * light round the job.
+     */
+    scene.add(new THREE.AmbientLight(0xfff1e6, 0.42));
+    const key = new THREE.DirectionalLight(0xffc08a, 2.0);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x7f8cff, 0.6);
+    rim.position.set(center.x - camDist, camDist * 0.8, center.z - camDist);
+    scene.add(rim);
+    const warmFill = new THREE.DirectionalLight(0xf97316, 0.45);
+    warmFill.position.set(center.x, -camDist * 0.3, center.z); // up from the pool of light
+    scene.add(warmFill);
+
+    const radial = (inner: string, mid: string) => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 256;
+      const g = c.getContext("2d");
+      if (g) {
+        const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+        grad.addColorStop(0, inner); grad.addColorStop(0.45, mid); grad.addColorStop(1, "rgba(249,115,22,0)");
+        g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
+      }
+      return new THREE.CanvasTexture(c);
+    };
+    const disposables: { dispose(): void }[] = [wallMat];
+
+    /*
+     * The camera stands back a fifth further than the working model, so the
+     * job turns clear of the panel's edges; the glow is scaled up by the
+     * same fifth, so the building gets smaller and the light does not.
+     */
+    const standBack = 1.18;
+    const glow = standBack / 0.98;
+    const footprint = Math.max(size.x, size.z);
+    const poolTex = radial("rgba(249,115,22,0.55)", "rgba(249,115,22,0.16)");
+    const poolMat = new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, depthWrite: false });
+    const poolGeo = new THREE.PlaneGeometry(footprint * 2.6 * glow, footprint * 2.6 * glow);
+    const pool = new THREE.Mesh(poolGeo, poolMat);
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set(center.x, -0.01, center.z);
+    scene.add(pool);
+    disposables.push(poolTex, poolMat, poolGeo);
+
+    const gridSize = footprint * 3 + 20;
+    const grid = new THREE.GridHelper(gridSize, Math.max(10, Math.round(gridSize / (10 * FEET))), 0xf97316, 0xf97316);
+    const gridMat = grid.material as THREE.Material;
+    gridMat.transparent = true; gridMat.opacity = 0.11;
+    grid.position.set(center.x, 0, center.z);
+    scene.add(grid);
+    disposables.push(grid.geometry, gridMat);
+
+    // The glow sits behind the building from wherever the camera is, so the job is backlit as it turns.
+    const haloTex = radial("rgba(251,146,60,0.5)", "rgba(249,115,22,0.12)");
+    const haloMat = new THREE.SpriteMaterial({ map: haloTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, fog: false });
+    const halo = new THREE.Sprite(haloMat);
+    halo.scale.set(camDist * 1.1 * glow, camDist * 0.75 * glow, 1);
+    scene.add(halo);
+    disposables.push(haloTex, haloMat);
+    const haloBack = footprint * 0.75;
+
+    // Embers: two drifts, small bright and larger soft, each wrapping back to the ground.
+    const emberTex = radial("rgba(255,237,213,1)", "rgba(251,146,60,0.55)");
+    const top = size.y / FEET; // feet
+    const spawn = (count: number) => {
+      const arr = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        arr[i * 3] = center.x + (Math.random() - 0.5) * size.x * 1.4;
+        arr[i * 3 + 1] = Math.random() * (top * 1.5) * FEET;
+        arr[i * 3 + 2] = center.z + (Math.random() - 0.5) * size.z * 1.4;
+      }
+      return arr;
+    };
+    const drifts = [
+      { n: 44, size: 0.08 * camDist / 10, speed: 0.28, color: 0xfdba74, opacity: 0.9 },
+      { n: 22, size: 0.16 * camDist / 10, speed: 0.17, color: 0xf97316, opacity: 0.55 },
+    ].map(d => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(spawn(d.n), 3));
+      const mat = new THREE.PointsMaterial({ map: emberTex, color: d.color, size: d.size, transparent: true, opacity: d.opacity, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true });
+      const points = new THREE.Points(geo, mat);
+      scene.add(points);
+      disposables.push(geo, mat);
+      return { points, speed: d.speed, phase: Math.random() * 6 };
+    });
+    disposables.push(emberTex);
+
+    let angle = Math.PI * 0.22;
+    let last = performance.now();
+    let lastMirror = 0, lastKeep = 0;
+    let raf = 0;
+    const ceiling = (top * 1.5) * FEET;
+    const animate = () => {
+      raf = requestAnimationFrame(animate);
+      const now = performance.now();
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      angle += dt * 0.21;
+      camera.position.set(center.x + Math.sin(angle) * camDist * standBack, camDist * 0.48, center.z + Math.cos(angle) * camDist * standBack);
+      camera.lookAt(center.x, center.y * 0.45, center.z);
+      key.position.set(center.x + Math.sin(angle + 0.9) * camDist, camDist * 0.8, center.z + Math.cos(angle + 0.9) * camDist);
+      halo.position.set(center.x - Math.sin(angle) * haloBack, center.y + size.y * 0.3, center.z - Math.cos(angle) * haloBack);
+      for (const d of drifts) {
+        const arr = d.points.geometry.getAttribute("position") as THREE.BufferAttribute;
+        const t = now / 1000 + d.phase;
+        for (let i = 0; i < arr.count; i++) {
+          let y = arr.getY(i) + d.speed * dt * camDist * 0.05;
+          if (y > ceiling) y = 0;
+          arr.setY(i, y);
+          arr.setX(i, arr.getX(i) + Math.sin(t + i) * dt * 0.02 * camDist * 0.05);
+        }
+        arr.needsUpdate = true;
+      }
+      renderer.render(scene, camera);
+
+      // The frame goes to the image a dozen times a second; the printer keeps one every so often.
+      if (now - lastMirror > 66 && document.visibilityState === "visible") {
+        lastMirror = now;
+        const img = mirrorRef.current;
+        if (img) {
+          try {
+            const url = renderer.domElement.toDataURL("image/jpeg", 0.82);
+            img.src = url;
+            img.style.visibility = "visible";
+            if (now - lastKeep > 400) { lastKeep = now; lastProposalFrame = url; }
+          } catch { /* skip a frame */ }
+        }
+      }
+    };
+    animate();
+
+    return () => {
+      cancelAnimationFrame(raf);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      try { observer.disconnect(); } catch { /* already gone */ }
+      build.dispose();
+      disposePalette(palette);
+      disposables.forEach(d => d.dispose());
+      renderer.dispose();
+      try { renderer.forceContextLoss(); } catch { /* not supported here */ }
+      if (mount.contains(canvas)) mount.removeChild(canvas);
+    };
+  }, [built]);
+
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-[#0a0a0b]">
+      {mode !== "drawn" && (
+        <>
+          {/* The canvas draws underneath; the image on top shows what it drew (see the render loop). */}
+          <div ref={mountRef} className="absolute inset-0 opacity-0" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img ref={mirrorRef} alt="" style={{ visibility: "hidden" }} className="pointer-events-none absolute inset-0 h-full w-full object-cover" />
+        </>
+      )}
+      {(mode === "drawn" || (mode === "still" && !hasStill)) && (
+        <div className="absolute inset-0 p-3">
+          <RotatingScaffold data={data} />
+        </div>
+      )}
+      {mode === "still" && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img ref={stillRef} src={hasStill ? lastProposalFrame : undefined} alt="Scaffold model" className={`pointer-events-none absolute inset-0 h-full w-full object-cover ${hasStill ? "" : "hidden"}`} />
+      )}
+      <p className="pointer-events-none absolute right-3 top-2.5 font-mono text-[9px] uppercase tracking-[0.2em] text-orange-400">
+        {built.representative ? "Representative layout \u00b7 plan not traced" : "Built before it\u2019s built"}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * A tile's heading on the summary: big, orange, and lit once as the tile
+ * arrives - a band of light crosses the letters, then it settles.
+ */
+function TileTitle({ children, on }: { children: string; on: boolean }) {
+  return (
+    <div>
+      <h2
+        className="relative text-[26px] font-bold uppercase leading-none tracking-[0.04em] text-orange-400"
+        style={{ fontFamily: "var(--font-title), ui-sans-serif, system-ui", textShadow: "0 0 22px rgba(249,115,22,0.35)" }}
+      >
+        {children}
+        {on && <span aria-hidden className="korban-tile-flash absolute inset-0">{children}</span>}
+      </h2>
+      <span
+        className="mt-1.5 block h-[3px] rounded-full bg-orange-500 transition-[width] duration-700 ease-out"
+        style={{ width: on ? 40 : 0, transitionDelay: "300ms" }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The confidentiality notice under the model.
+ *
+ * Formal on purpose: it is the one paragraph on the page written for the
+ * recipient's lawyer rather than their estimator. The sender's name comes
+ * from Backend > Company; the customer's from the job.
+ */
+function confidentiality(data: BidPresentationData): string {
+  const sender = data.company || "the sender";
+  const recipient = data.customer ? `for ${data.customer}` : "for its recipient";
+  return `This proposal was prepared by ${sender} ${recipient} and composed in Korban. ` +
+    `The scaffold design, the model, the quantities and the pricing it carries are the original work of ${sender}, ` +
+    `furnished in confidence solely for the evaluation of this bid. They remain the property of ${sender} and may not be ` +
+    `copied, forwarded, published or disclosed beyond the recipient\u2019s own bid team, nor used to inform, shape or solicit ` +
+    `any other proposal. Acceptance of this presentation constitutes acceptance of these terms.`;
+}
+
+/**
+ * What the cost includes, under the number. The same words as line item 01
+ * on the proposal sheet - furnish, install and remove, the finish, the
+ * footage, the estimator's note, the rental period - then the alternates
+ * that were taken, so nobody reads the deck and the paper as two offers.
+ */
+function costDescription(data: BidPresentationData): string {
+  const money = (v: number) => `$${Math.round(v).toLocaleString()}`;
+  const base = Math.max(0, data.finalBid - data.alternateRevenue);
+  const parts: string[] = [];
+  parts.push(
+    `Furnish, install and remove exterior ${data.trade || "scaffold"} for ${data.finish || "general access"}` +
+    ` \u2014 ${Math.round(data.linearFeet).toLocaleString()} LF` +
+    (data.elevationsCovered.length > 0 ? ` across ${data.elevationsCovered.join(", ").replace(/, ([^,]*)$/, " and $1")}` : "") + ".",
+  );
+  if (data.proposalNotes.trim()) parts.push(data.proposalNotes.trim().replace(/[.\s]*$/, "") + ".");
+  if (data.rentalDays > 0) {
+    parts.push(
+      `${data.alternatesIncluded.length > 0 ? money(base) + " covers" : "Covers"} the first ${data.rentalDays} days on rent` +
+      (data.rentalThereafter > 0 ? `; ${money(data.rentalThereafter)} per ${data.rentalDays} days thereafter.` : "."),
+    );
+  }
+  if (data.alternatesIncluded.length > 0) {
+    parts.push(`Alternates included: ${data.alternatesIncluded.join(", ").toLowerCase()} (${money(data.alternateRevenue)}).`);
+  }
+  return parts.join(" ");
+}
+
+function OnePage({ data }: { data: BidPresentationData }) {
   /*
    * The page brings itself in.
    *
@@ -1048,6 +1493,22 @@ function OnePage({ data }: { data: BidPresentationData }) {
 
   return (
     <div className="flex h-full w-full flex-col gap-3 p-8">
+      <style>{`
+        .korban-tile-flash {
+          color: transparent;
+          background: linear-gradient(100deg, transparent 38%, #fff7ed 50%, transparent 62%);
+          background-size: 240% 100%;
+          -webkit-background-clip: text;
+          background-clip: text;
+          pointer-events: none;
+          animation: korban-tile-flash 1.1s ease-out 0.35s 1 both;
+        }
+        @keyframes korban-tile-flash {
+          from { background-position: 100% 0; }
+          to { background-position: 0% 0; }
+        }
+        @media print { .korban-tile-flash { display: none; } }
+      `}</style>
       <div className={`flex items-end justify-between border-b border-zinc-800 pb-3 ${block(0)}`}>
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-orange-400">
@@ -1068,8 +1529,8 @@ function OnePage({ data }: { data: BidPresentationData }) {
       <div className="grid flex-1 grid-cols-[1.15fr_1fr] gap-4">
         <div className="flex flex-col gap-3">
           <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(1)}`}>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Scope</p>
-            <div className="mt-2 grid grid-cols-3 gap-3">
+            <TileTitle on={inAt(1)}>Scope</TileTitle>
+            <div className="mt-3 grid grid-cols-3 gap-3">
               <SummaryFigure label="Coverage" value={`${Math.round(data.linearFeet).toLocaleString()} LF`} />
               <SummaryFigure label="Wall height" value={`${data.wallHeight.toFixed(1)}'`} />
               <SummaryFigure label="Frames per leg" value={String(data.framesPerLeg)} />
@@ -1082,40 +1543,18 @@ function OnePage({ data }: { data: BidPresentationData }) {
           </div>
 
           <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(2)}`}>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Built from</p>
-            <div className="mt-2 grid grid-cols-4 gap-y-2.5 gap-x-3">
-              <SummaryFigure label="Frames" value={data.frames.toLocaleString()} small />
-              <SummaryFigure label="Planks" value={data.planks.toLocaleString()} small />
-              <SummaryFigure label="Braces" value={data.crossBraces.toLocaleString()} small />
-              <SummaryFigure label="Guardrail" value={data.guardrails.toLocaleString()} small />
-              <SummaryFigure label="Legs" value={data.legs.toLocaleString()} small />
-              <SummaryFigure label="Bays" value={data.bays.toLocaleString()} small />
-              <SummaryFigure label="Base plates" value={data.basePlates.toLocaleString()} small />
-              <SummaryFigure label="Screw jacks" value={data.screwJacks.toLocaleString()} small />
-            </div>
-            <p className="mt-3 font-mono text-[10px] text-zinc-600">
-              {data.scaffoldWidth}&apos; wide &middot; {data.bayLength}&apos; bays &middot; {data.planksPerDeck} planks per deck
-            </p>
-          </div>
-
-          <div className={`rounded-xl border border-zinc-800 bg-black/40 p-4 ${block(3)}`}>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Schedule</p>
-            <div className="mt-2 grid grid-cols-4 gap-3">
+            <TileTitle on={inAt(2)}>Schedule</TileTitle>
+            <div className="mt-3 grid grid-cols-4 gap-3">
               <SummaryFigure label="Erect" value={`${data.erectDays}d`} small />
               <SummaryFigure label="Dismantle" value={`${data.dismantleDays}d`} small />
               <SummaryFigure label="Crew" value={String(data.crewSize)} small />
               <SummaryFigure label="On rent" value={`${data.rentalDays}d`} small />
             </div>
           </div>
-        </div>
-
-        <div className="flex flex-col gap-3">
-          <div className={`flex-1 rounded-xl border border-zinc-800 bg-black/40 p-2 ${block(1)}`}>
-            <RotatingScaffold data={data} spin={spin} />
-          </div>
 
           {/*
-            * What it costs, and how long we are on site.
+            * What it costs, and how long we are on site. Last on the left, at
+            * the foot of the column, so the page reads scope, schedule, number.
             *
             * "Investment" is what a brochure calls a price. This is a bid: the
             * customer is being told a number, and the plainer word is the one
@@ -1126,12 +1565,14 @@ function OnePage({ data }: { data: BidPresentationData }) {
             * into erect and dismantle, this is the answer to "how long are you
             * on my site".
             */}
-          <div className={`rounded-xl border border-orange-500/40 bg-orange-500/[0.07] p-4 ${block(4)}`}>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-orange-300/80">
-              Cost
-            </p>
-            <p className="mt-1 text-4xl font-bold tracking-tight text-white">{money(data.finalBid)}</p>
-            <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className={`mt-auto flex min-h-0 flex-1 flex-col rounded-xl border border-orange-500/40 bg-orange-500/[0.07] p-4 ${block(3)}`}>
+            <TileTitle on={inAt(3)}>Cost</TileTitle>
+            {/* The number is the page's one big figure: it takes the room the column has and sits in the middle of it, with what it buys beneath. */}
+            <div className="my-auto py-3">
+              <p className="text-[58px] font-bold leading-none tracking-[-0.03em] text-white">{money(data.finalBid)}</p>
+              <p className="mt-3 max-w-[60ch] text-[10px] leading-[1.6] text-zinc-400">{costDescription(data)}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <SummaryFigure label={`${data.trade} rental`} value={money(data.rentalRevenue)} small />
               <SummaryFigure label="Labor" value={money(data.laborRevenue)} small />
             </div>
@@ -1142,6 +1583,23 @@ function OnePage({ data }: { data: BidPresentationData }) {
                 small
               />
             </div>
+          </div>
+        </div>
+
+        <div className={`flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#0a0a0b] ${block(1)}`}>
+          {/* The scaffold itself, set out again from the link and turning. */}
+          <div className="min-h-0 flex-1">
+            <ProposalModel data={data} />
+          </div>
+          {/*
+            * Whose work this is, and who it is for. The design and the number
+            * are the sender's; the page says so where the customer is looking.
+            */}
+          <div className={`border-t border-zinc-800 bg-black/60 px-4 py-3 ${block(4)}`}>
+            <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-orange-400">Confidential</p>
+            <p className="mt-1 text-[10px] leading-[1.6] text-zinc-500">
+              {confidentiality(data)}
+            </p>
           </div>
         </div>
       </div>

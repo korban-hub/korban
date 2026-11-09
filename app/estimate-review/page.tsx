@@ -15,7 +15,9 @@ import {
   updateActiveProject,
   stockingHours,
   type BidRoundFigures,
+  type ProjectElevation,
   type ProjectRecord,
+  type TierSnapshot,
 } from "@/lib/projectStore";
 import { BidRoundHistory, BidRoundRevise } from "@/components/bid-round";
 import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
@@ -304,6 +306,24 @@ function KorbanMotionStyles() {
 // Page
 // ----------------------------------------------------------------------
 
+/**
+ * What the proposal's model needs to set the plan out again at real size:
+ * the plan's scale, and the job's own choices. Read the way Set Scaffold
+ * reads them, so the model on the proposal is the model on the plan.
+ */
+function readModelLink(live: ProjectElevation, tier: TierSnapshot, level: BidLevel) {
+  const scaleOf = (v: unknown) => (v as { pageUnitsPerFoot?: number } | null | undefined)?.pageUnitsPerFoot ?? 0;
+  const aerial = tier.overlayGeometry?.fullOverlayRows?.some(
+    (row) => (row as { overlayType?: string }).overlayType === "Aerial",
+  ) ?? false;
+  const flags = live as ProjectElevation & { turnaroundBays?: boolean; ladderHatchMode?: "per100" | "perElevation" };
+  return {
+    unitsPerFoot: scaleOf(live.scale) || scaleOf(tier.overlayGeometry?.scale) || (aerial ? 4 : level === "quick-bid" ? 1 : 0),
+    turnaround: flags.turnaroundBays ?? false,
+    hatchMode: flags.ladderHatchMode ?? "per100",
+  };
+}
+
 export default function EstimateReviewPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("breakdown");
@@ -320,6 +340,8 @@ export default function EstimateReviewPage() {
   const [partialExteriorMarkupPercent, setPartialExteriorMarkupPercent] = useState(6);
   /** Traced plan outline, used by the bid presentation. Empty at Quick Bid. */
   const [planOutline, setPlanOutline] = useState<{ x: number; y: number }[]>([]);
+  /** The plan's scale and the job's choices, so the proposal can rebuild the model. */
+  const [modelLink, setModelLink] = useState<ReturnType<typeof readModelLink>>({ unitsPerFoot: 0, turnaround: false, hatchMode: "per100" });
   /** Scaffold geometry the presentation calls out. Read from the elevation. */
   const [scaffoldWidth, setScaffoldWidth] = useState(3);
   const [bayLength, setBayLength] = useState(10);
@@ -523,6 +545,7 @@ export default function EstimateReviewPage() {
           ? geometry!.tracedPerimeter
           : keyFloor?.alignedPoints ?? anyFloor?.alignedPoints ?? []
       );
+      setModelLink(readModelLink(live, elevation, chosen));
 
       setBackend(backendSettings);
 
@@ -658,6 +681,7 @@ export default function EstimateReviewPage() {
         ? geometry!.tracedPerimeter
         : keyFloor?.alignedPoints ?? anyFloor?.alignedPoints ?? [],
     );
+    setModelLink(readModelLink(live, tier, bidLevel));
   }, [bidLevel, isHydrated]);
 
   const estimate = storedEstimate ?? EMPTY_ESTIMATE;
@@ -1258,6 +1282,7 @@ export default function EstimateReviewPage() {
           dismantleHours={totals.dismantleHours}
           elevationBreakdownRows={elevationBreakdownRows}
           planOutline={planOutline}
+          modelLink={modelLink}
           scaffoldWidth={scaffoldWidth}
           bayLength={bayLength}
           planksPerDeck={planksPerDeck}
@@ -2437,7 +2462,7 @@ function PartialExteriorAccordion({
 
 function ProposalTab({
   estimate, bidLevel, erectDays, dismantleDays, crewSize, erectHours, dismantleHours,
-  elevationBreakdownRows, planOutline, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
+  elevationBreakdownRows, planOutline, modelLink, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
   company, backend, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
   miscRevenue, setMiscRevenue, alternateRevenue, finalBid, projectRecord, onRevised, currentFigures,
   approvedAlternates, toggleAlternate, alternatePricing, alternateSettings,
@@ -2454,6 +2479,7 @@ function ProposalTab({
   dismantleHours: number;
   elevationBreakdownRows: { elevation: string; approxLinearFeet: number }[];
   planOutline: { x: number; y: number }[];
+  modelLink: ReturnType<typeof readModelLink>;
   scaffoldWidth: number;
   bayLength: number;
   planksPerDeck: number;
@@ -2561,6 +2587,17 @@ function ProposalTab({
       elevation: row.elevation,
       linearFeet: row.approxLinearFeet,
     })),
+    // For the model on the proposal: the plan's scale and the job's choices.
+    unitsPerFoot: modelLink.unitsPerFoot,
+    turnaround: modelLink.turnaround,
+    hatchMode: modelLink.hatchMode,
+    netting: approvedAlternates.includes("netting"),
+    // What the number buys, in the proposal sheet's own words.
+    finish: tradePhrase(finishes),
+    proposalNotes,
+    alternatesIncluded: approvedAlternates.map((id) => alternatePricing[id]?.title).filter(Boolean),
+    alternateRevenue,
+    rentalThereafter: rentalsRevenue / Math.max(1, rentalMonths),
   };
 
   return (

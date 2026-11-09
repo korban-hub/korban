@@ -41,7 +41,7 @@ export type Vec3 = { x: number; y: number; z: number };
 
 export type PartKind =
   | "post" | "ledger" | "brace" | "rail" | "plank" | "jack" | "plate"
-  | "bracket" | "bracketPlank" | "hatchBoard" | "hatchDoor" | "ladder" | "guardPost";
+  | "bracket" | "bracketPlank" | "hatchBoard" | "hatchDoor" | "ladder" | "guardPost" | "netting";
 
 export type Piece =
   /** A round tube from a to b. */
@@ -70,6 +70,11 @@ export type ModelInput = {
   walls?: WallPiece[];
   /** Plan origin to centre on, px. Defaults to the middle of the legs. */
   origin?: PlanPoint;
+  /**
+   * Debris netting on the outer face, from the ground to the top of the
+   * scaffold plus this much. Left out when the job has no netting add.
+   */
+  netting?: { addedHeightFt: number } | null;
 };
 
 export type ScaffoldModel = {
@@ -430,6 +435,31 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
       }
     }
     if (run.brackets && run.bracketReachFt) drawBrackets(run, run.bracketReachFt);
+  }
+
+  /*
+   * Debris netting: one sheet per bay down the outer face, ground to the top
+   * of the run plus the added height, hung on the back posts. Lead and tail
+   * decks get theirs too, so the net runs unbroken round a corner.
+   */
+  if (input.netting) {
+    const extra = input.netting.addedHeightFt;
+    const sheet = (a: PlanPoint, b: PlanPoint, top: number) => {
+      quad([F(a, 0.3), F(b, 0.3), F(b, top + extra), F(a, top + extra)], "netting");
+    };
+    for (const run of runs) {
+      const tops = run.legs.map((_, i) => { const t = liftTops(input.stackFor(run.segIndex, i)); return t.length ? t[t.length - 1] : 0; });
+      for (let i = 0; i + 1 < run.legs.length; i++) {
+        sheet(run.legs[i].tickTip, run.legs[i + 1].tickTip, Math.max(tops[i], tops[i + 1]));
+      }
+      if (run.lead && run.legs.length) {
+        const first = run.legs[0];
+        const dx = run.b.x - run.a.x, dy = run.b.y - run.a.y, L = Math.hypot(dx, dy) || 1;
+        const c1 = { x: first.tickTip.x - (dx / L) * run.lead.lengthFt * puf, y: first.tickTip.y - (dy / L) * run.lead.lengthFt * puf };
+        sheet(c1, first.tickTip, tops[0]);
+      }
+      if (run.tail && run.legs.length && !run.tail.beside) sheet(run.tail.a1, run.tail.b1, tops[tops.length - 1]);
+    }
   }
 
   /*

@@ -12,6 +12,7 @@ import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 import { readInsets, setOut, setOutRuns, type BaySpan, type LegResult, type PlanPoint, type SegmentLegs } from "@/lib/scaffoldSetOut";
 import { buildScaffoldModel, hatchBoardPart, pickHatchBays, type LegStack, type PartKind, type ScaffoldModel, type Vec3 } from "@/lib/scaffoldModel";
+import { loadEstimateState } from "@/lib/estimateState";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 // PlanPoint, LegResult, BaySpan and SegmentLegs come from the set-out engine
@@ -168,14 +169,24 @@ function legLabelSize(tickLenPx: number): number {
  * so a job of a few thousand pieces costs the GPU what a few dozen did when
  * every tube was its own mesh - which is what froze the browser on big jobs.
  */
-function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
+function ScaffoldModel3D({ model, onCapture }: { model: ScaffoldModel | null; onCapture?: (views: string[]) => void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLImageElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const frameRef = useRef<number>(0);
   const [rotating, setRotating] = useState(true);
   const [zoom, setZoom] = useState(1);
+  const [expanded, setExpanded] = useState(false);
+  const [captured, setCaptured] = useState(0);
   const [renderError, setRenderError] = useState<string | null>(null);
+
+  // Escape closes the expanded view.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
 
   useEffect(() => {
     if (!mountRef.current || !model || model.pieces.length === 0) return;
@@ -184,8 +195,10 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     // a NaN camera; the resize observer below corrects it as soon as it settles.
     const initialW = W || 400, initialH = H || 300;
 
+    // A lighter ground to read steel and black netting against.
+    const BG = 0x3b4149;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x080604);
+    scene.background = new THREE.Color(BG);
 
     const camera = new THREE.PerspectiveCamera(50, initialW / initialH, 0.1, 2000);
 
@@ -235,7 +248,7 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     canvas.addEventListener("webglcontextlost", onContextLost, false);
 
     // Lights
-    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const sun = new THREE.DirectionalLight(0xfff5e0, 1.3);
     sun.position.set(20, 30, 15); scene.add(sun);
     const fill = new THREE.DirectionalLight(0x8080ff, 0.3);
@@ -247,11 +260,31 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     // Materials, by what the part is. Brackets read green, as on the plan.
     const steel = (color: number, roughness = 0.3) => new THREE.MeshStandardMaterial({ color, metalness: 0.8, roughness });
     const wood = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
+    /*
+     * Debris netting: a black mesh you can see through. A small canvas of
+     * thin lines, repeated, on a transparent two-sided sheet.
+     */
+    const nettingMaterial = () => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 64;
+      const g = c.getContext("2d");
+      if (g) {
+        g.clearRect(0, 0, 64, 64);
+        g.strokeStyle = "rgba(10,10,12,0.85)";
+        g.lineWidth = 1.2;
+        for (let i = 0; i <= 64; i += 8) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 64); g.stroke(); g.beginPath(); g.moveTo(0, i); g.lineTo(64, i); g.stroke(); }
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(1, 1);
+      return new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false, color: 0x0b0b0d });
+    };
     const MAT: Record<PartKind, THREE.Material> = {
       post: steel(0xc4c8cc), ledger: steel(0xb4b9be), brace: steel(0x8f979f, 0.4), rail: steel(0xd8dde2),
       jack: steel(0x9aa3ad, 0.5), plate: steel(0x6b7480, 0.7), guardPost: steel(0xc4c8cc),
       bracket: steel(0x4ade80, 0.4), bracketPlank: wood(0x86efac),
       plank: wood(0x8a6a2a), hatchBoard: steel(0x8fa3b8, 0.5), hatchDoor: steel(0xb7c7d8, 0.5), ladder: steel(0xc9d3dc, 0.45),
+      netting: nettingMaterial(),
     };
     const quadMat: Partial<Record<PartKind, THREE.Material>> = {};
     const quadMatFor = (part: PartKind) => {
@@ -270,6 +303,7 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     const tubes = new Map<PartKind, THREE.Matrix4[]>();
     const boxes = new Map<PartKind, THREE.Matrix4[]>();
     const quads = new Map<PartKind, number[]>();
+    const quadUvs = new Map<PartKind, number[]>();
     const up = new THREE.Vector3(0, 1, 0);
     const pos = new THREE.Vector3(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), dir = new THREE.Vector3();
     const V = (p: Vec3) => new THREE.Vector3(p.x * S, p.y * S, p.z * S);
@@ -295,6 +329,10 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
         const [p0, p1, p2, p3] = piece.p.map(V);
         const list = quads.get(piece.part) ?? quads.set(piece.part, []).get(piece.part)!;
         list.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p0.x, p0.y, p0.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z);
+        // Texture repeats by real size (one tile per 2'), so netting mesh reads the same on every sheet.
+        const u = p0.distanceTo(p1) / (2 * S), v = p1.distanceTo(p2) / (2 * S);
+        const uvs = quadUvs.get(piece.part) ?? quadUvs.set(piece.part, []).get(piece.part)!;
+        uvs.push(0, 0, u, 0, u, v, 0, 0, u, v, 0, v);
       }
     }
     const stamp = (geo: THREE.BufferGeometry, byPart: Map<PartKind, THREE.Matrix4[]>) => {
@@ -310,12 +348,15 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     quads.forEach((verts, part) => {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+      geo.setAttribute("uv", new THREE.Float32BufferAttribute(quadUvs.get(part) ?? [], 2));
       geo.computeVertexNormals();
-      group.add(new THREE.Mesh(geo, quadMatFor(part)));
+      const mesh = new THREE.Mesh(geo, part === "netting" ? MAT.netting : quadMatFor(part));
+      if (part === "netting") mesh.renderOrder = 2;
+      group.add(mesh);
     });
 
     // The building: each wall at its own height.
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x5a616b, roughness: 0.9 });
     for (const w of model.walls) {
       const dx = (w.b.x - w.a.x) * S, dz = (w.b.z - w.a.z) * S;
       const len = Math.hypot(dx, dz);
@@ -331,11 +372,11 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     // Ground and grid, sized to the job.
     const bx = (model.bounds.max.x - model.bounds.min.x) * S, bz = (model.bounds.max.z - model.bounds.min.z) * S;
     const gSize = Math.max(bx, bz) * 3 + 20;
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(gSize, gSize), new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 1.0 }));
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(gSize, gSize), new THREE.MeshStandardMaterial({ color: 0x2c3138, roughness: 1.0 }));
     ground.rotation.x = -Math.PI / 2;
     ground.position.set((model.bounds.min.x + model.bounds.max.x) / 2 * S, -0.01, (model.bounds.min.z + model.bounds.max.z) / 2 * S);
     scene.add(ground);
-    const grid = new THREE.GridHelper(gSize, Math.max(10, Math.round(gSize / (10 * S))), 0x111111, 0x111111);
+    const grid = new THREE.GridHelper(gSize, Math.max(10, Math.round(gSize / (10 * S))), 0x4a515a, 0x3a4048);
     grid.position.copy(ground.position);
     scene.add(grid);
 
@@ -345,14 +386,61 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     const size = bbox.getSize(new THREE.Vector3());
     const camSize = Math.max(size.x, size.z, size.y * 1.5);
     const camDist = camSize * 1.35 + 5;
-    scene.fog = new THREE.FogExp2(0x080604, 0.55 / camDist);
+    scene.fog = new THREE.FogExp2(BG, 0.45 / camDist);
 
     let angle = Math.PI / 4;
     let isRotating = true;
     let zoomFactor = 1;
     (mountRef.current as any).__setRotating = (v: boolean) => { isRotating = v; };
     (mountRef.current as any).__setZoomFactor = (z: number) => { zoomFactor = z; };
-    (mountRef.current as any).__snapshot = () => renderer.domElement.toDataURL("image/png");
+    /*
+     * Three isometric views for the sheet: front-right, rear-left, high
+     * overhead. Rendered off the live loop at print size, then the live
+     * view is put back.
+     */
+    (mountRef.current as any).__captureViews = (): string[] => {
+      /*
+       * Three different views of the job, square, on white: an isometric from
+       * the front-right, a straight-on front elevation (square to the longest
+       * wall), and a street-level view from the front-left. No overhead - the
+       * layout sheet already shows the plan. Square so they tile into one
+       * rectangle on the sheet; white so the screen's ground doesn't print.
+       */
+      const keep = { w: renderer.domElement.width, h: renderer.domElement.height, aspect: camera.aspect };
+      const keepBg = scene.background, keepFog = scene.fog;
+      scene.background = new THREE.Color(0xffffff);
+      scene.fog = null;
+      ground.visible = false; grid.visible = false;
+      renderer.setSize(1400, 1400, false);
+      camera.aspect = 1; camera.updateProjectionMatrix();
+      const shots: string[] = [];
+      const fit = camDist * 1.12; // a touch further back: the square frame is tighter than the panel
+      // The front: square to the longest wall, from its outside.
+      let front = Math.PI / 2;
+      if (model.walls.length) {
+        const w = model.walls.reduce((b, x) => Math.hypot(x.b.x - x.a.x, x.b.z - x.a.z) > Math.hypot(b.b.x - b.a.x, b.b.z - b.a.z) ? x : b, model.walls[0]);
+        const mx = (w.a.x + w.b.x) / 2 * S, mz = (w.a.z + w.b.z) / 2 * S;
+        let nx = (w.b.z - w.a.z), nz = -(w.b.x - w.a.x);
+        if ((mx - center.x) * nx + (mz - center.z) * nz < 0) { nx = -nx; nz = -nz; } // outward: away from the middle of the job
+        front = Math.atan2(nx, nz);
+      }
+      const views: { a: number; out: number; up: number; look: number }[] = [
+        { a: Math.PI / 4, out: 1.0, up: 0.55, look: 0.4 },     // isometric, front-right
+        { a: front, out: 1.25, up: 0.14, look: 0.45 },         // front elevation, straight on
+        { a: Math.PI * 1.75, out: 1.15, up: 0.16, look: 0.45 }, // street level, front-left
+      ];
+      for (const v of views) {
+        camera.position.set(center.x + Math.sin(v.a) * fit * v.out, fit * v.up, center.z + Math.cos(v.a) * fit * v.out);
+        camera.lookAt(center.x, center.y * v.look, center.z);
+        renderer.render(scene, camera);
+        shots.push(renderer.domElement.toDataURL("image/jpeg", 0.92));
+      }
+      scene.background = keepBg; scene.fog = keepFog;
+      ground.visible = true; grid.visible = true;
+      renderer.setSize(keep.w, keep.h, false);
+      camera.aspect = keep.aspect; camera.updateProjectionMatrix();
+      return shots;
+    };
 
     let lastMirror = 0;
     function animate() {
@@ -409,13 +497,12 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
     if (mountRef.current) (mountRef.current as any).__setZoomFactor?.(zoom);
   }, [zoom]);
 
+  /** Three views, straight to the printed sheet. */
   function handleCapture() {
-    const dataUrl = (mountRef.current as any)?.__snapshot?.();
-    if (!dataUrl) return;
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = `scaffold-3d-view-${Date.now()}.png`;
-    a.click();
+    const views: string[] | undefined = (mountRef.current as any)?.__captureViews?.();
+    if (!views || views.length !== 3) return;
+    setCaptured(views.length);
+    onCapture?.(views);
   }
 
   if (renderError) {
@@ -431,8 +518,10 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
 
   const c = model?.counts;
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#080604]" style={{ minHeight: 0 }}>
+    <div className={expanded
+      ? "fixed inset-3 z-[70] flex flex-col overflow-hidden rounded-xl border border-zinc-700 bg-[#0b0b0b] shadow-2xl"
+      : "flex flex-col h-full"}>
+      <div className="flex-1 relative overflow-hidden rounded-t-lg bg-[#3b4149]" style={{ minHeight: 0 }}>
         {/* The canvas renders underneath; the image on top shows what it drew (see the render loop). */}
         <div ref={mountRef} className="absolute inset-0 opacity-0" />
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -452,9 +541,14 @@ function ScaffoldModel3D({ model }: { model: ScaffoldModel | null }) {
           className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-bold transition ${rotating ? "border-orange-500/40 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
           {rotating ? "⏸ Pause" : "▶ Resume"}
         </button>
-        <button onClick={handleCapture}
+        <button onClick={handleCapture} title="Three isometric views onto the printed sheet"
           className="rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[9px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300 transition">
           📷 Capture
+        </button>
+        {captured > 0 && <span className="font-mono text-[8.5px] text-emerald-400">3 views on the sheet</span>}
+        <button onClick={() => setExpanded(e => !e)} title={expanded ? "Back to the panel (Esc)" : "Fill the screen"}
+          className="ml-auto rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[9px] font-bold text-zinc-400 hover:border-orange-500/40 hover:text-orange-300 transition">
+          {expanded ? "✕ Close" : "⤢ Expand"}
         </button>
       </div>
     </div>
@@ -1348,6 +1442,23 @@ export default function SetScaffoldV2Inner() {
   }, 0), [hatchBays, allSegmentLegs, overriddenFC, strokeTallBySeg, frameTall]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /*
+   * Netting in the model follows the Netting add on the estimate. Read when
+   * the page opens and whenever it comes back into focus, since the add is
+   * ticked on Estimate Review.
+   */
+  const [nettingOn, setNettingOn] = useState(false);
+  useEffect(() => {
+    const read = () => { try { setNettingOn(loadEstimateState().approvedAlternates.includes("netting")); } catch { /* none yet */ } };
+    read();
+    window.addEventListener("focus", read);
+    window.addEventListener("storage", read);
+    return () => { window.removeEventListener("focus", read); window.removeEventListener("storage", read); };
+  }, []);
+  const nettingAddedHeightFt = getBackendSettings()?.alternates?.nettingAddedHeightFt ?? 3;
+  /** Three isometric views from the last Capture, for the printed sheet. Not kept across a reload. */
+  const [modelViews, setModelViews] = useState<string[]>([]);
+
+  /*
    * The scaffold in the air, for the 3D model: the engine's runs as edited on
    * the plan (deleted legs gone, dragged legs moved), each leg's real stack.
    */
@@ -1388,8 +1499,11 @@ export default function SetScaffoldV2Inner() {
       ...(outline.length >= 3 ? outline.map((p, i) => ({ a: p, b: outline[(i + 1) % outline.length], heightFt: elevation?.wallHeight ?? 0 })) : []),
       ...drawnRuns.map(r => ({ a: r.a, b: r.b, heightFt: r.heightFt })),
     ];
-    return buildScaffoldModel({ runs, puf: effPuf, frameWidthFt: scaffoldWidthFt, planksPerLift: ppb, stackFor, hatchBays, walls });
-  }, [scaleOk, effPuf, allSegmentLegs, deletedLegKeys, legOffsets, strokeSetOut, drawnRuns, elevation, workerReachHeight, screwJackMaxExtensionIn, frameTall, overriddenFC, outline, scaffoldWidthFt, ppb, hatchBays]);
+    return buildScaffoldModel({
+      runs, puf: effPuf, frameWidthFt: scaffoldWidthFt, planksPerLift: ppb, stackFor, hatchBays, walls,
+      netting: nettingOn ? { addedHeightFt: nettingAddedHeightFt } : null,
+    });
+  }, [scaleOk, effPuf, allSegmentLegs, deletedLegKeys, legOffsets, strokeSetOut, drawnRuns, elevation, workerReachHeight, screwJackMaxExtensionIn, frameTall, overriddenFC, outline, scaffoldWidthFt, ppb, hatchBays, nettingOn, nettingAddedHeightFt]);
 
   // A leg counts as "broken free" from the parallel track once its stored
   // offset has a perpendicular (off-wall) component beyond the same
@@ -3044,6 +3158,14 @@ export default function SetScaffoldV2Inner() {
           /* One per page, stacked down the printed document. */
           .korban-sheet:nth-of-type(1) { top: 0; }
           .korban-sheet:nth-of-type(2) { top: 100vh; }
+          .korban-sheet:nth-of-type(3) { top: 200vh; }
+          /* The three model views: the main one across 75% of the sheet, the other two under it at 50% and 30%. */
+          /* One rectangle: the main view the full height on the left, the other two stacked on the right. */
+          .korban-views { display: grid; grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; gap: 0.08in; height: 100%; }
+          .korban-views figure { margin: 0; position: relative; min-height: 0; min-width: 0; border: 1px solid #ccc; overflow: hidden; background: #fff; }
+          .korban-views .v1 { grid-row: 1 / span 2; }
+          .korban-views img { display: block; width: 100%; height: 100%; object-fit: cover; }
+          .korban-views figcaption { position: absolute; left: 0.06in; bottom: 0.05in; font-size: 7.5pt; letter-spacing: 0.12em; text-transform: uppercase; color: #444; background: rgba(255,255,255,0.85); padding: 0.02in 0.06in; }
 
           /* The interface corner brackets, at the corners of the paper. */
           .korban-sheet::before, .korban-sheet::after {
@@ -3197,6 +3319,42 @@ export default function SetScaffoldV2Inner() {
             data={sheetFigures}
             trade="Scaffold"
             sheetTitle="Section"
+          />
+        </div>
+      )}
+
+      {/* The model, three ways, on its own sheet behind the drawing - once Capture has been pressed. */}
+      {modelViews.length === 3 && (
+        <div className="korban-sheet hidden">
+          <div className="korban-sheet-draw korban-views">
+            <figure className="v1">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={modelViews[0]} alt="Scaffold model, isometric" />
+              <figcaption>View 1 — Isometric</figcaption>
+            </figure>
+            <figure className="v2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={modelViews[1]} alt="Scaffold model, front elevation" />
+              <figcaption>View 2 — Front elevation</figcaption>
+            </figure>
+            <figure className="v3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={modelViews[2]} alt="Scaffold model, street level" />
+              <figcaption>View 3 — Street level</figcaption>
+            </figure>
+          </div>
+          <SheetColumn
+            company={sheetInfo.company}
+            projectName={projectName}
+            address={sheetInfo.address}
+            customer={sheetInfo.customer}
+            jobNumber={sheetInfo.jobNumber}
+            bidNumber=""
+            estimator={sheetInfo.estimator}
+            scaleNote="Not to scale"
+            data={sheetFigures}
+            trade="Scaffold"
+            sheetTitle="3D views"
           />
         </div>
       )}
@@ -4357,7 +4515,7 @@ export default function SetScaffoldV2Inner() {
                 </div>
               )}
               {mounted && (hasPlan || drawnRuns.length > 0) && (
-                <ScaffoldModel3D model={scaffoldModel} />
+                <ScaffoldModel3D model={scaffoldModel} onCapture={setModelViews} />
               )}
             </div>
           </div>
