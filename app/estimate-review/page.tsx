@@ -19,6 +19,7 @@ import {
   type ProjectRecord,
   type TierSnapshot,
 } from "@/lib/projectStore";
+import { scopeExclusionLines } from "@/lib/scopeScrub";
 import { BidRoundHistory, BidRoundRevise } from "@/components/bid-round";
 import { computeTravel, getBackendSettings, getPieceRate, getProductionRates, type BackendSettings } from "@/lib/backendStore";
 import BidPresentation, { type BidPresentationData } from "@/components/bid-presentation";
@@ -316,11 +317,10 @@ function readModelLink(live: ProjectElevation, tier: TierSnapshot, level: BidLev
   const aerial = tier.overlayGeometry?.fullOverlayRows?.some(
     (row) => (row as { overlayType?: string }).overlayType === "Aerial",
   ) ?? false;
-  const flags = live as ProjectElevation & { turnaroundBays?: boolean; ladderHatchMode?: "per100" | "perElevation" };
   return {
     unitsPerFoot: scaleOf(live.scale) || scaleOf(tier.overlayGeometry?.scale) || (aerial ? 4 : level === "quick-bid" ? 1 : 0),
-    turnaround: flags.turnaroundBays ?? false,
-    hatchMode: flags.ladderHatchMode ?? "per100",
+    turnaround: live.turnaroundBays,
+    hatchMode: live.ladderHatchMode,
   };
 }
 
@@ -342,6 +342,19 @@ export default function EstimateReviewPage() {
   const [planOutline, setPlanOutline] = useState<{ x: number; y: number }[]>([]);
   /** The plan's scale and the job's choices, so the proposal can rebuild the model. */
   const [modelLink, setModelLink] = useState<ReturnType<typeof readModelLink>>({ unitsPerFoot: 0, turnaround: false, hatchMode: "per100" });
+  /**
+   * Exclusions the Scope Scrub produced for this job - every "Exclude it"
+   * on the Scope of Work, worded by its note. They print under the Backend
+   * exclusions on the proposal. Re-read when the tab comes back, since the
+   * scrub is another page.
+   */
+  const [scopeExclusions, setScopeExclusions] = useState<string[]>([]);
+  useEffect(() => {
+    const read = () => setScopeExclusions(scopeExclusionLines(getActiveProject().scopeScrubs, getBackendSettings().scope));
+    read();
+    window.addEventListener("focus", read);
+    return () => window.removeEventListener("focus", read);
+  }, []);
   /** Scaffold geometry the presentation calls out. Read from the elevation. */
   const [scaffoldWidth, setScaffoldWidth] = useState(3);
   const [bayLength, setBayLength] = useState(10);
@@ -1283,6 +1296,7 @@ export default function EstimateReviewPage() {
           elevationBreakdownRows={elevationBreakdownRows}
           planOutline={planOutline}
           modelLink={modelLink}
+          scopeExclusions={scopeExclusions}
           scaffoldWidth={scaffoldWidth}
           bayLength={bayLength}
           planksPerDeck={planksPerDeck}
@@ -2462,7 +2476,7 @@ function PartialExteriorAccordion({
 
 function ProposalTab({
   estimate, bidLevel, erectDays, dismantleDays, crewSize, erectHours, dismantleHours,
-  elevationBreakdownRows, planOutline, modelLink, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
+  elevationBreakdownRows, planOutline, modelLink, scopeExclusions, scaffoldWidth, bayLength, planksPerDeck, wallHeight,
   company, backend, rentalDays, rentalMonths, rentalsRevenue, laborRevenue,
   miscRevenue, setMiscRevenue, alternateRevenue, finalBid, projectRecord, onRevised, currentFigures,
   approvedAlternates, toggleAlternate, alternatePricing, alternateSettings,
@@ -2480,6 +2494,7 @@ function ProposalTab({
   elevationBreakdownRows: { elevation: string; approxLinearFeet: number }[];
   planOutline: { x: number; y: number }[];
   modelLink: ReturnType<typeof readModelLink>;
+  scopeExclusions: string[];
   scaffoldWidth: number;
   bayLength: number;
   planksPerDeck: number;
@@ -2625,6 +2640,9 @@ function ProposalTab({
               <InfoRow label="Bid round" value={estimate.bidRound || "Not set - pick it on Plan Desk"} />
               <InfoRow label="Coverage" value={`${estimate.totalLinearFeet.toLocaleString()} LF`} />
               <InfoRow label="Rental" value={`${rentalDays} days · ${rentalMonths} mo.`} />
+              {scopeExclusions.length > 0 && (
+                <InfoRow label="Scope Scrub" value={`${scopeExclusions.length} exclusion${scopeExclusions.length === 1 ? "" : "s"} carried to the sheet`} />
+              )}
             </div>
             {projectRecord && (
               <div className="mt-2">
@@ -2879,6 +2897,7 @@ function ProposalTab({
             finish={tradePhrase(finishes)}
             proposalStatus={proposalStatus}
             activeField={activeField}
+            scopeExclusions={scopeExclusions}
           />
         </div>
       </div>
@@ -3307,7 +3326,7 @@ function ProposalSheet({
   estimate, rentalDays, rentalMonths, rentalsRevenue, laborRevenue, miscRevenue,
   alternateRevenue, finalBid, approvedAlternates, alternatePricing, backend,
   proposalNotes, finish, proposalStatus,
-  activeField,
+  activeField, scopeExclusions,
 }: {
   estimate: EstimateData;
   rentalDays: number;
@@ -3324,6 +3343,8 @@ function ProposalSheet({
   finish: string;
   proposalStatus: ProposalStatus;
   activeField: string | null;
+  /** From Scope Scrub: the Scope of Work's "Exclude it" hits, worded by their notes. */
+  scopeExclusions: string[];
 }) {
   // Every word below comes from Backend > Proposal Language, with the
   // constants at the top of this file as the fallback for a fresh install.
@@ -3340,7 +3361,12 @@ function ProposalSheet({
     "All labor, materials, tools and equipment",
     "Delivery, install and removal",
   ]);
-  const sheetExclusions = lines(proposalConfig?.exclusionsLanguage ?? "", SHEET_EXCLUSIONS);
+  // Backend's standing exclusions, then this job's from the scrub, no line twice.
+  const sheetExclusions = (() => {
+    const base = lines(proposalConfig?.exclusionsLanguage ?? "", SHEET_EXCLUSIONS);
+    const seen = new Set(base.map((l) => l.toLowerCase()));
+    return [...base, ...scopeExclusions.filter((l) => !seen.has(l.toLowerCase()))];
+  })();
   const sheetQualifications = lines(
     proposalConfig?.qualificationsLanguage ?? "",
     SHEET_QUALIFICATIONS
@@ -3460,8 +3486,9 @@ function ProposalSheet({
               <span className="text-right font-mono text-[7.5px] uppercase tracking-[0.18em] text-[#8a857d]">
                 Duration
               </span>
+              {/* Extended rent is quoted by the month: rentals over the months on the job. */}
               <span className="text-right font-mono text-[7.5px] uppercase leading-tight tracking-[0.14em] text-[#8a857d]">
-                Per {rentalDays}d thereafter
+                Per month thereafter
               </span>
             </div>
 

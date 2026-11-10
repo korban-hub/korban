@@ -19,6 +19,14 @@ import {
   type AlternateRateDefaults,
   type AddAlternateDefault,
 } from "@/lib/backendStore";
+import {
+  DEFAULT_SCOPE_LIBRARY,
+  SCOPE_DOC_TYPES,
+  type ScopeCategory,
+  type ScopeDocType,
+  type ScopeLibrary,
+  type ScopeTerm,
+} from "@/lib/scopeScrub";
 
 export default function BackendPage() {
   const [isHydrated, setIsHydrated] = useState(false);
@@ -27,7 +35,7 @@ export default function BackendPage() {
    * The catalog is forty parts deep with four numbers each. Squeezed into a
    * tile it was unusable, so it takes the whole page when you go into it.
    */
-  const [view, setView] = useState<"settings" | "material">("settings");
+  const [view, setView] = useState<"settings" | "material" | "scope">("settings");
 
   const [company, setCompany] = useState<CompanySettings | null>(null);
   const [estimator, setEstimator] = useState<EstimatorSettings | null>(null);
@@ -37,6 +45,7 @@ export default function BackendPage() {
   const [pricing, setPricing] = useState<PricingDefaults | null>(null);
   const [alternates, setAlternates] = useState<AlternateRateDefaults | null>(null);
   const [proposal, setProposal] = useState<ProposalDefaults | null>(null);
+  const [scope, setScope] = useState<ScopeLibrary | null>(null);
 
   function loadAll() {
     const settings = getBackendSettings();
@@ -48,6 +57,7 @@ export default function BackendPage() {
     setPricing(settings.pricing);
     setAlternates(settings.alternates);
     setProposal(settings.proposal);
+    setScope(settings.scope);
   }
 
   useEffect(() => {
@@ -68,7 +78,7 @@ export default function BackendPage() {
     flashSaved("All Settings Reset");
   }
 
-  if (!isHydrated || !company || !estimator || !scaffold || !material || !labor || !pricing || !alternates || !proposal) {
+  if (!isHydrated || !company || !estimator || !scaffold || !material || !labor || !pricing || !alternates || !proposal || !scope) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#080604] text-white">
         <p className="text-sm text-zinc-500">Loading backend settings...</p>
@@ -81,7 +91,7 @@ export default function BackendPage() {
       <div className="sticky top-0 z-20">
         <KorbanHeader
           title="Backend"
-          subtitle="Estimator control center - company, scaffold, material, labor, pricing, alternates and proposal defaults."
+          subtitle="Estimator control center - company, scaffold, material, labor, pricing, alternates, proposal defaults and scope keywords."
           actionsAlwaysVisible
           actions={
             <>
@@ -99,6 +109,16 @@ export default function BackendPage() {
                 }`}
               >
                 {view === "material" ? "Back to settings" : "Material"}
+              </button>
+              <button
+                onClick={() => setView(view === "scope" ? "settings" : "scope")}
+                className={`rounded-xl border px-5 py-3 font-mono text-[11px] font-bold uppercase tracking-[0.14em] transition ${
+                  view === "scope"
+                    ? "border-orange-500 bg-orange-500 text-black"
+                    : "border-orange-500/40 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20"
+                }`}
+              >
+                {view === "scope" ? "Back to settings" : "Scope keywords"}
               </button>
               <button onClick={handleResetAll} className="rounded-xl border border-zinc-700 bg-black px-5 py-3 text-sm font-bold text-zinc-400 hover:border-red-500/40 hover:text-red-300">
                 Reset All
@@ -126,6 +146,12 @@ export default function BackendPage() {
           material={material}
           setMaterial={setMaterial}
           onSave={() => { saveBackendSection("material", material); flashSaved("Material Catalog"); }}
+        />
+      ) : view === "scope" ? (
+        <ScopeKeywordsEditor
+          library={scope}
+          setLibrary={setScope}
+          onSave={() => { saveBackendSection("scope", scope); flashSaved("Scope Keywords"); }}
         />
       ) : (
       <section className="columns-1 gap-5 p-6 xl:columns-3 [&>*]:mb-5 [&>*]:break-inside-avoid">
@@ -644,9 +670,298 @@ export default function BackendPage() {
           </div>
         </BackendTile>
 
+        {/* 9. Scope keywords - the full list takes the page, like Material */}
+        <BackendTile title="Scope Keywords" subtitle="What Scope Scrub highlights in a Scope of Work or a Subcontract" onSave={() => { saveBackendSection("scope", scope); flashSaved("Scope Keywords"); }}>
+          <div className="grid grid-cols-3 gap-2">
+            <Summary label="Categories" value={String(scope.categories.length)} />
+            <Summary label="Terms" value={String(scope.categories.reduce((n, c) => n + c.terms.length, 0))} />
+            <Summary label="Questions" value={String(scope.questions.length)} />
+          </div>
+          <p className="text-[10px] leading-4 text-zinc-600">
+            Your words, by category: the scrub finds every sentence that carries one and shows the ones it never finds.
+            Which categories run, and in what order, is set per document type.
+          </p>
+          <button
+            onClick={() => setView("scope")}
+            className="w-full rounded-lg border border-orange-500/30 bg-orange-500/10 px-4 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300 hover:bg-orange-500/20"
+          >
+            Open the list
+          </button>
+        </BackendTile>
+
       </section>
       )}
     </main>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Scope keywords
+//
+// The library Scope Scrub highlights from. Categories in the estimator's
+// order, each with its terms and a one-line "why"; per document type, which
+// categories run and in what order; the four marks per document; the ten
+// questions. Edits live in state until Save, like every other tile.
+// -----------------------------------------------------------------------------
+
+function ScopeKeywordsEditor({
+  library, setLibrary, onSave,
+}: {
+  library: ScopeLibrary;
+  setLibrary: (next: ScopeLibrary) => void;
+  onSave: () => void;
+}) {
+  const [tab, setTab] = useState<ScopeDocType>("scope");
+  const [search, setSearch] = useState("");
+  const term = search.trim().toLowerCase();
+  const orderKey = tab === "scope" ? "scopeOrder" : "subcontractOrder";
+
+  const ordered = [...library.categories].sort((a, b) => {
+    const ao = a[orderKey], bo = b[orderKey];
+    if (ao === null && bo === null) return 0;
+    if (ao === null) return 1;
+    if (bo === null) return -1;
+    return ao - bo;
+  });
+  const running = ordered.filter((c) => c[orderKey] !== null);
+
+  function updateCategory(id: string, patch: Partial<ScopeCategory>) {
+    setLibrary({ ...library, categories: library.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) });
+  }
+  function updateTerm(categoryId: string, termId: string, patch: Partial<ScopeTerm>) {
+    setLibrary({
+      ...library,
+      categories: library.categories.map((c) => c.id !== categoryId ? c : { ...c, terms: c.terms.map((t) => (t.id === termId ? { ...t, ...patch } : t)) }),
+    });
+  }
+  function addTerm(categoryId: string) {
+    const id = `${categoryId}-${Date.now().toString(36)}`;
+    setLibrary({
+      ...library,
+      categories: library.categories.map((c) => c.id !== categoryId ? c : { ...c, terms: [...c.terms, { id, term: "", note: "", lit: false }] }),
+    });
+  }
+  function removeTerm(categoryId: string, termId: string) {
+    setLibrary({
+      ...library,
+      categories: library.categories.map((c) => c.id !== categoryId ? c : { ...c, terms: c.terms.filter((t) => t.id !== termId) }),
+    });
+  }
+  function addCategory() {
+    const id = `cat-${Date.now().toString(36)}`;
+    const nextOrder = (key: "scopeOrder" | "subcontractOrder") => library.categories.reduce((m, c) => Math.max(m, c[key] ?? 0), 0) + 1;
+    setLibrary({
+      ...library,
+      categories: [...library.categories, { id, name: "New category", blurb: "", terms: [], scopeOrder: nextOrder("scopeOrder"), subcontractOrder: nextOrder("subcontractOrder") }],
+    });
+  }
+  function removeCategory(id: string) {
+    const cat = library.categories.find((c) => c.id === id);
+    if (!cat) return;
+    if (cat.terms.length > 0 && !window.confirm(`Remove "${cat.name}" and its ${cat.terms.length} terms?`)) return;
+    setLibrary({ ...library, categories: library.categories.filter((c) => c.id !== id) });
+  }
+  /** Move a category up or down in this document's order. */
+  function move(id: string, dir: -1 | 1) {
+    const list = running.map((c) => c.id);
+    const i = list.indexOf(id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    setLibrary({
+      ...library,
+      categories: library.categories.map((c) => (list.includes(c.id) ? { ...c, [orderKey]: list.indexOf(c.id) + 1 } : c)),
+    });
+  }
+  function setRuns(id: string, runs: boolean) {
+    const next = runs ? running.length + 1 : null;
+    const cats = library.categories.map((c) => (c.id === id ? { ...c, [orderKey]: next } : c));
+    // Close the gap when one sits out.
+    const stillRunning = cats.filter((c) => c[orderKey] !== null).sort((a, b) => (a[orderKey] as number) - (b[orderKey] as number));
+    setLibrary({ ...library, categories: cats.map((c) => (c[orderKey] === null ? c : { ...c, [orderKey]: stillRunning.findIndex((r) => r.id === c.id) + 1 })) });
+  }
+  function updateMark(index: number, patch: { label?: string; meaning?: string }) {
+    setLibrary({ ...library, marks: { ...library.marks, [tab]: library.marks[tab].map((m, i) => (i === index ? { ...m, ...patch } : m)) } });
+  }
+  function resetToKorban() {
+    if (!window.confirm("Replace the whole library with Korban's starter list? Your edits are lost.")) return;
+    setLibrary(DEFAULT_SCOPE_LIBRARY);
+  }
+
+  const termCount = library.categories.reduce((n, c) => n + c.terms.length, 0);
+  const litCount = library.categories.reduce((n, c) => n + c.terms.filter((t) => t.lit).length, 0);
+
+  return (
+    <section className="p-6">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="font-mono text-[11px] font-bold uppercase tracking-[0.22em] text-orange-400">Scope Keywords</h2>
+          <p className="mt-1 max-w-2xl text-[11px] leading-[1.6] text-zinc-500">
+            The words Scope Scrub highlights, by category. A term matches as a phrase in any form of its words
+            (Erection catches erect, erected, erecting) and across spellings (Cal/OSHA catches Cal-OSHA; toe boards
+            catches toeboards). Lit terms are the handful to read first; they glow on the results page.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Find a term"
+            className="w-48 rounded-lg border border-zinc-800 bg-black px-3 py-2 text-[11.5px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+          />
+          <button onClick={resetToKorban} className="rounded-lg border border-zinc-800 px-3 py-2 font-mono text-[10px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300">
+            Korban list
+          </button>
+          <button
+            onClick={onSave}
+            className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-4 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300 transition hover:bg-orange-500/20"
+          >
+            Save keywords
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Summary label="Categories" value={String(library.categories.length)} />
+        <Summary label="Terms" value={String(termCount)} />
+        <Summary label="Lit (read first)" value={String(litCount)} />
+        <Summary label="Questions" value={String(library.questions.length)} />
+      </div>
+
+      {/* Which document the order and marks below belong to */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {SCOPE_DOC_TYPES.map((d) => (
+          <button
+            key={d.id}
+            onClick={() => setTab(d.id)}
+            className={`rounded-lg border px-4 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] transition ${
+              tab === d.id ? "border-orange-500 bg-orange-500/10 text-orange-200 shadow-[0_0_12px_rgba(249,115,22,0.25)]" : "border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+            }`}
+          >
+            {d.label}
+          </button>
+        ))}
+        <span className="text-[10.5px] text-zinc-600">
+          Order and marks are per document. The terms themselves are shared.
+        </span>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid gap-3">
+          {ordered.map((c, idx) => {
+            const runs = c[orderKey] !== null;
+            const rows = c.terms.filter((t) => !term || t.term.toLowerCase().includes(term) || t.note.toLowerCase().includes(term));
+            if (term && rows.length === 0) return null;
+            return (
+              <div key={c.id} className={`rounded-2xl border bg-[#0b0b0b] p-4 ${runs ? "border-zinc-800" : "border-zinc-900 opacity-70"}`}>
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className={`w-7 text-center font-mono text-[11px] font-bold ${runs ? "text-orange-400" : "text-zinc-700"}`}>
+                    {runs ? idx + 1 : "\u2014"}
+                  </span>
+                  <input
+                    value={c.name}
+                    onChange={(e) => updateCategory(c.id, { name: e.target.value })}
+                    className="min-w-[200px] flex-1 rounded-lg border border-zinc-800 bg-black px-3 py-2 text-[13px] font-bold uppercase tracking-[0.04em] text-orange-300 outline-none focus:border-orange-500/40"
+                  />
+                  <input
+                    value={c.blurb}
+                    onChange={(e) => updateCategory(c.id, { blurb: e.target.value })}
+                    placeholder="One line under the name"
+                    className="min-w-[200px] flex-[2] rounded-lg border border-zinc-800 bg-black px-3 py-2 text-[11px] text-zinc-400 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+                  />
+                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-500">
+                    <input type="checkbox" checked={runs} onChange={(e) => setRuns(c.id, e.target.checked)} className="accent-orange-500" />
+                    runs on {SCOPE_DOC_TYPES.find((d) => d.id === tab)?.label}
+                  </label>
+                  {runs && (
+                    <span className="flex gap-1">
+                      <button onClick={() => move(c.id, -1)} className="rounded border border-zinc-800 px-2 py-1 font-mono text-[10px] text-zinc-500 hover:text-zinc-200">&uarr;</button>
+                      <button onClick={() => move(c.id, 1)} className="rounded border border-zinc-800 px-2 py-1 font-mono text-[10px] text-zinc-500 hover:text-zinc-200">&darr;</button>
+                    </span>
+                  )}
+                  <button onClick={() => removeCategory(c.id)} className="rounded border border-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-700 hover:border-red-500/40 hover:text-red-300">remove</button>
+                </div>
+                <div className="grid gap-1">
+                  {rows.map((t) => (
+                    <div key={t.id} className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.6fr)_auto_auto] items-center gap-2">
+                      <input
+                        value={t.term}
+                        onChange={(e) => updateTerm(c.id, t.id, { term: e.target.value })}
+                        placeholder="Word or phrase"
+                        className={`rounded-lg border bg-black px-3 py-1.5 text-[12px] text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-orange-500/40 ${t.lit ? "border-orange-500/60 shadow-[0_0_10px_rgba(249,115,22,0.3)]" : "border-zinc-800"}`}
+                      />
+                      <input
+                        value={t.note}
+                        onChange={(e) => updateTerm(c.id, t.id, { note: e.target.value })}
+                        placeholder="Why it matters (optional)"
+                        className="rounded-lg border border-zinc-800 bg-black px-3 py-1.5 text-[11px] text-zinc-400 outline-none placeholder:text-zinc-800 focus:border-orange-500/40"
+                      />
+                      <button
+                        onClick={() => updateTerm(c.id, t.id, { lit: !t.lit })}
+                        title="Read first: lit on the results page"
+                        className={`rounded border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.1em] transition ${t.lit ? "border-orange-500/60 text-orange-300 bg-orange-500/10" : "border-zinc-800 text-zinc-600 hover:text-zinc-300"}`}
+                      >
+                        lit
+                      </button>
+                      <button onClick={() => removeTerm(c.id, t.id)} className="rounded border border-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-700 hover:border-red-500/40 hover:text-red-300">&times;</button>
+                    </div>
+                  ))}
+                  {!term && (
+                    <button onClick={() => addTerm(c.id)} className="justify-self-start rounded border border-dashed border-zinc-800 px-3 py-1 font-mono text-[10px] text-zinc-500 hover:border-orange-500/40 hover:text-orange-300">
+                      + term
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {!term && (
+            <button onClick={addCategory} className="justify-self-start rounded-lg border border-dashed border-zinc-700 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500 hover:border-orange-500/40 hover:text-orange-300">
+              + category
+            </button>
+          )}
+        </div>
+
+        <div className="grid content-start gap-3">
+          <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
+            <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">
+              Marks on a {SCOPE_DOC_TYPES.find((d) => d.id === tab)?.label}
+            </h3>
+            <p className="mt-1 mb-3 text-[10px] leading-4 text-zinc-600">
+              What the estimator does about a hit. Four, always; the words are yours.
+            </p>
+            <div className="grid gap-2.5">
+              {library.marks[tab].map((m, i) => (
+                <div key={m.id} className="grid gap-1">
+                  <input
+                    value={m.label}
+                    onChange={(e) => updateMark(i, { label: e.target.value })}
+                    className={`rounded-lg border bg-black px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.08em] outline-none focus:border-orange-500/40 ${
+                      m.tone === "red" ? "border-red-400/50 text-red-300" : m.tone === "orange" ? "border-orange-400/50 text-orange-300" : m.tone === "amber" ? "border-amber-400/50 text-amber-300" : "border-emerald-400/50 text-emerald-300"
+                    }`}
+                  />
+                  <textarea
+                    value={m.meaning}
+                    onChange={(e) => updateMark(i, { meaning: e.target.value })}
+                    rows={2}
+                    className="w-full resize-none rounded-lg border border-zinc-800 bg-black px-3 py-1.5 text-[10.5px] leading-4 text-zinc-400 outline-none focus:border-orange-500/40"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
+            <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">The questions</h3>
+            <p className="mt-1 mb-2 text-[10px] leading-4 text-zinc-600">Answered on every scrub, both documents. One per line.</p>
+            <TextArea
+              value={library.questions.join("\n")}
+              onChange={(v) => setLibrary({ ...library, questions: v.split("\n").map((q) => q.trimEnd()) })}
+              rows={12}
+            />
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

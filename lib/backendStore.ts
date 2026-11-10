@@ -11,6 +11,8 @@
  * the two can't drift apart.
  */
 
+import { DEFAULT_SCOPE_LIBRARY, normalizeScopeLibrary, type ScopeLibrary } from "@/lib/scopeScrub";
+
 // --- Types ------------------------------------------------------------------
 
 export type CompanySettings = {
@@ -346,6 +348,12 @@ export type BackendSettings = {
   pricing: PricingDefaults;
   alternates: AlternateRateDefaults;
   proposal: ProposalDefaults;
+  /**
+   * Scope Scrub's keyword library: the categories and terms the scrub
+   * highlights, the marks per document type, the review questions. Seeded
+   * from scopeScrub.ts; the estimator's from then on.
+   */
+  scope: ScopeLibrary;
   schemaVersion: number;
 };
 
@@ -802,6 +810,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
       { id: "stair-tower", title: "Stair Tower", description: "Provide scaffold stair tower access at field-determined location.", defaultValue: 14500 },
     ],
   },
+  scope: DEFAULT_SCOPE_LIBRARY,
   schemaVersion: 2,
 };
 
@@ -1216,6 +1225,7 @@ function normalizeBackendSettings(value: unknown): BackendSettings {
     pricing: normalizePricing(r.pricing),
     alternates: normalizeAlternates(r.alternates),
     proposal: normalizeProposal(r.proposal),
+    scope: normalizeScopeLibrary(r.scope),
     schemaVersion: asNumber(r.schemaVersion, 2),
   };
 }

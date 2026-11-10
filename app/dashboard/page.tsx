@@ -420,16 +420,35 @@ export default function DashboardPage() {
       }
     });
 
-    const finalRounds = named.filter(
-      (project) => project.bidStatus === "Ready To Send" || project.bidStatus === "Submitted"
-    );
-    if (finalRounds.length > 0) {
+    /*
+     * Rounds. A job at Best & Final or GMP is where the number is decided,
+     * so those are named. And a job that has been through more than one
+     * round says how far the number moved from the last one that went out -
+     * read from the frozen round history, not guessed from status.
+     */
+    const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
+    const deciding = named.filter((project) => /best\s*&\s*final|gmp/i.test(project.bidRound));
+    if (deciding.length > 0) {
       notes.push({
         kind: "Final rounds",
-        title: `${finalRounds.length} at final or GMP stage`,
-        detail: "Round-over-round pricing comparison lands here once bids carry revision history.",
+        title: `${deciding.length} at Best & Final or GMP`,
+        detail: deciding.map((project) => `${project.projectName} (${project.bidRound})`).join(" \u00b7 "),
       });
     }
+    named.forEach((project) => {
+      const history = project.bidRoundHistory;
+      if (history.length === 0) return;
+      const last = history[history.length - 1];
+      const now = project.currentFigures;
+      if (!last.figures || !now || last.figures.finalBid <= 0 || now.finalBid <= 0) return;
+      const delta = (now.finalBid - last.figures.finalBid) / last.figures.finalBid;
+      if (Math.abs(delta) < 0.005) return;
+      notes.push({
+        kind: "Round moved",
+        title: `${project.projectName}: ${money(last.figures.finalBid)} \u2192 ${money(now.finalBid)}`,
+        detail: `${delta > 0 ? "Up" : "Down"} ${Math.abs(delta * 100).toFixed(1)}% from ${last.title} to ${project.bidRound || "the current round"}${project.proposalNumber ? ` \u00b7 ${project.proposalNumber}` : ""}.`,
+      });
+    });
 
     const unpriced = named.filter((project) => {
       const elevation = getFirstElevation(project);
@@ -1007,8 +1026,9 @@ export default function DashboardPage() {
                     {visibleTracker.length === 0 ? (
                       <p className="px-1 py-3 text-[11px] leading-[1.6] text-zinc-500">
                         Nothing worth flagging right now. I watch for heavy bid days,
-                        jobs measured but never priced, final and GMP rounds, and
-                        anything sitting where it shouldn&apos;t.
+                        jobs measured but never priced, Best &amp; Final and GMP rounds,
+                        numbers that moved between rounds, and anything sitting where
+                        it shouldn&apos;t.
                       </p>
                     ) : (
                       <div className="grid gap-1.5">

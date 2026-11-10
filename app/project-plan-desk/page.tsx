@@ -35,6 +35,14 @@ import {
   type ProjectRecord,
 } from "@/lib/projectStore";
 import { getBackendSettings } from "@/lib/backendStore";
+import {
+  SCOPE_DOC_TYPES,
+  setPendingScopeDrop,
+  setPendingScopeOpen,
+  summarizeScrub,
+  type ScopeDocType,
+  type ScopeScrubRecord,
+} from "@/lib/scopeScrub";
 import { clearEstimateState, loadEstimateState, type EstimateDerived } from "@/lib/estimateState";
 import { BidRoundHistory, BidRoundPicker, BidRoundRevise } from "@/components/bid-round";
 
@@ -820,6 +828,13 @@ export default function ProjectPlanDeskPage() {
               )}
             </Panel>
 
+            {/* ---- Scope Scrub -------------------------------------------- */}
+            <ScopeScrubTile
+              scrubs={project.scopeScrubs}
+              onOpen={(id) => { setPendingScopeOpen(id); router.push("/scope-scrub"); }}
+              onDrop={(file, docType) => { setPendingScopeDrop(file, docType); router.push("/scope-scrub"); }}
+            />
+
             {/* ---- What the job looks like ------------------------------- */}
             {/*
               * Messages, and the people on this job.
@@ -1082,6 +1097,106 @@ function Panel({
       </div>
       <div className="rounded border border-zinc-900 bg-black p-2.5">{children}</div>
     </section>
+  );
+}
+
+/**
+ * Scope Scrub on the Plan Desk.
+ *
+ * A tool, not a stage: drop the GC's Scope of Work or Subcontract here and
+ * the scrub page opens on it. What has already been scrubbed against this
+ * job sits above the drop zone with its counts, by the marks that document
+ * uses, so the tile answers "did we read it, and what did we find".
+ */
+function ScopeScrubTile({
+  scrubs, onOpen, onDrop,
+}: {
+  scrubs: ScopeScrubRecord[];
+  onOpen: (id: string) => void;
+  onDrop: (file: File, docType: ScopeDocType) => void;
+}) {
+  const [docType, setDocType] = useState<ScopeDocType>("scope");
+  const [over, setOver] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const library = getBackendSettings().scope;
+  const tone = { red: "text-red-400", orange: "text-orange-300", amber: "text-amber-300", green: "text-emerald-300" } as const;
+
+  function take(file: File | null | undefined) {
+    if (!file) return;
+    onDrop(file, docType);
+  }
+
+  return (
+    <Panel
+      title="Scope Scrub"
+      scan={false}
+      right={<span className="font-mono text-[9px] uppercase tracking-[0.14em] text-orange-400/80">tool</span>}
+    >
+      {scrubs.length > 0 && (
+        <div className="mb-2.5 grid gap-1.5">
+          {scrubs.map((s) => {
+            const sum = summarizeScrub(s, library);
+            const marks = library.marks[s.docType];
+            return (
+              <button
+                key={s.id}
+                onClick={() => onOpen(s.id)}
+                className="grid gap-1 rounded border border-zinc-900 px-2.5 py-2 text-left transition hover:border-orange-500/40"
+              >
+                <span className="flex items-baseline justify-between gap-2">
+                  <span className="min-w-0 truncate text-[11.5px] text-zinc-200">
+                    <span className="mr-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-orange-400">
+                      {SCOPE_DOC_TYPES.find((d) => d.id === s.docType)?.label}
+                    </span>
+                    {s.fileName}
+                  </span>
+                  <span className="whitespace-nowrap font-mono text-[9px] text-zinc-600">
+                    {s.pageCount} pp · {sum.hits} hits
+                  </span>
+                </span>
+                <span className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[9.5px]">
+                  {marks.map((m) => (
+                    <span key={m.id} className={sum.byMark[m.id] ? tone[m.tone] : "text-zinc-700"}>
+                      {sum.byMark[m.id] ?? 0} {m.label}
+                    </span>
+                  ))}
+                  <span className="text-zinc-600">{sum.answered}/{sum.questions} questions</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        {SCOPE_DOC_TYPES.map((d) => (
+          <button
+            key={d.id}
+            onClick={() => setDocType(d.id)}
+            className={`rounded border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] transition ${
+              docType === d.id ? "border-orange-500 bg-orange-500/10 text-orange-200 shadow-[0_0_8px_rgba(249,115,22,0.25)]" : "border-zinc-800 text-zinc-600 hover:border-zinc-600 hover:text-zinc-300"
+            }`}
+          >
+            {d.label}
+          </button>
+        ))}
+      </div>
+      <div
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer.files?.[0]); }}
+        onClick={() => input.current?.click()}
+        className={`cursor-pointer rounded border border-dashed px-3 py-3 text-center transition ${over ? "border-orange-500 bg-orange-500/10" : "border-zinc-800 hover:border-zinc-600"}`}
+      >
+        <input ref={input} type="file" accept="application/pdf" className="hidden" onChange={(e) => { take(e.target.files?.[0]); e.target.value = ""; }} />
+        <p className="text-[11px] text-zinc-400">
+          <span className="font-semibold text-orange-300">Drop a PDF</span> or click to choose
+        </p>
+        <p className="mt-0.5 font-mono text-[9px] text-zinc-600">
+          Korban highlights every term on your list, by category. Text PDFs only.
+        </p>
+      </div>
+    </Panel>
   );
 }
 

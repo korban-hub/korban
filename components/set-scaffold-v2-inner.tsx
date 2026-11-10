@@ -6,12 +6,14 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, stockingHours } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, updateActiveProject, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, stockingHours } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
 import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
 import { readInsets, setOut, setOutRuns, type BaySpan, type LegResult, type PlanPoint, type SegmentLegs } from "@/lib/scaffoldSetOut";
-import { buildScaffoldModel, hatchBoardPart, pickHatchBays, type LegStack, type PartKind, type ScaffoldModel, type Vec3 } from "@/lib/scaffoldModel";
+import { buildScaffoldModel, hatchBoardPart, pickHatchBays, type LegStack, type ScaffoldModel } from "@/lib/scaffoldModel";
+import { buildScaffoldGroup, disposePalette, workingPalette, FEET } from "@/lib/scaffoldScene";
+import { scopeItems, withScopeItemDone, type ScopeItem } from "@/lib/scopeScrub";
 import { loadEstimateState } from "@/lib/estimateState";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -254,119 +256,18 @@ function ScaffoldModel3D({ model, onCapture }: { model: ScaffoldModel | null; on
     const fill = new THREE.DirectionalLight(0x8080ff, 0.3);
     fill.position.set(-10, 5, -5); scene.add(fill);
 
-    // One foot is 0.3 scene units - the scale the old model drew a frame at.
-    const S = 0.3;
+    // One foot is 0.3 scene units - the scale the first model drew a frame at.
+    const S = FEET;
 
-    // Materials, by what the part is. Brackets read green, as on the plan.
-    const steel = (color: number, roughness = 0.3) => new THREE.MeshStandardMaterial({ color, metalness: 0.8, roughness });
-    const wood = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
     /*
-     * Debris netting: a black mesh you can see through. A small canvas of
-     * thin lines, repeated, on a transparent two-sided sheet.
+     * The job: the shared stamping (lib/scaffoldScene), in the working
+     * palette - steel, wood, green brackets, grey walls. The proposal draws
+     * the same model with the same code under orange light.
      */
-    const nettingMaterial = () => {
-      const c = document.createElement("canvas");
-      c.width = c.height = 64;
-      const g = c.getContext("2d");
-      if (g) {
-        g.clearRect(0, 0, 64, 64);
-        g.strokeStyle = "rgba(10,10,12,0.85)";
-        g.lineWidth = 1.2;
-        for (let i = 0; i <= 64; i += 8) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 64); g.stroke(); g.beginPath(); g.moveTo(0, i); g.lineTo(64, i); g.stroke(); }
-      }
-      const tex = new THREE.CanvasTexture(c);
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      tex.repeat.set(1, 1);
-      return new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false, color: 0x0b0b0d });
-    };
-    const MAT: Record<PartKind, THREE.Material> = {
-      post: steel(0xc4c8cc), ledger: steel(0xb4b9be), brace: steel(0x8f979f, 0.4), rail: steel(0xd8dde2),
-      jack: steel(0x9aa3ad, 0.5), plate: steel(0x6b7480, 0.7), guardPost: steel(0xc4c8cc),
-      bracket: steel(0x4ade80, 0.4), bracketPlank: wood(0x86efac),
-      plank: wood(0x8a6a2a), hatchBoard: steel(0x8fa3b8, 0.5), hatchDoor: steel(0xb7c7d8, 0.5), ladder: steel(0xc9d3dc, 0.45),
-      netting: nettingMaterial(),
-    };
-    const quadMat: Partial<Record<PartKind, THREE.Material>> = {};
-    const quadMatFor = (part: PartKind) => {
-      if (!quadMat[part]) {
-        const base = MAT[part] as THREE.MeshStandardMaterial;
-        quadMat[part] = new THREE.MeshStandardMaterial({ color: base.color, roughness: 0.9, side: THREE.DoubleSide });
-      }
-      return quadMat[part]!;
-    };
-
-    const group = new THREE.Group();
-
-    // Stamp the pieces: one unit tube and one unit box, a matrix per piece.
-    const tubeGeo = new THREE.CylinderGeometry(1, 1, 1, 6);
-    const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-    const tubes = new Map<PartKind, THREE.Matrix4[]>();
-    const boxes = new Map<PartKind, THREE.Matrix4[]>();
-    const quads = new Map<PartKind, number[]>();
-    const quadUvs = new Map<PartKind, number[]>();
-    const up = new THREE.Vector3(0, 1, 0);
-    const pos = new THREE.Vector3(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), dir = new THREE.Vector3();
-    const V = (p: Vec3) => new THREE.Vector3(p.x * S, p.y * S, p.z * S);
-    for (const piece of model.pieces) {
-      if (piece.kind === "tube") {
-        const a = V(piece.a), b = V(piece.b);
-        dir.subVectors(b, a);
-        const len = dir.length();
-        if (len < 1e-6) continue;
-        dir.divideScalar(len);
-        pos.addVectors(a, b).multiplyScalar(0.5);
-        q.setFromUnitVectors(up, dir);
-        scl.set(piece.r * S, len, piece.r * S);
-        const m = new THREE.Matrix4().compose(pos, q, scl);
-        (tubes.get(piece.part) ?? tubes.set(piece.part, []).get(piece.part)!).push(m);
-      } else if (piece.kind === "box") {
-        pos.copy(V(piece.c));
-        q.setFromAxisAngle(up, piece.yaw);
-        scl.set(piece.len * S, piece.thick * S, piece.wid * S);
-        const m = new THREE.Matrix4().compose(pos, q, scl);
-        (boxes.get(piece.part) ?? boxes.set(piece.part, []).get(piece.part)!).push(m);
-      } else {
-        const [p0, p1, p2, p3] = piece.p.map(V);
-        const list = quads.get(piece.part) ?? quads.set(piece.part, []).get(piece.part)!;
-        list.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p0.x, p0.y, p0.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z);
-        // Texture repeats by real size (one tile per 2'), so netting mesh reads the same on every sheet.
-        const u = p0.distanceTo(p1) / (2 * S), v = p1.distanceTo(p2) / (2 * S);
-        const uvs = quadUvs.get(piece.part) ?? quadUvs.set(piece.part, []).get(piece.part)!;
-        uvs.push(0, 0, u, 0, u, v, 0, 0, u, v, 0, v);
-      }
-    }
-    const stamp = (geo: THREE.BufferGeometry, byPart: Map<PartKind, THREE.Matrix4[]>) => {
-      byPart.forEach((mats, part) => {
-        const mesh = new THREE.InstancedMesh(geo, MAT[part], mats.length);
-        mats.forEach((m, i) => mesh.setMatrixAt(i, m));
-        mesh.instanceMatrix.needsUpdate = true;
-        group.add(mesh);
-      });
-    };
-    stamp(tubeGeo, tubes);
-    stamp(boxGeo, boxes);
-    quads.forEach((verts, part) => {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-      geo.setAttribute("uv", new THREE.Float32BufferAttribute(quadUvs.get(part) ?? [], 2));
-      geo.computeVertexNormals();
-      const mesh = new THREE.Mesh(geo, part === "netting" ? MAT.netting : quadMatFor(part));
-      if (part === "netting") mesh.renderOrder = 2;
-      group.add(mesh);
-    });
-
-    // The building: each wall at its own height.
+    const palette = workingPalette();
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x5a616b, roughness: 0.9 });
-    for (const w of model.walls) {
-      const dx = (w.b.x - w.a.x) * S, dz = (w.b.z - w.a.z) * S;
-      const len = Math.hypot(dx, dz);
-      if (len < 1e-3 || w.heightFt <= 0) continue;
-      const h = w.heightFt * S;
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(len, h, 0.5 * S), wallMat);
-      wall.position.set((w.a.x + w.b.x) / 2 * S, h / 2, (w.a.z + w.b.z) / 2 * S);
-      wall.rotation.y = -Math.atan2(dz, dx);
-      group.add(wall);
-    }
+    const build = buildScaffoldGroup(model, palette, { wallMaterial: wallMat });
+    const group = build.group;
     scene.add(group);
 
     // Ground and grid, sized to the job.
@@ -381,11 +282,7 @@ function ScaffoldModel3D({ model, onCapture }: { model: ScaffoldModel | null; on
     scene.add(grid);
 
     // Camera orbit round the job.
-    const bbox = new THREE.Box3().setFromObject(group);
-    const center = bbox.getCenter(new THREE.Vector3());
-    const size = bbox.getSize(new THREE.Vector3());
-    const camSize = Math.max(size.x, size.z, size.y * 1.5);
-    const camDist = camSize * 1.35 + 5;
+    const { center, camDist } = build;
     scene.fog = new THREE.FogExp2(BG, 0.45 / camDist);
 
     let angle = Math.PI / 4;
@@ -476,10 +373,11 @@ function ScaffoldModel3D({ model, onCapture }: { model: ScaffoldModel | null; on
     return () => {
       cancelAnimationFrame(frameRef.current);
       canvas.removeEventListener("webglcontextlost", onContextLost);
-      tubeGeo.dispose(); boxGeo.dispose();
-      Object.values(MAT).forEach(m => m.dispose());
-      Object.values(quadMat).forEach(m => m?.dispose());
-      group.traverse(obj => { const g = (obj as THREE.Mesh).geometry; if (g && g !== tubeGeo && g !== boxGeo) g.dispose(); });
+      build.dispose();
+      disposePalette(palette);
+      wallMat.dispose();
+      ground.geometry.dispose(); (ground.material as THREE.Material).dispose();
+      grid.geometry.dispose(); (grid.material as THREE.Material).dispose();
       renderer.dispose();
       // forceContextLoss needs an extension not every browser has; never let it throw.
       try { renderer.forceContextLoss(); } catch { /* not supported here */ }
@@ -906,6 +804,55 @@ const SHEET_SIZES = {
 type SheetSize = keyof typeof SHEET_SIZES;
 
 /** The column down the right of every sheet. */
+/**
+ * Scope to price - what the Scope Scrub said is ours.
+ *
+ * Every "Price it" on the Scope of Work, as a checklist beside the set-out:
+ * tick each one as the takeoff carries it. The ticks save to the job, so
+ * the scrub page shows the same state. Nothing here changes a count; it is
+ * the list you work the plan against.
+ */
+function ScopeToPrice() {
+  const [items, setItems] = useState<ScopeItem[]>([]);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const read = () => {
+      try { setItems(scopeItems(getActiveProject().scopeScrubs, getBackendSettings().scope, "price", "scope")); } catch { /* storage unavailable */ }
+    };
+    read();
+    window.addEventListener("focus", read);
+    return () => window.removeEventListener("focus", read);
+  }, []);
+  if (items.length === 0) return null;
+  const done = items.filter((i) => i.done).length;
+  function toggle(item: ScopeItem) {
+    const project = getActiveProject();
+    const next = updateActiveProject({ scopeScrubs: withScopeItemDone(project.scopeScrubs, item.scrubId, item.key, !item.done) });
+    setItems(scopeItems(next.scopeScrubs, getBackendSettings().scope, "price", "scope"));
+  }
+  return (
+    <div className="max-w-md rounded-lg border border-orange-500/30 bg-black/50 px-3 py-2">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between gap-3 text-left">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-orange-400">Scope to price</span>
+        <span className="font-mono text-[10px] text-zinc-500">{done} of {items.length} carried {open ? "\u25be" : "\u25b8"}</span>
+      </button>
+      {open && (
+        <div className="mt-2 grid gap-1 border-t border-zinc-900 pt-2">
+          {items.map((item) => (
+            <label key={item.key} className="grid cursor-pointer grid-cols-[14px_minmax(0,1fr)_auto] items-start gap-2 text-[10.5px] leading-[1.5]">
+              <input type="checkbox" checked={item.done} onChange={() => toggle(item)} className="mt-[3px] accent-orange-500" />
+              <span className={item.done ? "text-zinc-600 line-through" : "text-zinc-300"}>
+                <span className="mr-1.5 font-semibold text-zinc-100">{item.term}</span>{item.text}
+              </span>
+              <span className="font-mono text-[9px] text-zinc-600">p. {item.page}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SheetColumn({
   company, projectName, address, customer, jobNumber, bidNumber, estimator,
   scaleNote, data, trade, sheetTitle,
@@ -1308,10 +1255,10 @@ export default function SetScaffoldV2Inner() {
    * re-sets from it, so the deck turns each corner on a braced bay instead of
    * a planked gap. Saved with the elevation, like which walls are interior.
    */
-  const turnaroundBays = (elevation as (ProjectElevation & { turnaroundBays?: boolean }) | null)?.turnaroundBays ?? false;
+  const turnaroundBays = elevation?.turnaroundBays ?? false;
   function toggleTurnaroundBays() {
     if (!elevation) return;
-    const next = { ...elevation, turnaroundBays: !turnaroundBays } as ProjectElevation;
+    const next = { ...elevation, turnaroundBays: !turnaroundBays };
     setElevation(next);
     saveActiveElevation(next);
   }
@@ -1322,12 +1269,11 @@ export default function SetScaffoldV2Inner() {
    * estimator says otherwise for this job. A tank is the same rule round a
    * circle, outside, inside or both; the Quick Bid says which.
    */
-  type CurveSettings = { curveBayFt?: number; curveSides?: "outside" | "inside" | "both" };
-  const curveBayFt = (elevation as (ProjectElevation & CurveSettings) | null)?.curveBayFt ?? 5;
-  const curveSides = (elevation as (ProjectElevation & CurveSettings) | null)?.curveSides ?? "outside";
+  const curveBayFt = elevation?.curveBayFt ?? 5;
+  const curveSides = elevation?.curveSides ?? "outside";
   function setCurveBayFt(bayFt: number) {
     if (!elevation) return;
-    const next = { ...elevation, curveBayFt: bayFt } as ProjectElevation;
+    const next = { ...elevation, curveBayFt: bayFt };
     setElevation(next);
     saveActiveElevation(next);
   }
@@ -1415,8 +1361,7 @@ export default function SetScaffoldV2Inner() {
    * one end of the deck below, the foot alternating ends lift by lift so the
    * climb zig-zags. Saved with the elevation, like turnaround bays.
    */
-  type HatchSettings = { ladderHatchMode?: "per100" | "perElevation" };
-  const ladderHatchMode = (elevation as (ProjectElevation & HatchSettings) | null)?.ladderHatchMode ?? "per100";
+  const ladderHatchMode = elevation?.ladderHatchMode ?? "per100";
   /** Truck access, per elevation. No access means stocking labor in and out - see STOCKING. */
   function setTruckAccess(truckAccess: boolean) {
     if (!elevation) return;
@@ -1426,7 +1371,7 @@ export default function SetScaffoldV2Inner() {
   }
   function setLadderHatchMode(mode: "per100" | "perElevation") {
     if (!elevation) return;
-    const next = { ...elevation, ladderHatchMode: mode } as ProjectElevation;
+    const next = { ...elevation, ladderHatchMode: mode };
     setElevation(next);
     saveActiveElevation(next);
   }
@@ -3467,6 +3412,7 @@ export default function SetScaffoldV2Inner() {
             if (flags.length === 0) return null;
             return <KorbanGuidance flags={flags} title="Korban thinks..." className="max-w-xl" requireAck />;
           })()}
+          <ScopeToPrice />
         </div>
       )}
 

@@ -1,4 +1,5 @@
 import { layoutCurve, type CurveSide } from "@/lib/scaffoldSetOut";
+import { normalizeScrubRecord, type ScopeScrubRecord } from "@/lib/scopeScrub";
 
 export type ScaffoldInput = {
   scaffoldWidth: number;
@@ -376,6 +377,10 @@ export type TierSnapshot = {
   obstruction?: ObstructionLabor | null;
   /** Can the truck get to this elevation? False means the material is hand-carried in and out. */
   truckAccess?: boolean;
+  turnaroundBays?: boolean;
+  ladderHatchMode?: "per100" | "perElevation";
+  curveBayFt?: number;
+  curveSides?: "outside" | "inside" | "both";
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -510,6 +515,20 @@ export type ProjectElevation = {
    */
   truckAccess: boolean;
   /**
+   * Turnaround bays on every corner - the corner leg's mirror one frame
+   * width into the run, so the deck turns on a braced bay. Job wide.
+   */
+  turnaroundBays: boolean;
+  /**
+   * Ladder hatch bays: one per 100' of run, or one per elevation when the
+   * project won't allow 100'. Every lift, alternating ends.
+   */
+  ladderHatchMode: "per100" | "perElevation";
+  /** Bay length on a curve or a tank shell, feet. 5 unless the estimator says. */
+  curveBayFt: number;
+  /** Which faces of a tank get a ring. */
+  curveSides: "outside" | "inside" | "both";
+  /**
    * The Quick Bid form exactly as it was typed.
    *
    * The form kept its answers in component state and wrote out only what it
@@ -631,6 +650,12 @@ export type ProjectRecord = {
    * Review so a revision can freeze them without the estimate page open.
    */
   currentFigures: BidRoundFigures | null;
+  /**
+   * Scope Scrubs run against this job - a Scope of Work, a Subcontract, or
+   * both - with every hit, mark and answer. Newest first. The PDFs are not
+   * kept; the hits are.
+   */
+  scopeScrubs: ScopeScrubRecord[];
   updatedAt: string;
   schemaVersion: number;
   /**
@@ -1521,6 +1546,10 @@ function createEmptyElevation(): ProjectElevation {
     tunnel: null,
     obstruction: null,
     truckAccess: true,
+    turnaroundBays: false,
+    ladderHatchMode: "per100",
+    curveBayFt: 5,
+    curveSides: "outside",
     quickBid: null,
     tierSnapshots: {},
     /*
@@ -1582,6 +1611,10 @@ function createDemoElevation(): ProjectElevation {
     tunnel: null,
     obstruction: null,
     truckAccess: true,
+    turnaroundBays: false,
+    ladderHatchMode: "per100",
+    curveBayFt: 5,
+    curveSides: "outside",
     quickBid: null,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1622,6 +1655,7 @@ export function createEmptyProject(
     bidRoundHistory: [],
     proposalNumberBase: "",
     currentFigures: null,
+    scopeScrubs: [],
     updatedAt: nowIso(),
     schemaVersion: 2,
     estimateDepth: "quick-bid",
@@ -1660,6 +1694,7 @@ function createDemoProject(): ProjectRecord {
     bidRoundHistory: [],
     proposalNumberBase: "",
     currentFigures: null,
+    scopeScrubs: [],
     estimateDepth: "korban-bid",
     takeoff: {
       levels: [
@@ -1784,6 +1819,10 @@ function normalizeElevation(value: unknown): ProjectElevation {
     ),
     quickBid: isRecord(record.quickBid) ? record.quickBid : null,
     truckAccess: record.truckAccess !== false,
+    turnaroundBays: record.turnaroundBays === true,
+    ladderHatchMode: record.ladderHatchMode === "perElevation" ? "perElevation" : "per100",
+    curveBayFt: Math.max(1, asNumber(record.curveBayFt, 5)),
+    curveSides: record.curveSides === "inside" || record.curveSides === "both" ? record.curveSides : "outside",
     obstruction: (() => {
       const o = record.obstruction;
       if (!isRecord(o)) return null;
@@ -1939,6 +1978,10 @@ function normalizeProject(value: unknown, fallbackProjectId = DEMO_PROJECT_ID): 
     }),
     proposalNumberBase: asString(record.proposalNumberBase),
     currentFigures: isRecord(record.currentFigures) ? normalizeFigures(record.currentFigures) : null,
+    scopeScrubs: asArray<unknown>(record.scopeScrubs).flatMap((row) => {
+      const scrub = normalizeScrubRecord(row);
+      return scrub ? [scrub] : [];
+    }),
     updatedAt: asString(record.updatedAt, nowIso()),
     schemaVersion: asNumber(record.schemaVersion, 2),
     /*
@@ -3208,6 +3251,10 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     quickBid: elevation.quickBid,
     obstruction: elevation.obstruction,
     truckAccess: elevation.truckAccess,
+    turnaroundBays: elevation.turnaroundBays,
+    ladderHatchMode: elevation.ladderHatchMode,
+    curveBayFt: elevation.curveBayFt,
+    curveSides: elevation.curveSides,
   };
 }
 

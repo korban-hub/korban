@@ -109,7 +109,7 @@ export type BidPresentationData = {
   alternatesIncluded: string[];
   /** What those alternates add, so the base can be stated on its own. */
   alternateRevenue: number;
-  /** Rent per further rental period once the first one runs out. */
+  /** Rent per month once the first rental period runs out. */
   rentalThereafter: number;
 };
 
@@ -1459,7 +1459,7 @@ function costDescription(data: BidPresentationData): string {
   if (data.rentalDays > 0) {
     parts.push(
       `${data.alternatesIncluded.length > 0 ? money(base) + " covers" : "Covers"} the first ${data.rentalDays} days on rent` +
-      (data.rentalThereafter > 0 ? `; ${money(data.rentalThereafter)} per ${data.rentalDays} days thereafter.` : "."),
+      (data.rentalThereafter > 0 ? `; ${money(data.rentalThereafter)} per month thereafter.` : "."),
     );
   }
   if (data.alternatesIncluded.length > 0) {
