@@ -59,6 +59,29 @@ import {
  */
 const localOnly = (id: string) => id === DEMO_PROJECT_ID;
 
+/**
+ * A job that is nothing yet: no name, no customer, no number, no footage, no
+ * plan, no scrub. Korban makes one whenever a fresh project is opened, and
+ * most are never touched again. They stay on the machine until they become
+ * something - the account is a book of jobs, not of blank pages.
+ */
+export function isBlankProject(project: ProjectRecord | undefined | null): boolean {
+  if (!project) return true;
+  if (project.projectName?.trim() || project.customer?.trim() || project.projectAddress?.trim()) return false;
+  if (project.proposalNumber?.trim() || project.generalContractor?.trim()) return false;
+  if (project.contactName?.trim() || project.bidDueDate?.trim()) return false;
+  if ((project.scopeScrubs?.length ?? 0) > 0 || (project.bidRoundHistory?.length ?? 0) > 0 || project.currentFigures) return false;
+  for (const level of project.takeoff?.levels ?? []) {
+    for (const elevation of level.elevations ?? []) {
+      if ((elevation.linearFeet ?? 0) > 0) return false;
+      if (elevation.quickBid) return false;
+      if ((elevation.overlayGeometry?.tracedPerimeter?.length ?? 0) > 0) return false;
+      if ((elevation.overlayGeometry?.fullOverlayRows?.length ?? 0) > 0) return false;
+    }
+  }
+  return true;
+}
+
 export type SyncState =
   | { status: "off" }                                  // nobody signed in
   | { status: "working"; note: string }                // pulling or pushing
@@ -91,7 +114,10 @@ export function onSyncState(fn: Listener): () => void {
 // ---------------------------------------------------------------------------
 
 /** The line per job that the list query returns. No geometry, no strokes. */
-type ProjectLine = { id: string; updated_at: string; deleted_at: string | null };
+type ProjectLine = {
+  id: string; updated_at: string; deleted_at: string | null;
+  name: string; customer: string; proposal_number: string;
+};
 type ProjectRow = ProjectLine & { data: ProjectRecord };
 type SettingsRow = { data: BackendSettings; updated_at: string };
 
@@ -171,7 +197,7 @@ async function pullEverything() {
 
   const { data: lines, error } = await supabase
     .from("projects")
-    .select("id, updated_at, deleted_at")
+    .select("id, updated_at, deleted_at, name, customer, proposal_number")
     .eq("org_id", orgId);
   if (error) throw error;
 
@@ -179,18 +205,32 @@ async function pullEverything() {
   const merged: ProjectData = { ...local };
   const fetchIds: string[] = [];
   const toPush: string[] = [];
+  const toStamp: string[] = [];
   const seen = new Set<string>();
 
   for (const line of (lines ?? []) as ProjectLine[]) {
     seen.add(line.id);
     const mine = local[line.id];
 
-    // Deleted elsewhere: drop it here too, and never upload it again.
+    /*
+     * Deleted elsewhere. A real job here goes too - unless it was worked on
+     * after the delete, in which case the work wins and the job comes back.
+     * A blank page here is this machine's own and is left alone: taking it
+     * away could pull the project out from under an estimator who has just
+     * opened it.
+     */
     if (line.deleted_at) {
-      if (mine) delete merged[line.id];
       pushed.delete(line.id);
+      if (!mine || isBlankProject(mine)) continue;
+      if (stamp(mine.updatedAt) > stamp(line.deleted_at)) toPush.push(line.id);
+      else delete merged[line.id];
       continue;
     }
+
+    // A blank page that got onto the account before blanks were kept off it.
+    const lineBlank = !line.name && !line.customer && !line.proposal_number;
+    if (lineBlank && mine && isBlankProject(mine)) { toStamp.push(line.id); continue; }
+
     if (!mine) { fetchIds.push(line.id); continue; }
     const serverAt = stamp(line.updated_at);
     const mineAt = stamp(mine.updatedAt);
@@ -201,7 +241,7 @@ async function pullEverything() {
 
   // Anything here the server has never seen: this browser's existing book of jobs.
   for (const id of Object.keys(local)) {
-    if (!seen.has(id) && !localOnly(id) && !pendingDeletes.has(id)) toPush.push(id);
+    if (!seen.has(id) && !localOnly(id) && !pendingDeletes.has(id) && !isBlankProject(local[id])) toPush.push(id);
   }
 
   // The jobs this machine is behind on, fetched in one go.
@@ -213,8 +253,10 @@ async function pullEverything() {
       .eq("org_id", orgId)
       .in("id", fetchIds);
     if (rowError) throw rowError;
-    for (const row of (rows ?? []) as ProjectRow[]) {
+    for (const row of (rows ?? []) as unknown as ProjectRow[]) {
       if (row.deleted_at || !row.data) continue;
+      // Blank on the account and nothing here: not worth bringing down, and not worth keeping up.
+      if (isBlankProject(row.data)) { toStamp.push(row.id); continue; }
       merged[row.id] = row.data;
       pushed.set(row.id, row.data.updatedAt ?? "");
     }
@@ -245,6 +287,9 @@ async function pullEverything() {
     const now = getProjectData();
     for (const id of toPush) if (now[id]) await pushProject(now[id]);
   }
+
+  // Blank pages come off the account. Stamped, like any delete.
+  for (const id of toStamp) await markDeleted(id);
 
   done();
 }
@@ -338,6 +383,7 @@ async function flush() {
     for (const id of ids) {
       const project = data[id];
       if (!project) { await markDeleted(id); continue; }
+      if (isBlankProject(project)) continue; // goes up when it becomes a job
       if (pushed.get(id) === project.updatedAt) continue;
       await pushProject(project);
     }
@@ -380,6 +426,17 @@ export function startCloudSync(): () => void {
     ownerId = userId;
     ownerEmail = email;
     pushed.clear();
+    /*
+     * Whose work is in this browser. If the last estimator signed in here
+     * was someone else, their jobs must not be uploaded into this account,
+     * so the machine is cleared first. A browser nobody has signed in on
+     * keeps what it has - that is the book of jobs being brought aboard.
+     */
+    try {
+      const last = window.localStorage.getItem(MACHINE_OWNER_KEY);
+      if (last && last !== userId) clearThisMachine();
+      window.localStorage.setItem(MACHINE_OWNER_KEY, userId);
+    } catch { /* storage unavailable */ }
     try {
       orgId = await findOrg();
       await pullEverything();
@@ -435,8 +492,46 @@ export async function syncNow() {
   try { await pullEverything(); } catch (e) { stumbled(e); }
 }
 
-/** Sign out, after sending anything still waiting. */
-export async function signOutOfKorban() {
-  try { await flush(); } catch { /* going anyway */ }
+const MACHINE_OWNER_KEY = "korbanMachineOwner";
+
+/**
+ * Takes Korban's work off this machine: jobs, settings, the open estimate.
+ * Everything Korban keeps in the browser is under a "korban" key; the
+ * sign-in session is Supabase's own and is not touched here.
+ */
+function clearThisMachine() {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.toLowerCase().startsWith("korban")) keys.push(key);
+    }
+    keys.forEach((key) => window.localStorage.removeItem(key));
+  } catch { /* storage unavailable */ }
+}
+
+/**
+ * Sign out, and leave nothing behind.
+ *
+ * The jobs come off this machine - a borrowed or shared computer should not
+ * keep an estimator's bids - and come back from the account at the next
+ * sign-in. That makes the order matter: anything not yet on the account is
+ * sent first, and if it cannot be sent the sign-out is refused, because
+ * clearing the machine then would be deleting the only copy.
+ */
+export async function signOutOfKorban(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const refused = { ok: false as const, reason: "Some work hasn't reached your account yet. Get back online and try again - signing out now would remove the only copy." };
+  if (ownerId) {
+    if (pushTimer !== null) { window.clearTimeout(pushTimer); pushTimer = null; }
+    try {
+      if (!orgId) orgId = await findOrg();
+      // One last full check: anything this machine has that the account lacks goes up.
+      await pullEverything();
+      await flush();
+    } catch { return refused; }
+    if (dirtyProjects.size > 0 || dirtySettings || state.status === "offline" || state.status === "error") return refused;
+  }
   await supabase.auth.signOut();
+  clearThisMachine();
+  return { ok: true };
 }

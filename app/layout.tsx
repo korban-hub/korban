@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { CloudSync } from "@/components/cloud-sync";
+import { AuthGate } from "@/components/auth-gate";
 
 const barlowSemiCondensed = Barlow_Semi_Condensed({
   subsets: ["latin"],
@@ -46,7 +47,8 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${barlowSemiCondensed.variable} ${firaCode.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col font-sans">
-        {children}
+        {/* Nothing but the sign-in pages and a sent proposal opens without an account. */}
+        <AuthGate>{children}</AuthGate>
         {/* Whether the work has left this machine, said plainly, on every page. */}
         <CloudSync />
       </body>

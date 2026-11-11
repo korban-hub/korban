@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { signOutOfKorban } from "@/lib/cloudSync";
 
 type Trade = {
   id: string;
@@ -61,7 +62,13 @@ export default function TradesPanelPage() {
             </span>
           </div>
           <button
-            onClick={() => router.push("/login")}
+            onClick={() => {
+              // Really signs out: work is sent to the account first, then taken off this machine.
+              void signOutOfKorban().then((result) => {
+                if (result.ok) window.location.href = "/login";
+                else window.alert(result.reason);
+              });
+            }}
             className="text-[11px] text-zinc-600 transition hover:text-zinc-400"
             style={{ fontFamily: "ui-monospace, monospace", letterSpacing: ".05em" }}>
             sign out

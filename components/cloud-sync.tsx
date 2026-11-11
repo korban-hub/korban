@@ -8,12 +8,11 @@
  * work has left this machine, so it says it plainly - "Saved to your account"
  * rather than a cloud icon the estimator has to interpret.
  *
- * Signed out, it says so and offers the way in; there is no gate yet, and
- * Korban still works entirely in the browser, which is how it has always run.
+ * Signed out it is not drawn at all: Korban asks for a sign-in before any
+ * working page opens, so there is nothing for it to report.
  */
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { getSyncState, onSyncState, signOutOfKorban, startCloudSync, syncNow, type SyncState } from "@/lib/cloudSync";
 
 function timeOf(iso: string): string {
@@ -22,9 +21,9 @@ function timeOf(iso: string): string {
 }
 
 export function CloudSync() {
-  const router = useRouter();
   const [state, setState] = useState<SyncState>(getSyncState());
   const [open, setOpen] = useState(false);
+  const [refusal, setRefusal] = useState("");
 
   useEffect(() => {
     const stop = startCloudSync();
@@ -39,31 +38,22 @@ export function CloudSync() {
     : state.status === "error" ? "border-red-500/40 text-red-300"
     : "border-zinc-800 text-zinc-500";
 
+
   const label =
     state.status === "synced" ? "Saved to your account"
     : state.status === "working" ? state.note
     : state.status === "offline" ? "Offline"
     : state.status === "error" ? "Sync trouble"
-    : "This machine only";
+    : "";
+
+  // Nobody signed in: the sign-in page is all there is, and it needs no pill.
+  if (state.status === "off") return null;
 
   return (
     <div className="pointer-events-none fixed bottom-3 right-3 z-[60] flex flex-col items-end gap-1.5 print:hidden">
       {open && (
         <div className="pointer-events-auto w-[260px] rounded-lg border border-zinc-800 bg-korban-raised/95 p-3 shadow-xl backdrop-blur">
-          {state.status === "off" ? (
-            <>
-              <p className="text-[11px] leading-[1.6] text-zinc-400">
-                Your jobs are saved in this browser, on this machine. Sign in and they go to your account - and open on any machine you sign in from.
-              </p>
-              <button
-                onClick={() => router.push("/login")}
-                className="mt-2.5 w-full rounded border border-orange-500/40 bg-orange-500/10 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300 transition hover:bg-orange-500/20"
-              >
-                Sign in
-              </button>
-            </>
-          ) : (
-            <>
+          <>
               <p className="font-mono text-[9.5px] uppercase tracking-[0.16em] text-zinc-600">Signed in</p>
               <p className="truncate text-[11.5px] text-zinc-200">
                 {state.status === "synced" ? state.email : "…"}
@@ -82,14 +72,20 @@ export function CloudSync() {
                   Check now
                 </button>
                 <button
-                  onClick={() => { void signOutOfKorban().then(() => router.push("/login")); }}
+                  onClick={() => {
+                    setRefusal("");
+                    void signOutOfKorban().then((result) => {
+                      if (result.ok) window.location.href = "/login";
+                      else setRefusal(result.reason);
+                    });
+                  }}
                   className="rounded border border-zinc-800 px-2 py-1.5 font-mono text-[10px] text-zinc-500 transition hover:border-red-500/40 hover:text-red-300"
                 >
                   Sign out
                 </button>
               </div>
-            </>
-          )}
+            {refusal && <p className="mt-2 text-[10.5px] leading-[1.6] text-amber-300">{refusal}</p>}
+          </>
         </div>
       )}
       <button

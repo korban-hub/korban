@@ -8,14 +8,17 @@ import { useRouter } from "next/navigation";
  *
  * KORBAN splash / boot screen.
  * Renders a true 3D tetrahedron (real vertex math, not a CSS clip-path approximation)
- * that tumbles slowly and continuously, with a "( Clock In... )" caption beneath it.
+ * that tumbles slowly and continuously, with the name lowering in behind it and "w e l c o m e" fading in above the name once it lands.
  * Auto-advances to /login after a few seconds, or on click/tap.
  *
  * Route this as your root page ("/"), and keep your existing login page at "/login".
  */
 
-const AUTO_ADVANCE_MS = 5200;
-const ROTATION_SPEED = 0.00018; // radians per ms — slow, deliberate tumble
+const AUTO_ADVANCE_MS = 8600;
+// The name takes this long to come down and set; "welcome" fades in once it has.
+const LAND_MS = 6200;
+const WELCOME_FADE_MS = 1300;
+const ROTATION_SPEED = 0.0005; // radians per ms — a steady turn you can see: about two thirds of a turn over the intro
 const TILT_X = -0.45; // fixed forward tilt, radians
 
 // Regular tetrahedron vertices, apex pointing up (matches reference video)
@@ -109,12 +112,98 @@ export default function IntroPage() {
         fadingOut ? "opacity-0" : "opacity-100"
       }`}
     >
-      {/* Atmosphere — matches login page */}
+      <style>{`
+        @keyframes korban-intro-rise {
+          0%   { opacity: 0; transform: translateY(-26vh); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes korban-intro-welcome {
+          0%   { opacity: 0; }
+          100% { opacity: 1; }
+        }
+        @keyframes korban-intro-pan {
+          0%   { transform: translateX(-14vw); }
+          100% { transform: translateX(22vw); }
+        }
+      `}</style>
+
+      {/* Atmosphere — the glows drift left to right for as long as the intro runs */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute -left-32 -top-32 h-[420px] w-[420px] rounded-full bg-[#F97316]/15 blur-[160px]" />
-        <div className="absolute -right-32 -top-24 h-[420px] w-[420px] rounded-full bg-[#F97316]/18 blur-[170px]" />
-        <div className="absolute bottom-[-180px] right-[-80px] h-[620px] w-[620px] rounded-full bg-[#F97316]/20 blur-[190px]" />
+        <div className="absolute -left-32 -top-32 h-[420px] w-[420px] rounded-full bg-[#F97316]/15 blur-[160px]"
+          style={{ animation: `korban-intro-pan ${AUTO_ADVANCE_MS + 600}ms linear both` }} />
+        <div className="absolute right-[18vw] -top-24 h-[420px] w-[420px] rounded-full bg-[#F97316]/18 blur-[170px]"
+          style={{ animation: `korban-intro-pan ${AUTO_ADVANCE_MS + 600}ms linear both` }} />
+        <div className="absolute bottom-[-180px] right-[12vw] h-[620px] w-[620px] rounded-full bg-[#F97316]/20 blur-[190px]"
+          style={{ animation: `korban-intro-pan ${AUTO_ADVANCE_MS + 600}ms linear both` }} />
       </div>
+
+      {/* The floor: a grid laid flat, running away from the eye and fading into black */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-[46vh] overflow-hidden"
+        style={{
+          perspective: "900px",
+          WebkitMaskImage: "linear-gradient(to top, transparent 0%, #000 55%, transparent 100%)",
+          maskImage: "linear-gradient(to top, transparent 0%, #000 55%, transparent 100%)",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute", left: "-50%", right: "-50%", top: 0, height: "320%",
+            transform: "rotateX(72deg)", transformOrigin: "50% 0%",
+            backgroundImage:
+              "linear-gradient(to right, rgba(249,115,22,0.20) 1px, transparent 1px), linear-gradient(to bottom, rgba(249,115,22,0.20) 1px, transparent 1px)",
+            backgroundSize: "44px 44px",
+          }}
+        />
+      </div>
+
+      {/*
+        The name, in a faint white outline, lowering slowly out of the dark behind the mark.
+        Drawn first so the tetrahedron and caption sit in front of it.
+      */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden"
+        style={{
+          // The letters dissolve toward the top, so they read as coming down out of the dark.
+          WebkitMaskImage: "linear-gradient(to bottom, transparent 4%, #000 46%)",
+          maskImage: "linear-gradient(to bottom, transparent 4%, #000 46%)",
+        }}
+      >
+        <span
+          style={{
+            fontFamily: "var(--font-title), 'Barlow Semi Condensed', sans-serif",
+            fontWeight: 700,
+            fontSize: "25vw",
+            lineHeight: 1,
+            letterSpacing: "0.02em",
+            whiteSpace: "nowrap",
+            color: "transparent",
+            WebkitTextStroke: "1.5px rgba(255,255,255,0.26)",
+            animation: `korban-intro-rise ${LAND_MS}ms cubic-bezier(0.25, 0.5, 0.4, 1) both`,
+          }}
+        >
+          KORBAN
+        </span>
+      </div>
+
+      {/*
+        "welcome", above the name. It waits for the name to land, then fades in
+        where it stands - no slide, no drift.
+      */}
+      <p
+        className="pointer-events-none absolute inset-x-0 text-center text-zinc-400"
+        style={{
+          bottom: "calc(50% + 10.6vw)",
+          fontFamily: "var(--font-fira-code), 'Fira Code', ui-monospace, monospace",
+          fontSize: "15px",
+          letterSpacing: "0.04em",
+          animation: `korban-intro-welcome ${WELCOME_FADE_MS}ms ease-out ${LAND_MS}ms both`,
+        }}
+      >
+        w e l c o m e
+      </p>
 
       {/* Rotating tetrahedron — real 3D vertex math rendered as SVG */}
       <svg
@@ -128,18 +217,6 @@ export default function IntroPage() {
           <path key={face.key} d={face.d} fill={face.color} stroke="none" />
         ))}
       </svg>
-
-      {/* Caption */}
-      <p
-        className="relative mt-10 text-zinc-400"
-        style={{
-          fontFamily: "'Fira Code', ui-monospace, monospace",
-          fontSize: "15px",
-          letterSpacing: "0.04em",
-        }}
-      >
-        ( Clock In&hellip; )
-      </p>
     </main>
   );
 }

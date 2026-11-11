@@ -3,32 +3,44 @@
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-type Mode = "signIn" | "signUp" | "reset";
+type Mode = "signIn" | "reset";
+
+/**
+ * Where the estimator was headed when Korban asked them to sign in. Only a
+ * page inside Korban is accepted - never an address on another site.
+ */
+function whereNext(): string {
+  try {
+    const next = new URLSearchParams(window.location.search).get("next") ?? "";
+    if (next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/login")) return next;
+  } catch { /* fall through */ }
+  return "/trades-panel";
+}
+
+const MONO = "var(--font-fira-code), 'Fira Code', ui-monospace, monospace";
+const ORANGE = "#F97316";
 
 export default function LoginPage() {
   const [mode, setMode] = useState<Mode>("signIn");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [focused, setFocused] = useState<"email" | "password" | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  function resetMessage() { setMessage(null); }
-  function switchMode(next: Mode) { setMode(next); resetMessage(); }
+  function switchMode(next: Mode) { setMode(next); setMessage(null); }
 
   function validate(): string | null {
     if (!email.trim()) return "Enter your email address.";
     if (!/\S+@\S+\.\S+/.test(email)) return "Enter a valid email address.";
-    if (mode !== "reset") {
-      if (!password) return "Enter your password.";
-      if (mode === "signUp" && password.length < 6) return "Password must be at least 6 characters.";
-    }
+    if (mode === "signIn" && !password) return "Enter your password.";
     return null;
   }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    resetMessage();
+    setMessage(null);
     const validationError = validate();
     if (validationError) { setMessage({ type: "error", text: validationError }); return; }
     setLoading(true);
@@ -36,22 +48,12 @@ export default function LoginPage() {
       if (mode === "signIn") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        window.location.href = "/trades-panel";
+        window.location.href = whereNext();
         return;
       }
-      if (mode === "signUp") {
-        const { error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        setMessage({ type: "success", text: "Account created. Check your email to confirm before signing in." });
-        setMode("signIn");
-        return;
-      }
-      if (mode === "reset") {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset-password-page` });
-        if (error) throw error;
-        setMessage({ type: "success", text: "Password reset link sent. Check your email." });
-        return;
-      }
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset-password-page` });
+      if (error) throw error;
+      setMessage({ type: "success", text: "Reset link sent. Check your email." });
     } catch (error) {
       setMessage({ type: "error", text: error instanceof Error ? error.message : "Something went wrong. Try again." });
     } finally {
@@ -59,141 +61,66 @@ export default function LoginPage() {
     }
   }
 
-  const heading = mode === "signIn" ? "Sign In" : mode === "signUp" ? "Create Account" : "Reset Password";
-  const buttonLabel = loading ? "Working..." : mode === "signIn" ? "Enter" : mode === "signUp" ? "Create Account" : "Send Reset Link";
+  // One row of the box: a short orange label, then the field.
+  const rowStyle = (name: "email" | "password"): React.CSSProperties => ({
+    display: "flex", alignItems: "center", gap: 14, marginTop: 10, padding: "0 14px", height: 46,
+    border: `1px solid ${focused === name ? ORANGE : "#27272a"}`,
+    boxShadow: focused === name ? "0 0 0 3px rgba(249,115,22,.12)" : "none",
+    transition: "border-color .15s, box-shadow .15s",
+  });
+  const labelStyle: React.CSSProperties = { width: 64, flex: "none", color: ORANGE, fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase" };
+  const inputStyle: React.CSSProperties = { flex: 1, minWidth: 0, background: "transparent", border: 0, outline: "none", color: "#e4e4e7", fontFamily: MONO, fontSize: 14, caretColor: ORANGE };
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#070604] text-white">
-      {/* Atmosphere */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute -left-32 -top-32 h-[420px] w-[420px] rounded-full bg-[#F97316]/15 blur-[160px]" />
-        <div className="absolute -right-32 -top-24 h-[420px] w-[420px] rounded-full bg-[#F97316]/18 blur-[170px]" />
-        <div className="absolute bottom-[-180px] right-[-80px] h-[620px] w-[620px] rounded-full bg-[#F97316]/20 blur-[190px]" />
-        <div className="absolute inset-0 opacity-[0.035] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-[size:64px_64px]" />
-      </div>
+    <main style={{ position: "relative", minHeight: "100vh", width: "100%", background: "#060606", color: "#fff", fontFamily: MONO, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px 24px 58px" }}>
+      <Logo />
 
-      {/* Center Content */}
-      <div className="relative flex min-h-screen flex-col items-center justify-center px-6">
-        <div className="flex w-full max-w-[400px] flex-col items-center">
-          <Logo />
-
-          <p className="mt-4 text-center uppercase text-[#A1A1AA]"
-            style={{ fontFamily: "'Fira Code', ui-monospace, monospace", fontSize: "12px", letterSpacing: ".30em" }}>
-            Scaffold Intelligence Platform
-          </p>
-
-          <p className="mt-10 text-center uppercase text-orange-400"
-            style={{ fontFamily: "ui-monospace, monospace", fontSize: "11px", letterSpacing: ".2em" }}>
-            {heading}
-          </p>
-
-          <form onSubmit={handleSubmit} className="mt-4 w-full">
-            <div>
-              <label htmlFor="email" className="mb-2 block text-white"
-                style={{ fontFamily: "Geist, sans-serif", fontSize: "14px", fontWeight: 500 }}>
-                Email
-              </label>
-              <input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                placeholder="estimator@korban.com" autoComplete="email"
-                className="h-[52px] w-full rounded-full border border-white/25 bg-white/[0.02] px-6 text-sm text-[#F97316] outline-none transition placeholder:text-zinc-600 focus:border-[#F97316]/60 focus:bg-white/[0.04]"
-                style={{ fontFamily: "'Fira Code', ui-monospace, monospace" }} />
-            </div>
-
-            {mode !== "reset" && (
-              <div className="mt-5">
-                <label htmlFor="password" className="mb-2 block text-white"
-                  style={{ fontFamily: "Geist, sans-serif", fontSize: "14px", fontWeight: 500 }}>
-                  Password
-                </label>
-                <div className="relative">
-                  <input id="password" type={showPassword ? "text" : "password"} value={password}
-                    onChange={(e) => setPassword(e.target.value)} placeholder="••••••••"
-                    autoComplete={mode === "signUp" ? "new-password" : "current-password"}
-                    className="h-[52px] w-full rounded-full border border-white/25 bg-white/[0.02] px-6 pr-14 text-sm text-[#F97316] outline-none transition placeholder:text-zinc-600 focus:border-[#F97316]/60 focus:bg-white/[0.04]"
-                    style={{ fontFamily: "'Fira Code', ui-monospace, monospace" }} />
-                  <button type="button" onClick={() => setShowPassword((v) => !v)}
-                    className="absolute right-5 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-wider text-zinc-500 hover:text-[#F97316]">
-                    {showPassword ? "Hide" : "Show"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {mode === "signIn" && (
-              <div className="mt-3 flex justify-end">
-                <button type="button" onClick={() => switchMode("reset")}
-                  className="text-xs text-zinc-500 underline-offset-4 hover:text-[#F97316] hover:underline">
-                  Forgot password?
-                </button>
-              </div>
-            )}
-
-            {message && (
-              <p className={`mt-4 text-center text-xs ${message.type === "error" ? "text-red-400" : "text-emerald-400"}`}>
-                {message.text}
-              </p>
-            )}
-
-            <div className="mt-8 flex justify-center">
-              <button type="submit" disabled={loading}
-                className="h-[50px] min-w-[160px] rounded-full bg-[#F97316] px-6 text-black transition hover:bg-[#fb923c] active:scale-[0.98] disabled:opacity-60"
-                style={{ fontFamily: "Geist, sans-serif", fontSize: "16px", fontWeight: 600 }}>
-                {buttonLabel}
-              </button>
-            </div>
-
-            <div className="mt-6 text-center">
-              {mode === "signIn" && (
-                <button type="button" onClick={() => switchMode("signUp")}
-                  className="text-xs text-zinc-500 hover:text-[#F97316]">
-                  Don&rsquo;t have an account? <span className="text-[#F97316]">Create one</span>
-                </button>
-              )}
-              {mode === "signUp" && (
-                <button type="button" onClick={() => switchMode("signIn")}
-                  className="text-xs text-zinc-500 hover:text-[#F97316]">
-                  Already have an account? <span className="text-[#F97316]">Sign in</span>
-                </button>
-              )}
-              {mode === "reset" && (
-                <button type="button" onClick={() => switchMode("signIn")}
-                  className="text-xs text-zinc-500 hover:text-[#F97316]">
-                  Back to sign in
-                </button>
-              )}
-            </div>
-
-            {/* Demo entry — discreet, sign in screen only */}
-            {mode === "signIn" && (
-              <div className="mt-8 flex flex-col items-center gap-2">
-                <div className="flex w-full items-center gap-3">
-                  <div className="h-px flex-1 bg-white/8" />
-                  <span className="text-[9px] uppercase tracking-[0.2em] text-zinc-700">or</span>
-                  <div className="h-px flex-1 bg-white/8" />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { window.location.href = "/trades-panel"; }}
-                  className="text-[11px] text-zinc-600 transition hover:text-zinc-400"
-                  style={{ fontFamily: "ui-monospace, monospace", letterSpacing: ".05em" }}
-                >
-                  enter demo →
-                </button>
-              </div>
-            )}
-          </form>
+      <form onSubmit={handleSubmit} style={{ width: "100%", maxWidth: 440, marginTop: 30, border: "1px solid #27272a", background: "#0b0b0c" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid #27272a", fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: "#71717a" }}>
+          <span>{mode === "signIn" ? "Sign in" : "Reset password"}</span>
+          <span style={{ color: ORANGE }}>{mode === "signIn" ? "01 / Access" : "02 / Recover"}</span>
         </div>
-      </div>
 
-      {/* Bottom Quote */}
-      <div className="absolute bottom-10 left-10">
-        <p style={{ fontFamily: "Geist, sans-serif", fontSize: "18px", fontWeight: 500 }}>
-          Construction Manager:
-        </p>
-        <p className="mt-1 text-[#F97316]"
-          style={{ fontFamily: "'Fira Code', ui-monospace, monospace", fontSize: "16px" }}>
-          &ldquo;I need KORBAN to figure this out&rdquo;
-        </p>
+        <div style={{ padding: "20px 28px 24px" }}>
+          <label style={rowStyle("email")}>
+            <span style={labelStyle}>Email</span>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" autoFocus
+              onFocus={() => setFocused("email")} onBlur={() => setFocused(null)} style={inputStyle} />
+          </label>
+
+          {mode === "signIn" && (
+            <label style={rowStyle("password")}>
+              <span style={labelStyle}>Pass</span>
+              <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password"
+                onFocus={() => setFocused("password")} onBlur={() => setFocused(null)} style={inputStyle} />
+              <button type="button" onClick={() => setShowPassword((v) => !v)}
+                style={{ background: "none", border: 0, cursor: "pointer", color: "#71717a", fontFamily: MONO, fontSize: 9, letterSpacing: ".2em", textTransform: "uppercase" }}>
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </label>
+          )}
+
+          {message && (
+            <p style={{ marginTop: 14, fontSize: 11, lineHeight: 1.6, color: message.type === "error" ? "#f87171" : "#34d399" }}>{message.text}</p>
+          )}
+
+          <button type="submit" disabled={loading}
+            style={{ marginTop: 18, width: "100%", height: 44, border: `1px solid ${ORANGE}`, background: "rgba(249,115,22,.08)", color: ORANGE, cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1, fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: ".3em", textTransform: "uppercase" }}>
+            {loading ? "Working" : mode === "signIn" ? "Enter →" : "Send reset link →"}
+          </button>
+
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, fontSize: 10, letterSpacing: ".08em", color: "#52525b" }}>
+            <button type="button" onClick={() => switchMode(mode === "signIn" ? "reset" : "signIn")}
+              style={{ background: "none", border: 0, padding: 0, cursor: "pointer", color: "#71717a", fontFamily: MONO, fontSize: 10, letterSpacing: ".08em" }}>
+              {mode === "signIn" ? "Forgot password?" : "← Back to sign in"}
+            </button>
+            <span>Scaffold intelligence platform</span>
+          </div>
+        </div>
+      </form>
+
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 34, borderTop: "1px solid #18181b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", color: "#52525b" }}>
+        &ldquo;I need Korban to figure this out&rdquo;
       </div>
     </main>
   );
@@ -201,20 +128,13 @@ export default function LoginPage() {
 
 function Logo() {
   return (
-    <div className="flex flex-col items-center">
-      <svg width="44" height="44" viewBox="0 0 44 44" className="shrink-0">
-        <defs>
-          <linearGradient id="korbanMark" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#FDBA74" />
-            <stop offset="100%" stopColor="#F97316" />
-          </linearGradient>
-        </defs>
-        <path d="M22 4 L40 38 L4 38 Z" fill="url(#korbanMark)" />
-        <path d="M22 4 L40 38 L22 38 Z" fill="#000000" opacity="0.18" />
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <svg width="30" height="30" viewBox="0 0 44 44">
+        <path d="M22 4 L40 38 L4 38 Z" fill={ORANGE} />
+        <path d="M22 4 L40 38 L22 38 Z" fill="#000000" opacity="0.2" />
       </svg>
-      <h1 className="mt-2 text-center uppercase text-[#F97316]"
-        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "72px", fontWeight: 700, letterSpacing: ".14em", lineHeight: 1 }}>
-        KORBAN
+      <h1 style={{ marginTop: 10, color: ORANGE, fontFamily: "var(--font-title), 'Barlow Semi Condensed', sans-serif", fontSize: 26, fontWeight: 700, letterSpacing: ".34em", paddingLeft: ".34em", textTransform: "uppercase", lineHeight: 1 }}>
+        Korban
       </h1>
     </div>
   );
