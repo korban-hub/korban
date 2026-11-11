@@ -381,6 +381,7 @@ export type TierSnapshot = {
   ladderHatchMode?: "per100" | "perElevation";
   curveBayFt?: number;
   curveSides?: "outside" | "inside" | "both";
+  tunnelBayKeys?: string[];
 };
 
 /** What each tier offers, in one place rather than scattered through the pages. */
@@ -528,6 +529,12 @@ export type ProjectElevation = {
   curveBayFt: number;
   /** Which faces of a tank get a ring. */
   curveSides: "outside" | "inside" | "both";
+  /**
+   * Bays picked on the plan as running under a pedestrian tunnel, keyed
+   * "segIndex-bayIndex". The canopy frames, the stack above them and the
+   * ledger come from these; tunnel above is what they add up to.
+   */
+  tunnelBayKeys: string[];
   /**
    * The Quick Bid form exactly as it was typed.
    *
@@ -871,10 +878,12 @@ export type FreestandingPlan = {
  *
  * Where a walkway has to stay open, the base of every leg it passes is a
  * canopy frame - 6' wide to span the path, 7'-6" tall to clear a person -
- * in place of the bottom standard frame. The stack above is re-figured from
- * 7'-6" up to reach the same height: one 6'-4" fewer, usually a 5' and a
- * couple of inches of jack. The canopy's double pins take two crosses a
- * side, its top is planked out, and the frames above sit on saddle pins.
+ * in place of the bottom standard frame. The canopy is 6' wide against a 3'
+ * scaffold, so it hangs three feet past the outer leg, out over the walkway;
+ * the stack above is re-figured from 7'-6" up to reach the same height - one
+ * 6'-4" fewer, usually a 5' and a couple of inches of jack - and sits on
+ * saddle pins on the canopy's top ledger. Every canopy bay takes a double
+ * cross and a rail on each side, and the top is planked right out.
  */
 export type TunnelPlan = {
   /** Legs the tunnel passes, which is how many canopy frames it takes. */
@@ -897,6 +906,8 @@ export const CANOPY = {
   widthFt: 6,
   /** Double pins: two crosses a side, every bay, at the canopy lift. Same brace the bay already uses. */
   bracesPerBay: 4,
+  /** One rail a side as well, tying the canopy lift at the walkway. */
+  railsPerBay: 2,
   /** The canopy is planked out on top, over and above the decking of the lifts. */
   planksPerBay: 8,
   /** Saddle pins, two a leg. The frames above sit on these, so that joint takes no coupling pins. */
@@ -919,6 +930,7 @@ export function tunnelParts(legs: number, bays: number, bayLengthFt: number, sca
   ];
   if (bays > 0) {
     out.push({ partNo: parts.brace, qty: bays * CANOPY.bracesPerBay, note: "Canopy lift - double pins, two crosses a side" });
+    out.push({ partNo: parts.guardrail, qty: bays * CANOPY.railsPerBay, note: "Canopy lift - one rail a side" });
     out.push({ partNo: parts.plank, qty: bays * CANOPY.planksPerBay, note: "Canopy planked out, 8 a bay" });
   }
   return out;
@@ -1550,6 +1562,7 @@ function createEmptyElevation(): ProjectElevation {
     ladderHatchMode: "per100",
     curveBayFt: 5,
     curveSides: "outside",
+    tunnelBayKeys: [],
     quickBid: null,
     tierSnapshots: {},
     /*
@@ -1615,6 +1628,7 @@ function createDemoElevation(): ProjectElevation {
     ladderHatchMode: "per100",
     curveBayFt: 5,
     curveSides: "outside",
+    tunnelBayKeys: [],
     quickBid: null,
     tierSnapshots: {},
     activeTier: "korban-bid",
@@ -1823,6 +1837,7 @@ function normalizeElevation(value: unknown): ProjectElevation {
     ladderHatchMode: record.ladderHatchMode === "perElevation" ? "perElevation" : "per100",
     curveBayFt: Math.max(1, asNumber(record.curveBayFt, 5)),
     curveSides: record.curveSides === "inside" || record.curveSides === "both" ? record.curveSides : "outside",
+    tunnelBayKeys: asArray<unknown>(record.tunnelBayKeys).filter((k): k is string => typeof k === "string"),
     obstruction: (() => {
       const o = record.obstruction;
       if (!isRecord(o)) return null;
@@ -3255,6 +3270,7 @@ export function captureTier(elevation: ProjectElevation): TierSnapshot {
     ladderHatchMode: elevation.ladderHatchMode,
     curveBayFt: elevation.curveBayFt,
     curveSides: elevation.curveSides,
+    tunnelBayKeys: elevation.tunnelBayKeys,
   };
 }
 

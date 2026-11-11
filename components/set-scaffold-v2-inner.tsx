@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { KorbanButton, KorbanGuidance, KorbanHeader, KorbanHeaderMeta, type KorbanGuidanceFlag, type KorbanMenuLink } from "@/components/korban";
-import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, saveActiveElevation, saveSectionView, setIncludeCourtyards, updateActiveProject, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, stockingHours } from "@/lib/projectStore";
+import { buildPhaseReport, calculateQuantityEngine, TIER_CAPABILITIES, computeCourtyardTotals, courtyardQuantities, computeElevationOnlyTotals, computeFrameMakeup, DEFAULT_SCREW_JACK_MAX_IN, depthAtLeast, parseFeetInches, MATERIAL_RULE_DEFAULTS, findFrameMakeupOptions, getActiveElevation, getActiveElevationSource, getActiveProject, getActiveProjectSource, getEstimateDepth, braceForBay, largestBayWithin, STANDARD_BAY_LENGTHS, partsForConfiguration, planksPerBayForWidth, readLedger, readTier, canopyStack, CANOPY, tunnelParts, saveActiveElevation, saveSectionView, setIncludeCourtyards, updateActiveProject, writeLedgerEntries, type EstimateDepth, type ProjectElevation, type SectionDraftingItem, type ScaffoldInput, stockingHours } from "@/lib/projectStore";
 import { getBackendSettings, getStockItem, governingFinishRule } from "@/lib/backendStore";
 import { strokeDisplayName, type StoredHighlight } from "@/lib/projectStore";
 import SectionDrawing, { type SectionSummary } from "@/components/section-drawing";
@@ -115,6 +115,8 @@ function getPrimaryGeometryPoints(elev: ProjectElevation | null): PlanPoint[] {
  * is kept for what the estimator is touching - a selected leg, a tool in use.
  */
 const LAYOUT_INK = "#f8fafc";
+/** The pedestrian canopy on the plan: yellow, so the overhang is never read as scaffold. */
+const TUNNEL_INK = "#facc15";
 
 /** No traced plan. Everything downstream treats an empty outline as "nothing to lay out". */
 const EMPTY_OUTLINE: PlanPoint[] = [];
@@ -946,6 +948,14 @@ export default function SetScaffoldV2Inner() {
   /** Anything that went wrong loading, said out loud rather than swallowed. */
   const [loadError, setLoadError] = useState<string | null>(null);
   const [measureMode,    setMeasureMode]    = useState(false);
+  /*
+   * The pedestrian tunnel, picked on the plan. A bay under tunnel stands its
+   * two legs on canopy frames - 6' wide to span the walkway, 7'-6" to clear
+   * a person - with the stack above re-figured to the same height. Keyed
+   * "segIndex-bayIndex", kept with the elevation so the pick survives.
+   */
+  const [tunnelMode,     setTunnelMode]     = useState(false);
+  const [tunnelBayKeys,  setTunnelBayKeys]  = useState<Set<string>>(new Set());
   const [measureFrom,    setMeasureFrom]    = useState<PlanPoint|null>(null);
   const [measureTo,      setMeasureTo]      = useState<PlanPoint|null>(null);
   const [measurements,   setMeasurements]   = useState<{ a: PlanPoint; b: PlanPoint; ft: number }[]>([]);
@@ -1264,6 +1274,62 @@ export default function SetScaffoldV2Inner() {
   }
 
   /*
+   * The pedestrian tunnel.
+   *
+   * Picking a bay is the whole of it: Korban works out how many canopy
+   * frames that takes (one per leg the tunnel passes), re-figures the stack
+   * above them from 7'-6" up to reach the same height, and writes the
+   * ledger. Clearing the last bay takes the tunnel back off the job rather
+   * than leaving its parts behind.
+   */
+  function writeTunnel(keys: Set<string>, el: ProjectElevation | null = elevation) {
+    if (!el) return;
+    const legKeys = new Set<string>();
+    keys.forEach((key) => {
+      const [seg, bay] = key.split("-").map(Number);
+      if (!Number.isFinite(seg) || !Number.isFinite(bay)) return;
+      legKeys.add(`${seg}-${bay}`);
+      legKeys.add(`${seg}-${bay + 1}`);
+    });
+    const legs = legKeys.size;
+    const bays = keys.size;
+    const heightFt = el.wallHeight ?? 0;
+    const stack = legs > 0 && heightFt > 0 ? canopyStack(Math.max(0, heightFt - workerReachHeight), screwJackMaxExtensionIn) : null;
+    const tunnel = legs > 0 && stack
+      ? {
+        legs, bays, coverage: "plan",
+        makeup: stack.pieces, frameTall: stack.frameTall, screwJackExtensionIn: stack.screwJackExtensionIn,
+        parts: tunnelParts(legs, bays, bayLengthFt, scaffoldWidthFt),
+      }
+      : null;
+    const next = writeTunnelLedger({ ...el, tunnelBayKeys: [...keys], tunnel });
+    setElevation(next);
+    saveActiveElevation(next);
+  }
+
+  function toggleTunnelBay(key: string) {
+    const next = new Set(tunnelBayKeys);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    setTunnelBayKeys(next);
+    writeTunnel(next);
+  }
+
+  /** Every bay of one wall under the tunnel, or back off it if it already is. */
+  function toggleTunnelRun(segIndex: number) {
+    const seg = allSegmentLegs.find((x) => x.segIndex === segIndex);
+    if (!seg) return;
+    const keys = seg.bays.map((_, i) => `${segIndex}-${i}`).filter((k) => {
+      const [, i] = k.split("-").map(Number);
+      return !deletedLegKeys.has(`${segIndex}-${i}`) && !deletedLegKeys.has(`${segIndex}-${i + 1}`);
+    });
+    const allOn = keys.length > 0 && keys.every((k) => tunnelBayKeys.has(k));
+    const next = new Set(tunnelBayKeys);
+    keys.forEach((k) => { if (allOn) next.delete(k); else next.add(k); });
+    setTunnelBayKeys(next);
+    writeTunnel(next);
+  }
+
+  /*
    * Bays on a curve. A curved wall is built as square bays, two frames each,
    * the wedge between them planked - 5' bays whatever the radius, unless the
    * estimator says otherwise for this job. A tank is the same rule round a
@@ -1409,8 +1475,21 @@ export default function SetScaffoldV2Inner() {
    */
   const scaffoldModel = useMemo<ScaffoldModel | null>(() => {
     if (!scaleOk || effPuf <= 0 || allSegmentLegs.length === 0) return null;
+    /*
+     * Deleting a leg renumbers everything after it, so the tunnel bays the
+     * estimator picked on the plan are carried across to the model's own
+     * numbering, and each leg remembers which tick it came from.
+     */
+    const modelTunnelBays: { segIndex: number; bayIndex: number }[] = [];
+    const originalLeg = new Map<string, number>();
     const runs: SegmentLegs[] = allSegmentLegs.filter(seg => !seg.skipped).map(seg => {
       const kept = seg.legs.map((leg, i) => ({ leg, i })).filter(({ i }) => !deletedLegKeys.has(`${seg.segIndex}-${i}`));
+      kept.forEach(({ i }, k) => originalLeg.set(`${seg.segIndex}-${k}`, i));
+      for (let k = 0; k + 1 < kept.length; k++) {
+        if (kept[k + 1].i === kept[k].i + 1 && tunnelBayKeys.has(`${seg.segIndex}-${kept[k].i}`)) {
+          modelTunnelBays.push({ segIndex: seg.segIndex, bayIndex: k });
+        }
+      }
       if (kept.length === seg.legs.length && kept.every(({ i }) => !legOffsets[`${seg.segIndex}-${i}`])) return seg;
       const legs = kept.map(({ leg, i }) => {
         const off = legOffsets[`${seg.segIndex}-${i}`] ?? { dx: 0, dy: 0 };
@@ -1430,14 +1509,25 @@ export default function SetScaffoldV2Inner() {
       const run = strokeSeg ? drawnRuns.find(r => r.id === strokeSeg.runId) : undefined;
       return run?.heightFt ?? (elevation?.wallHeight ?? 0);
     };
+    const tunnelLegKeys = new Set(modelTunnelBays.flatMap(t => [`${t.segIndex}-${t.bayIndex}`, `${t.segIndex}-${t.bayIndex + 1}`]));
     const stackFor = (segIndex: number, legIndex: number): LegStack => {
       const heightFt = heightOf(segIndex);
-      const mk = heightFt > 0 ? computeFrameMakeup(Math.max(0, heightFt - workerReachHeight), screwJackMaxExtensionIn) : null;
+      /*
+       * A tunnel leg stands on a canopy frame, so its stack is re-figured
+       * from the canopy's head up - the same total height, one 6'-4" fewer -
+       * and the canopy goes on the bottom of it.
+       */
+      const onCanopy = tunnelLegKeys.has(`${segIndex}-${legIndex}`);
+      const reach = Math.max(0, heightFt - workerReachHeight);
+      const mk = heightFt > 0
+        ? (onCanopy ? canopyStack(reach, screwJackMaxExtensionIn) : computeFrameMakeup(reach, screwJackMaxExtensionIn))
+        : null;
       // Biggest frames at the bottom, the 5' or 3' on top.
       let frames = mk ? [...mk.pieces].sort((m, n) => n.size - m.size).flatMap(piece => new Array<number>(piece.qty).fill(piece.size)) : [];
       if (!frames.length) frames = new Array<number>(Math.max(1, frameTall)).fill(6.333);
-      const want = overriddenFC[`${segIndex}-${legIndex}`];
+      const want = overriddenFC[`${segIndex}-${originalLeg.get(`${segIndex}-${legIndex}`) ?? legIndex}`];
       if (want && want !== frames.length) frames = want > frames.length ? [...frames, ...new Array<number>(want - frames.length).fill(6.333)] : frames.slice(0, want);
+      if (onCanopy) frames = [CANOPY.heightFt, ...frames];
       return { frames, jackIn: mk?.screwJackExtensionIn ?? 0 };
     };
     const walls = [
@@ -1447,8 +1537,10 @@ export default function SetScaffoldV2Inner() {
     return buildScaffoldModel({
       runs, puf: effPuf, frameWidthFt: scaffoldWidthFt, planksPerLift: ppb, stackFor, hatchBays, walls,
       netting: nettingOn ? { addedHeightFt: nettingAddedHeightFt } : null,
+      tunnelBays: modelTunnelBays,
+      canopy: { widthFt: CANOPY.widthFt, planksPerBay: CANOPY.planksPerBay },
     });
-  }, [scaleOk, effPuf, allSegmentLegs, deletedLegKeys, legOffsets, strokeSetOut, drawnRuns, elevation, workerReachHeight, screwJackMaxExtensionIn, frameTall, overriddenFC, outline, scaffoldWidthFt, ppb, hatchBays, nettingOn, nettingAddedHeightFt]);
+  }, [scaleOk, effPuf, allSegmentLegs, deletedLegKeys, legOffsets, strokeSetOut, drawnRuns, elevation, workerReachHeight, screwJackMaxExtensionIn, frameTall, overriddenFC, outline, scaffoldWidthFt, ppb, hatchBays, nettingOn, nettingAddedHeightFt, tunnelBayKeys]);
 
   // A leg counts as "broken free" from the parallel track once its stored
   // offset has a perpendicular (off-wall) component beyond the same
@@ -1607,6 +1699,7 @@ export default function SetScaffoldV2Inner() {
          * readTier hands back only the work this round did.
          */
         setElevation(raw ? { ...raw, ...readTier(raw, raw.activeTier ?? getEstimateDepth()) } : raw);
+        setTunnelBayKeys(new Set(raw?.tunnelBayKeys ?? []));
         setProjectName(p.projectName || "");
 
         /*
@@ -2233,9 +2326,16 @@ export default function SetScaffoldV2Inner() {
   }
 
   const liveRef = useRef({ editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
-                           measureMode, measureFrom, addRunMode, runStart });
+                           measureMode, measureFrom, addRunMode, runStart, tunnelMode });
   liveRef.current = { editMode, allSegmentLegs, deletedLegKeys, legOffsets, effPuf, scaffoldWidthFt, outline,
-                      measureMode, measureFrom, addRunMode, runStart };
+                      measureMode, measureFrom, addRunMode, runStart, tunnelMode };
+  /*
+   * The plan's pointer handlers are hung once and read live state through
+   * the ref above; a function closed over this render would toggle against
+   * the elevation as it was when the plan first drew.
+   */
+  const toggleTunnelBayRef = useRef(toggleTunnelBay);
+  toggleTunnelBayRef.current = toggleTunnelBay;
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -2273,9 +2373,35 @@ export default function SetScaffoldV2Inner() {
       return best;
     }
 
+    /** The bay nearest a click: by the middle of the two legs it runs between. */
+    function findNearestBay(pt: { x: number; y: number }): string | null {
+      const { allSegmentLegs: segs, deletedLegKeys: dels, legOffsets: offs, effPuf: puf } = liveRef.current;
+      let best: string | null = null;
+      let bestDist = puf * 8;
+      for (const seg of segs) {
+        for (let i = 0; i + 1 < seg.legs.length; i++) {
+          if (dels.has(`${seg.segIndex}-${i}`) || dels.has(`${seg.segIndex}-${i + 1}`)) continue;
+          const a = seg.legs[i], b = seg.legs[i + 1];
+          const oa = offs[`${seg.segIndex}-${i}`] ?? { dx: 0, dy: 0 };
+          const ob = offs[`${seg.segIndex}-${i + 1}`] ?? { dx: 0, dy: 0 };
+          const mx = (a.wallPoint.x + a.tickTip.x + oa.dx * 2 + b.wallPoint.x + b.tickTip.x + ob.dx * 2) / 4;
+          const my = (a.wallPoint.y + a.tickTip.y + oa.dy * 2 + b.wallPoint.y + b.tickTip.y + ob.dy * 2) / 4;
+          const d = Math.hypot(pt.x - mx, pt.y - my);
+          if (d < bestDist) { bestDist = d; best = `${seg.segIndex}-${i}`; }
+        }
+      }
+      return best;
+    }
+
     function onPointerDown(e: PointerEvent) {
       const pt = toViewBox(e);
       dragStateRef.current.lastPos = { x: pt.x, y: pt.y };
+
+      // Putting a bay under the tunnel takes the click before panning does.
+      if (liveRef.current.tunnelMode) {
+        const bay = findNearestBay(pt);
+        if (bay) { toggleTunnelBayRef.current(bay); return; }
+      }
 
       // Measuring and drawing take the click before anything that pans or
       // moves a leg, so neither can be triggered by accident mid-task.
@@ -3388,6 +3514,10 @@ export default function SetScaffoldV2Inner() {
               const h = stockingHours(totals.frames);
               flags.push({ tone: "note", text: `No truck access: stock in ${h} hrs, stock out ${h} hrs.` });
             }
+            if (tunnelBayKeys.size > 0 && elevation?.tunnel) {
+              const t = elevation.tunnel;
+              flags.push({ tone: "note", text: `${t.legs} legs on canopy frames over ${t.bays} bay${t.bays === 1 ? "" : "s"} of tunnel: ${t.frameTall} frames above each, canopy decked and railed.` });
+            }
             if ((scaffoldModel?.counts.endRails ?? 0) > 0) {
               const ends = (scaffoldModel?.counts.endRails ?? 0) / 2;
               flags.push({ tone: "note", text: `${ends} open end${ends === 1 ? "" : "s"}: end rails added, ${scaffoldModel?.counts.endRails} rails in the count.` });
@@ -3680,8 +3810,8 @@ export default function SetScaffoldV2Inner() {
                     ))}
                   </span>
                 )}
-                <button onClick={() => { setEditMode(m => !m); setMeasureMode(false); setAddRunMode(false); }} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "\u2713 Editing" : "Edit Bay"}</button>
-                <button onClick={() => { setAddRunMode(m => !m); setEditMode(false); setMeasureMode(false); setRunStart(null); setRunEnd(null); }}
+                <button onClick={() => { setEditMode(m => !m); setMeasureMode(false); setAddRunMode(false); setTunnelMode(false); }} className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${editMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>{editMode ? "\u2713 Editing" : "Edit Bay"}</button>
+                <button onClick={() => { setAddRunMode(m => !m); setEditMode(false); setMeasureMode(false); setTunnelMode(false); setRunStart(null); setRunEnd(null); }}
                   title="Draw a run anywhere on the plan"
                   className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${addRunMode ? "border-orange-500 bg-orange-500 text-black" : "border-zinc-700 text-zinc-400 hover:border-orange-500/40"}`}>
                   {addRunMode ? "Drawing..." : "+ Add Run"}
@@ -3694,7 +3824,32 @@ export default function SetScaffoldV2Inner() {
                   </button>
                 )}
 
-                <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureFrom(null); setMeasureTo(null); }}
+                <button
+                  onClick={() => { setTunnelMode(m => !m); setEditMode(false); setAddRunMode(false); setMeasureMode(false); }}
+                  disabled={!scaleOk || !elevation}
+                  title="Pedestrian tunnel: click a bay to stand its legs on canopy frames, click again to take it off. The canopy hangs 3' past the outer leg, over the walkway."
+                  className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${tunnelMode ? "border-yellow-400 bg-yellow-400 text-black" : "border-zinc-700 text-zinc-400 hover:border-yellow-400/40"}`}>
+                  {tunnelMode ? "Picking tunnel" : "Tunnel"}
+                </button>
+                {tunnelMode && (
+                  <span className="flex items-center gap-1 rounded-lg border border-yellow-400/30 bg-yellow-400/5 px-1.5 py-0.5">
+                    <span className="font-mono text-[8.5px] uppercase tracking-[0.12em] text-yellow-200/70">Whole wall</span>
+                    {allSegmentLegs.filter(seg => !seg.skipped && seg.legs.length > 1).map(seg => (
+                      <button key={seg.segIndex} onClick={() => toggleTunnelRun(seg.segIndex)}
+                        title={`Every bay of wall ${seg.segIndex + 1} under the tunnel`}
+                        className="rounded px-1.5 py-0.5 text-[9px] font-bold text-zinc-500 hover:text-yellow-200">
+                        {seg.segIndex + 1}
+                      </button>
+                    ))}
+                    {tunnelBayKeys.size > 0 && (
+                      <button onClick={() => { setTunnelBayKeys(new Set()); writeTunnel(new Set()); }}
+                        className="rounded px-1.5 py-0.5 text-[9px] font-bold text-zinc-600 hover:text-white">
+                        Clear {tunnelBayKeys.size}
+                      </button>
+                    )}
+                  </span>
+                )}
+                <button onClick={() => { setMeasureMode(m => !m); setEditMode(false); setAddRunMode(false); setTunnelMode(false); setMeasureFrom(null); setMeasureTo(null); }}
                   disabled={!scaleOk}
                   title={scaleOk ? "Measure between two points" : "No scale on this elevation"}
                   className={`rounded-lg border px-2 py-1 text-[9px] font-bold disabled:opacity-30 ${measureMode ? "border-cyan-400/60 bg-cyan-400/15 text-cyan-300" : "border-zinc-700 text-zinc-400 hover:border-cyan-400/40"}`}>
@@ -3899,7 +4054,7 @@ export default function SetScaffoldV2Inner() {
               style={{
                 cursor: isPanning
                   ? "grabbing"
-                  : editMode || addRunMode || measureMode
+                  : editMode || addRunMode || measureMode || tunnelMode
                     // Orange crosshair - the mouse is a drawing tool right now,
                     // not a plain pointer. Add Run and Measure want a mark on
                     // the drawing just as much as edit mode does, and said
@@ -4133,6 +4288,63 @@ export default function SetScaffoldV2Inner() {
 
                 return (
                   <g key={`seg-${segIndex}`} fill={LAYOUT_INK} stroke={LAYOUT_INK} strokeLinecap="square" opacity="0.9">
+                    {/*
+                      * The pedestrian tunnel. The canopy frame is 6' wide
+                      * against a 3' scaffold, so it hangs past the outer leg
+                      * out over the walkway - and that overhang is what is
+                      * drawn, in yellow, because it is the part of the plan
+                      * that is canopy frame and nothing else. The bay itself
+                      * is washed the same colour so the run reads at a glance.
+                      */}
+                    {sl.slice(0, -1).map((leg, i) => {
+                      const next = sl[i + 1]; if (!next) return null;
+                      if (!tunnelBayKeys.has(`${segIndex}-${i}`)) return null;
+                      if (deletedLegKeys.has(`${segIndex}-${i}`) || deletedLegKeys.has(`${segIndex}-${i + 1}`)) return null;
+                      const o1 = legOffsets[`${segIndex}-${i}`] ?? { dx: 0, dy: 0 };
+                      const o2 = legOffsets[`${segIndex}-${i + 1}`] ?? { dx: 0, dy: 0 };
+                      const over = (CANOPY.widthFt - scaffoldWidthFt) * effPuf;
+                      const a1 = { x: leg.tickTip.x + o1.dx, y: leg.tickTip.y + o1.dy };
+                      const b1 = { x: next.tickTip.x + o2.dx, y: next.tickTip.y + o2.dy };
+                      const a2 = { x: a1.x + normal.x * over, y: a1.y + normal.y * over };
+                      const b2 = { x: b1.x + normal.x * over, y: b1.y + normal.y * over };
+                      const w1 = { x: leg.wallPoint.x + o1.dx, y: leg.wallPoint.y + o1.dy };
+                      const w2 = { x: next.wallPoint.x + o2.dx, y: next.wallPoint.y + o2.dy };
+                      return (
+                        <g key={`tunnel-${i}`}>
+                          {/* Barely a tint: enough to follow the run, never enough to sit on the counts. */}
+                          <polygon points={`${w1.x},${w1.y} ${w2.x},${w2.y} ${b2.x},${b2.y} ${a2.x},${a2.y}`}
+                            fill={TUNNEL_INK} fillOpacity="0.05" stroke="none" />
+                          {/* The canopy's outer line, where the overhang ends. */}
+                          <line x1={a2.x} y1={a2.y} x2={b2.x} y2={b2.y} stroke={TUNNEL_INK} strokeWidth="0.8" strokeOpacity="0.55" />
+                        </g>
+                      );
+                    })}
+                    {/*
+                      * And the canopy leg itself: each tick carries on in
+                      * yellow past its white tip, the three feet the canopy
+                      * frame hangs out over the walkway. The leg is what the
+                      * estimator reads on a plan, so that is what is marked.
+                      */}
+                    {sl.map((leg, i) => {
+                      if (deletedLegKeys.has(`${segIndex}-${i}`)) return null;
+                      if (!tunnelBayKeys.has(`${segIndex}-${i}`) && !tunnelBayKeys.has(`${segIndex}-${i - 1}`)) return null;
+                      const off = legOffsets[`${segIndex}-${i}`] ?? { dx: 0, dy: 0 };
+                      const t = { x: leg.tickTip.x + off.dx, y: leg.tickTip.y + off.dy };
+                      /*
+                       * The frame count sits a foot past the tick, so the
+                       * canopy leg breaks around it: a stub off the tick, the
+                       * count, then the rest of the leg out to the overhang.
+                       */
+                      const at = (ft: number) => ({ x: t.x + normal.x * effPuf * ft, y: t.y + normal.y * effPuf * ft });
+                      const overFt = CANOPY.widthFt - scaffoldWidthFt;
+                      const p0 = at(0), p1 = at(Math.min(0.45, overFt)), p2 = at(Math.min(2.1, overFt)), p3 = at(overFt);
+                      return (
+                        <g key={`canopy-tick-${i}`} stroke={TUNNEL_INK} strokeWidth="1.8" strokeLinecap="square">
+                          <line x1={p0.x} y1={p0.y} x2={p1.x} y2={p1.y} />
+                          {overFt > 2.1 && <line x1={p2.x} y1={p2.y} x2={p3.x} y2={p3.y} />}
+                        </g>
+                      );
+                    })}
                     {/* Cross braces — skipped if either connected leg has
                         broken free from the parallel track (see
                         isLegBrokenFree above) */}

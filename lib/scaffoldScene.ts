@@ -60,6 +60,8 @@ export function workingPalette(): ScenePalette {
     jack: steelMaterial(0x9aa3ad, 0.5), plate: steelMaterial(0x6b7480, 0.7), guardPost: steelMaterial(0xc4c8cc),
     bracket: steelMaterial(0x4ade80, 0.4), bracketPlank: woodMaterial(0x86efac),
     plank: woodMaterial(0x8a6a2a), hatchBoard: steelMaterial(0x8fa3b8, 0.5), hatchDoor: steelMaterial(0xb7c7d8, 0.5), ladder: steelMaterial(0xc9d3dc, 0.45),
+    // The canopy frame reads warm, the way it is marked on the plan.
+    canopy: steelMaterial(0xd9a441, 0.4),
     netting: nettingMaterial(),
   };
 }
@@ -75,6 +77,7 @@ export function proposalPalette(): ScenePalette {
     jack: steelMaterial(0x8e939a, 0.5), plate: steelMaterial(0x5f666e, 0.7), guardPost: steelMaterial(0xd9d2c8, 0.35),
     bracket: steelMaterial(0x4ade80, 0.4), bracketPlank: woodMaterial(0x86efac),
     plank: woodMaterial(0x9a6f2c), hatchBoard: steelMaterial(0x9aa2ab, 0.5), hatchDoor: steelMaterial(0xb9c0c8, 0.5), ladder: steelMaterial(0xcfd5db, 0.45),
+    canopy: steelMaterial(0xcfc1a8, 0.4),
     netting: nettingMaterial(),
   };
 }

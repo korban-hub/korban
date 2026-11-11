@@ -41,7 +41,7 @@ export type Vec3 = { x: number; y: number; z: number };
 
 export type PartKind =
   | "post" | "ledger" | "brace" | "rail" | "plank" | "jack" | "plate"
-  | "bracket" | "bracketPlank" | "hatchBoard" | "hatchDoor" | "ladder" | "guardPost" | "netting";
+  | "bracket" | "bracketPlank" | "hatchBoard" | "hatchDoor" | "ladder" | "guardPost" | "netting" | "canopy";
 
 export type Piece =
   /** A round tube from a to b. */
@@ -75,6 +75,19 @@ export type ModelInput = {
    * scaffold plus this much. Left out when the job has no netting add.
    */
   netting?: { addedHeightFt: number } | null;
+  /**
+   * Bays a pedestrian tunnel runs under. Every leg those bays touch stands
+   * on a canopy frame in place of its bottom frame: wider, to span the
+   * walkway, and taller, to clear a person. The stack handed back by
+   * stackFor for such a leg must already start with the canopy's height.
+   */
+  tunnelBays?: { segIndex: number; bayIndex: number }[];
+  /**
+   * The canopy frame, measured from the wall-side leg: 6' wide, so on a 3'
+   * scaffold it hangs 3' past the outer leg toward the street, and 7'-6"
+   * tall. The scaffold above sits on saddle pins on its top ledger.
+   */
+  canopy?: { widthFt: number; planksPerBay: number };
 };
 
 export type ScaffoldModel = {
@@ -82,7 +95,7 @@ export type ScaffoldModel = {
   walls: { a: { x: number; z: number }; b: { x: number; z: number }; heightFt: number }[];
   /** Feet; y up. */
   bounds: { min: Vec3; max: Vec3 };
-  counts: { posts: number; braces: number; planks: number; rails: number; endRails: number; brackets: number; hatchBoards: number; ladders: number };
+  counts: { posts: number; braces: number; planks: number; rails: number; endRails: number; brackets: number; hatchBoards: number; ladders: number; canopyFrames: number; canopyBays: number };
 };
 
 const POST_R = 0.08;      // 1.9" tube
@@ -164,7 +177,7 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
   const { puf, frameWidthFt: W, planksPerLift: ppb } = input;
   const runs = input.runs.filter(r => !r.skipped && r.legs.length > 0);
   const pieces: Piece[] = [];
-  const counts = { posts: 0, braces: 0, planks: 0, rails: 0, endRails: 0, brackets: 0, hatchBoards: 0, ladders: 0 };
+  const counts = { posts: 0, braces: 0, planks: 0, rails: 0, endRails: 0, brackets: 0, hatchBoards: 0, ladders: 0, canopyFrames: 0, canopyBays: 0 };
 
   // Plan px -> feet, centred.
   const legPts = runs.flatMap(r => r.legs.flatMap(l => [l.wallPoint, l.tickTip]));
@@ -176,6 +189,24 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
   const F = (p: PlanPoint, y: number): Vec3 => ({ x: (p.x - origin.x) / puf, y, z: (p.y - origin.y) / puf });
   const ftLen = (p: PlanPoint, q: PlanPoint) => Math.hypot(q.x - p.x, q.y - p.y) / puf;
   const hatchKey = new Set((input.hatchBays ?? []).map(h => `${h.segIndex}-${h.bayIndex}`));
+  /*
+   * The tunnel: the bays it runs under, and the legs those bays touch. A leg
+   * is a tunnel leg if either bay beside it is under the tunnel - the canopy
+   * frame carries the bay, so both its legs stand on one.
+   */
+  const tunnelKey = new Set((input.tunnelBays ?? []).map(t => `${t.segIndex}-${t.bayIndex}`));
+  const tunnelLegKey = new Set<string>();
+  for (const t of input.tunnelBays ?? []) {
+    tunnelLegKey.add(`${t.segIndex}-${t.bayIndex}`);
+    tunnelLegKey.add(`${t.segIndex}-${t.bayIndex + 1}`);
+  }
+  const CANOPY_W = input.canopy?.widthFt ?? 6;
+  const CANOPY_PLANKS = input.canopy?.planksPerBay ?? 8;
+  /** The canopy's outer post: a canopy width off the wall leg, past the scaffold's own. */
+  const canopyOuter = (leg: LegResult): PlanPoint => ({
+    x: leg.wallPoint.x + (leg.tickTip.x - leg.wallPoint.x) * (CANOPY_W / W),
+    y: leg.wallPoint.y + (leg.tickTip.y - leg.wallPoint.y) * (CANOPY_W / W),
+  });
 
   /** Every deck on a top lift, in plan px, with its height - what a rail must not fence off. */
   const topDecks: { poly: PlanPoint[]; y: number }[] = [];
@@ -202,24 +233,36 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
     return tops;
   };
 
-  // A frame leg: plate, jack, posts, ledgers.
-  const drawLeg = (leg: LegResult, s: LegStack) => {
+  /**
+   * A frame leg: plate, jack, posts, ledgers.
+   *
+   * On a tunnel leg the bottom frame is the canopy: its outer post stands a
+   * canopy width off the wall leg - past the scaffold's own line, out toward
+   * the street - and the scaffold above starts on its top ledger, on saddle
+   * pins, so nothing but the canopy's two posts reaches the ground.
+   */
+  const drawLeg = (leg: LegResult, s: LegStack, canopy = false) => {
     const w0 = F(leg.wallPoint, 0), t0 = F(leg.tickTip, 0);
+    const c0 = canopy ? F(canopyOuter(leg), 0) : t0;
     const yaw = Math.atan2(-(t0.z - w0.z), t0.x - w0.x);
-    for (const p of [w0, t0]) {
+    for (const p of [w0, c0]) {
       box({ x: p.x, y: 0.02, z: p.z }, 0.5, 0.5, 0.04, yaw, "plate");
       const j = s.jackIn / 12;
       if (j > 0.02) tube({ x: p.x, y: 0.04, z: p.z }, { x: p.x, y: j, z: p.z }, POST_R * 0.8, "jack");
     }
     let y = s.jackIn / 12;
-    for (const h of s.frames) {
-      tube({ x: w0.x, y, z: w0.z }, { x: w0.x, y: y + h, z: w0.z }, POST_R, "post");
-      tube({ x: t0.x, y, z: t0.z }, { x: t0.x, y: y + h, z: t0.z }, POST_R, "post");
+    s.frames.forEach((h, fi) => {
+      const isCanopy = canopy && fi === 0;
+      const outer = isCanopy ? c0 : t0;
+      const part: PartKind = isCanopy ? "canopy" : "post";
+      tube({ x: w0.x, y, z: w0.z }, { x: w0.x, y: y + h, z: w0.z }, POST_R, part);
+      tube({ x: outer.x, y, z: outer.z }, { x: outer.x, y: y + h, z: outer.z }, POST_R, part);
       counts.posts += 2;
-      tube({ x: w0.x, y: y + h, z: w0.z }, { x: t0.x, y: y + h, z: t0.z }, LEDGER_R, "ledger");
-      tube({ x: w0.x, y: y + h * 0.62, z: w0.z }, { x: t0.x, y: y + h * 0.62, z: t0.z }, LEDGER_R * 0.8, "ledger");
+      if (isCanopy) counts.canopyFrames += 1;
+      tube({ x: w0.x, y: y + h, z: w0.z }, { x: outer.x, y: y + h, z: outer.z }, LEDGER_R, isCanopy ? "canopy" : "ledger");
+      tube({ x: w0.x, y: y + h * 0.62, z: w0.z }, { x: outer.x, y: y + h * 0.62, z: outer.z }, LEDGER_R * 0.8, isCanopy ? "canopy" : "ledger");
       y += h;
-    }
+    });
     // Guardrail posts in the top frame's sockets, both sides.
     if (s.frames.length) {
       tube({ x: t0.x, y, z: t0.z }, { x: t0.x, y: y + GUARD_H, z: t0.z }, POST_R * 0.85, "guardPost");
@@ -236,7 +279,7 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
   const drawSpan = (
     w1: PlanPoint, t1: PlanPoint, w2: PlanPoint, t2: PlanPoint,
     kind: BaySpan["kind"], stackA: LegStack, stackB: LegStack,
-    opts: { hatch?: boolean; planked?: boolean; guard?: boolean } = {},
+    opts: { hatch?: boolean; planked?: boolean; guard?: boolean; tunnel?: boolean; legA?: LegResult; legB?: LegResult } = {},
   ) => {
     const topsA = liftTops(stackA), topsB = liftTops(stackB);
     const lifts = Math.min(topsA.length, topsB.length);
@@ -249,6 +292,45 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
     for (let k = 0; k < lifts; k++) {
       const yA0 = k === 0 ? baseA : topsA[k - 1], yA1 = topsA[k];
       const yB0 = k === 0 ? baseB : topsB[k - 1], yB1 = topsB[k];
+      /*
+       * The canopy lift of a tunnel bay. The outer face is the canopy's own
+       * line, three feet past the scaffold's; it is braced there and planked
+       * right across, because the deck over a walkway is what keeps what the
+       * crew drops off the public.
+       */
+      if (opts.tunnel && k === 0 && opts.legA && opts.legB) {
+        const c1 = canopyOuter(opts.legA), c2 = canopyOuter(opts.legB);
+        /*
+         * Double pins: two crosses a side, and a rail with them. The canopy
+         * lift carries the public under it, so it is tied harder than a
+         * working lift - and the outer face is the canopy's own line, three
+         * feet past the scaffold's.
+         */
+        const faces: [PlanPoint, PlanPoint, PartKind][] = [[w1, w2, "brace"], [c1, c2, "canopy"]];
+        for (const [p1, p2, part] of faces) {
+          const mid = (yA0 + yA1) / 2, midB = (yB0 + yB1) / 2;
+          // The lower cross, pin to pin, then the upper - the frame's two sets of pins.
+          tube(F(p1, yA0), F(p2, midB), BRACE_R, part); tube(F(p1, mid), F(p2, yB0), BRACE_R, part);
+          tube(F(p1, mid), F(p2, yB1), BRACE_R, part); tube(F(p1, yA1), F(p2, midB), BRACE_R, part);
+          // And the rail across, at the head of the lift.
+          tube(F(p1, yA1 - 0.25), F(p2, yB1 - 0.25), RAIL_R, part === "canopy" ? "canopy" : "rail");
+        }
+        counts.braces += 4;
+        counts.rails += 2;
+        counts.canopyBays += 1;
+        const yD = (yA1 + yB1) / 2;
+        const pw = (CANOPY_W - 0.15) / CANOPY_PLANKS;
+        for (let i = 0; i < CANOPY_PLANKS; i++) {
+          const across = (i + 0.5) / CANOPY_PLANKS;
+          const mid = {
+            x: (w1.x + w2.x) / 2 + (c1.x - w1.x) * across,
+            y: (w1.y + w2.y) / 2 + (c1.y - w1.y) * across,
+          };
+          box(F(mid, yD + PLANK_T / 2), lenFt + PLANK_OVERHANG, pw * 0.92, PLANK_T, yaw, "plank");
+          counts.planks += 1;
+        }
+        continue;
+      }
       if (kind === "braced") {
         // One X on each face.
         tube(F(t1, yA0), F(t2, yB1), BRACE_R, "brace"); tube(F(t1, yA1), F(t2, yB0), BRACE_R, "brace");
@@ -401,13 +483,14 @@ export function buildScaffoldModel(input: ModelInput): ScaffoldModel {
 
   for (const run of runs) {
     const stacks = run.legs.map((_, i) => input.stackFor(run.segIndex, i));
-    run.legs.forEach((leg, i) => drawLeg(leg, stacks[i]));
+    run.legs.forEach((leg, i) => drawLeg(leg, stacks[i], tunnelLegKey.has(`${run.segIndex}-${i}`)));
     for (let i = 0; i + 1 < run.legs.length; i++) {
       const bay = run.bays[i];
       if (!bay) continue;
       const a = run.legs[i], b = run.legs[i + 1];
       drawSpan(a.wallPoint, a.tickTip, b.wallPoint, b.tickTip, bay.kind, stacks[i], stacks[i + 1], {
         hatch: hatchKey.has(`${run.segIndex}-${i}`),
+        tunnel: tunnelKey.has(`${run.segIndex}-${i}`), legA: a, legB: b,
       });
     }
     if (run.lead && run.legs.length) {
