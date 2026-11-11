@@ -2,6 +2,7 @@ import { Barlow_Semi_Condensed, Fira_Code } from "next/font/google";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { CloudSync } from "@/components/cloud-sync";
 
 const barlowSemiCondensed = Barlow_Semi_Condensed({
   subsets: ["latin"],
@@ -44,7 +45,11 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} ${barlowSemiCondensed.variable} ${firaCode.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-sans">{children}</body>
+      <body className="min-h-full flex flex-col font-sans">
+        {children}
+        {/* Whether the work has left this machine, said plainly, on every page. */}
+        <CloudSync />
+      </body>
     </html>
   );
 }

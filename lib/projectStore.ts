@@ -2072,6 +2072,42 @@ export function getProjectData(): ProjectData {
 
 export function saveProjectData(data: ProjectData) {
   if (!canUseStorage()) return;
+  const next = normalizeProjectData(data);
+  window.localStorage.setItem(PROJECT_DATA_KEY, JSON.stringify(next));
+  announceProjects(Object.keys(next));
+}
+
+/*
+ * Who is listening for a write.
+ *
+ * The browser is still where the work lives; this is how the server copy
+ * hears about it (lib/cloudSync). Listeners are told which jobs were in the
+ * write, never what changed in them, so nothing here has to know what a sync
+ * is - and with nobody listening, Korban behaves exactly as it always has.
+ */
+type ProjectDataListener = (projectIds: string[]) => void;
+const projectDataListeners = new Set<ProjectDataListener>();
+
+export function onProjectDataChanged(fn: ProjectDataListener): () => void {
+  projectDataListeners.add(fn);
+  return () => { projectDataListeners.delete(fn); };
+}
+
+function announceProjects(ids: string[]) {
+  projectDataListeners.forEach((fn) => {
+    try { fn(ids); } catch { /* a listener's trouble is not the store's */ }
+  });
+}
+
+/**
+ * The server's copy, written straight in.
+ *
+ * Used only when signing in brings jobs down from the account: it replaces
+ * what the browser holds without telling the listeners, because the server
+ * already has what it just sent.
+ */
+export function writeProjectDataFromCloud(data: ProjectData) {
+  if (!canUseStorage()) return;
   window.localStorage.setItem(PROJECT_DATA_KEY, JSON.stringify(normalizeProjectData(data)));
 }
 
@@ -2147,6 +2183,8 @@ export function deleteProject(projectId: string) {
   const data = getProjectData();
   delete data[projectId];
   saveProjectData(data);
+  // The write above lists what is left, so the one that went is named here.
+  announceProjects([projectId]);
   if (getActiveProjectId() === projectId) {
     const remaining = Object.keys(data)[0];
     if (remaining) setActiveProjectId(remaining);

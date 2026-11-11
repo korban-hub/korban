@@ -816,7 +816,7 @@ export const DEFAULT_BACKEND_SETTINGS: BackendSettings = {
 
 // --- Storage plumbing -------------------------------------------------------
 
-const BACKEND_SETTINGS_KEY = "korbanBackendSettings_v1";
+export const BACKEND_SETTINGS_KEY = "korbanBackendSettings_v1";
 
 function canUseStorage() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -1248,6 +1248,31 @@ export function saveBackendSettings(settings: Partial<BackendSettings>): void {
   const current = getBackendSettings();
   const next = normalizeBackendSettings({ ...current, ...settings });
   window.localStorage.setItem(BACKEND_SETTINGS_KEY, JSON.stringify(next));
+  announceBackend();
+}
+
+/*
+ * Who is listening for a write. The rates belong to the estimator, not the
+ * machine, so the server copy (lib/cloudSync) hears about every save here.
+ */
+type BackendListener = () => void;
+const backendListeners = new Set<BackendListener>();
+
+export function onBackendSettingsChanged(fn: BackendListener): () => void {
+  backendListeners.add(fn);
+  return () => { backendListeners.delete(fn); };
+}
+
+function announceBackend() {
+  backendListeners.forEach((fn) => {
+    try { fn(); } catch { /* a listener's trouble is not the store's */ }
+  });
+}
+
+/** The account's settings, written straight in on sign-in. No echo back up. */
+export function writeBackendSettingsFromCloud(settings: BackendSettings): void {
+  if (!canUseStorage()) return;
+  window.localStorage.setItem(BACKEND_SETTINGS_KEY, JSON.stringify(normalizeBackendSettings(settings)));
 }
 
 export function saveBackendSection<K extends keyof Omit<BackendSettings, "schemaVersion">>(
@@ -1261,6 +1286,7 @@ export function saveBackendSection<K extends keyof Omit<BackendSettings, "schema
 export function resetBackendSettings(): void {
   if (!canUseStorage()) return;
   window.localStorage.setItem(BACKEND_SETTINGS_KEY, JSON.stringify(DEFAULT_BACKEND_SETTINGS));
+  announceBackend();
 }
 
 /**
