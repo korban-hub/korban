@@ -9,6 +9,10 @@
  * that document reads best in. The estimator marks each hit - what to do
  * about it - answers the ten questions, and it all saves to the job.
  *
+ * A subcontract also gets a Contract Sheet - the office's review of the paper
+ * beyond the scaffold scope (price, early pay, retention, insurance, warranty
+ * and the rest), one row each, found or not mentioned.
+ *
  * It is a highlighter, not a reader: a term that is not on the list is not
  * found, which is why every category ends with the terms the document was
  * silent on. The PDF itself is never stored; the hits are.
@@ -21,19 +25,27 @@ import { getBackendSettings } from "@/lib/backendStore";
 import { getActiveProject, updateActiveProject, type ProjectRecord } from "@/lib/projectStore";
 import {
   SCOPE_DOC_TYPES,
+  buildContractSheet,
   categoriesFor,
+  contractSheetText,
   hitKey,
   keepScrubFile,
+  keepScrubPages,
   marksFor,
+  pageList,
   newScrubId,
   regroupHits,
   scrubFile,
+  scrubPageText,
   scrubPages,
+  searchContractRow,
   scopeItems,
   summarizeScrub,
   takePendingScopeDrop,
   takePendingScopeOpen,
+  textLooksUnreadable,
   type CategoryResult,
+  type ContractSheetRow,
   type PageText,
   type ScopeAnswer,
   type ScopeDocType,
@@ -59,17 +71,25 @@ const menuLinks: KorbanMenuLink[] = [
 
 /**
  * Page text out of the PDF, in the browser, with pdf.js - the same build the
- * takeoff uses to read plan sheets. A scanned PDF has no text layer; those
- * pages come back empty and the page says so rather than guessing.
+ * takeoff uses to read plan sheets.
+ *
+ * Two kinds of page give no text to search: a scan, which has none, and a
+ * page whose text layer does not map back to letters and comes out as
+ * symbols. Both are read from the page image instead (readPageImages). If
+ * that cannot run, the page is left empty and the scrub says so - a page of
+ * symbols is never searched, because it would find nothing and look clean.
  */
-async function readPdfPages(file: File): Promise<{ pages: PageText[]; emptyPages: number }> {
+async function readPdfPages(
+  file: File,
+  onProgress: (message: string) => void,
+): Promise<{ pages: PageText[]; emptyPages: number; imagePages: number; imageError: string }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const lib = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as any;
   lib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
   const buf = await file.arrayBuffer();
   const pdf = await lib.getDocument({ data: buf }).promise;
   const pages: PageText[] = [];
-  let emptyPages = 0;
+  const unread: number[] = [];
   for (let n = 1; n <= pdf.numPages; n++) {
     try {
       const page = await pdf.getPage(n);
@@ -82,14 +102,69 @@ async function readPdfPages(file: File): Promise<{ pages: PageText[]; emptyPages
       }
       // Words broken at a line end: "instal-\nlation" back to one word.
       text = text.replace(/(\w)-\n(?=[a-z])/g, "$1").replace(/\s*\n\s*/g, " ");
-      if (text.trim().length < 20) emptyPages += 1;
+      if (text.trim().length < 20 || textLooksUnreadable(text)) { unread.push(n); text = ""; }
       pages.push({ page: n, text });
     } catch {
-      emptyPages += 1;
+      unread.push(n);
       pages.push({ page: n, text: "" });
     }
   }
-  return { pages, emptyPages };
+
+  let imagePages = 0;
+  let imageError = "";
+  if (unread.length > 0) {
+    try {
+      const read = await readPageImages(pdf, unread, onProgress);
+      for (const p of pages) {
+        const text = read.get(p.page);
+        if (text && text.trim().length >= 20) { p.text = text; imagePages += 1; }
+      }
+    } catch (e) {
+      imageError = e instanceof Error && e.message ? e.message : "the page reader could not start";
+    }
+  }
+  const emptyPages = pages.filter((p) => p.text.trim().length < 20).length;
+  return { pages, emptyPages, imagePages, imageError };
+}
+
+/**
+ * Reads pages from their image: each page is drawn to a canvas and handed to
+ * tesseract.js, which runs in the browser. Slower than text - seconds a page -
+ * so it only runs on pages that gave no text. The reader fetches its English
+ * word data the first time it is used, so that first read needs a connection.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function readPageImages(pdf: any, numbers: number[], onProgress: (message: string) => void): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  onProgress("Starting the page reader\u2026");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tesseract = (await import("tesseract.js")) as any;
+  const worker = await tesseract.createWorker("eng");
+  try {
+    for (let i = 0; i < numbers.length; i++) {
+      onProgress(`Reading page images\u2026 ${i + 1} of ${numbers.length}`);
+      try {
+        const page = await pdf.getPage(numbers[i]);
+        const base = page.getViewport({ scale: 1 });
+        // About 1700px across a letter page: enough for 8pt contract type.
+        const viewport = page.getViewport({ scale: Math.min(3, 1700 / base.width) });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        const result = await worker.recognize(canvas);
+        const text = String(result?.data?.text ?? "").replace(/(\w)-\n(?=[a-z])/g, "$1").replace(/\s*\n\s*/g, " ");
+        out.set(numbers[i], text);
+      } catch { /* this page stays empty */ }
+    }
+  } finally {
+    try { await worker.terminate(); } catch { /* already gone */ }
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------------
@@ -195,13 +270,15 @@ export default function ScopeScrubPage() {
   const reattachInput = useRef<HTMLInputElement>(null);
 
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  // Subcontracts have two readings of the same paper: the keyword hits and the contract sheet.
+  const [view, setView] = useState<"keywords" | "sheet">("keywords");
 
   // ---- Scrub ----------------------------------------------------------
   const runScrub = useCallback(async (file: File, type: ScopeDocType, lib: ScopeLibrary, proj: ProjectRecord) => {
     setError(null);
     setBusy(`Reading ${file.name}…`);
     try {
-      const { pages, emptyPages } = await readPdfPages(file);
+      const { pages, emptyPages, imagePages, imageError } = await readPdfPages(file, setBusy);
       setBusy(`Scrubbing ${pages.length} pages…`);
       const results = scrubPages(pages, categoriesFor(lib, type));
       const hits: ScopeHit[] = results.flatMap((c) => c.terms.flatMap((t) => t.hits));
@@ -215,8 +292,13 @@ export default function ScopeScrubPage() {
         marks: {},
         answers: {},
         emptyPages,
+        imagePages,
+        // The office's sheet: what the paper pays, holds back and asks for, beyond the scaffold scope.
+        sheet: type === "subcontract" ? buildContractSheet(pages, lib.contractRows) : null,
       };
       keepScrubFile(record.id, file);
+      keepScrubPages(record.id, pages);
+      setView("keywords");
       const next = updateActiveProject({ scopeScrubs: [record, ...proj.scopeScrubs] });
       setProject(next);
       setCurrent(record);
@@ -224,8 +306,10 @@ export default function ScopeScrubPage() {
       setPendingFile(null);
       setOpenTerms(new Set());
       setSavedAt(new Date().toISOString());
-      if (pages.length === 0 || emptyPages === pages.length) {
-        setError("This PDF has no text to search - it is a scan. Korban can only highlight text it can read.");
+      if (imageError) {
+        setError(`${emptyPages} page${emptyPages === 1 ? "" : "s"} had no readable text, and the page reader could not run (${imageError}). Those pages were not searched. Check the connection and scrub again.`);
+      } else if (pages.length === 0 || emptyPages === pages.length) {
+        setError("Korban could not read any text in this PDF, from the file or from the page images.");
       }
     } catch (e) {
       setError(`Could not read that PDF${e instanceof Error && e.message ? `: ${e.message}` : "."}`);
@@ -307,6 +391,26 @@ export default function ScopeScrubPage() {
     const key = String(index);
     const existing = current.answers[key] ?? { answer: "", note: "" };
     persist({ ...current, answers: { ...current.answers, [key]: { ...existing, note } } });
+  }
+
+  // ---- Contract sheet -------------------------------------------------
+  function setSheetNote(rowId: string, note: string) {
+    if (!current?.sheet) return;
+    persist({ ...current, sheet: { rows: current.sheet.rows.map((r) => (r.id === rowId ? { ...r, note } : r)) } });
+  }
+  /** A row for this one contract. Searched if the pages are still in the tab; a place for a note either way. */
+  function addSheetRow(name: string, wordsText: string) {
+    if (!current?.sheet || !name.trim()) return;
+    const words = wordsText.split(",").map((w) => w.trim()).filter(Boolean);
+    const base = { id: `custom-${Date.now().toString(36)}`, name: name.trim(), words, needsAmount: false };
+    const pages = scrubPageText(current.id);
+    const found = pages && words.length > 0 ? searchContractRow(base, pages) : { pages: [], count: 0, hits: [] };
+    const row: ContractSheetRow = { ...base, custom: true, note: "", ...found, ...(pages ? {} : { words: [] }) };
+    persist({ ...current, sheet: { rows: [...current.sheet.rows, row] } });
+  }
+  function removeSheetRow(rowId: string) {
+    if (!current?.sheet) return;
+    persist({ ...current, sheet: { rows: current.sheet.rows.filter((r) => r.id !== rowId) } });
   }
 
   function deleteCurrent() {
@@ -419,7 +523,7 @@ export default function ScopeScrubPage() {
           onFile={startWith}
           onCancel={current ? () => { setStarting(false); setPendingFile(null); setError(null); } : null}
           previous={project.scopeScrubs}
-          onOpen={(s) => { setCurrent(s); setStarting(false); }}
+          onOpen={(s) => { setCurrent(s); setStarting(false); setView("keywords"); }}
           library={library}
           fileInput={fileInput}
         />
@@ -495,6 +599,44 @@ export default function ScopeScrubPage() {
             </div>
           )}
 
+          {current.imagePages > 0 && (
+            <p className="xl:col-span-3 rounded border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[11px] leading-[1.5] text-amber-200">
+              {current.imagePages === current.pageCount ? "This PDF had no readable text" : `${current.imagePages} of ${current.pageCount} pages had no readable text`}, so Korban read the page images instead. Check a quote against the page before relying on it.
+            </p>
+          )}
+
+          {current.docType === "subcontract" && (
+            <div className="xl:col-span-3 flex flex-wrap items-center gap-1.5">
+              {([["keywords", "Keywords"], ["sheet", "Contract sheet"]] as const).map(([id, label]) => (
+                <button
+                  key={id}
+                  onClick={() => setView(id)}
+                  className={`rounded border px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] transition ${
+                    view === id ? "border-orange-500 bg-orange-500/10 text-orange-300" : "border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+              {!current.sheet && view === "sheet" && (
+                <span className="ml-2 text-[11px] text-zinc-500">This scrub was made before the contract sheet existed. Start a new scrub of the same PDF to get one.</span>
+              )}
+            </div>
+          )}
+
+          {view === "sheet" && current.docType === "subcontract" ? (
+            current.sheet && (
+              <ContractSheetPanel
+                record={current}
+                canSearch={Boolean(scrubPageText(current.id))}
+                onNote={setSheetNote}
+                onAdd={addSheetRow}
+                onRemove={removeSheetRow}
+                onPage={openPage}
+                projectName={project.projectName}
+              />
+            )
+          ) : (<>
           {/* ---- Rail ---------------------------------------------------- */}
           <aside className="flex flex-col gap-0.5 self-start rounded-xl border border-zinc-800 bg-black/40 p-2.5 xl:sticky xl:top-[72px]">
             <p className="px-2 pb-2 pt-1 font-mono text-[9.5px] uppercase tracking-[0.18em] text-zinc-600">Categories</p>
@@ -636,6 +778,7 @@ export default function ScopeScrubPage() {
               );
             })}
           </aside>
+          </>)}
         </div>
       )}
     </main>
@@ -645,6 +788,165 @@ export default function ScopeScrubPage() {
 // ----------------------------------------------------------------------
 // Pieces
 // ----------------------------------------------------------------------
+
+/**
+ * The contract sheet: one row per thing the office checks on a subcontract.
+ * Found or not, where, the sentence, and the office's note. Korban finds and
+ * quotes; what to do about a row is written in the note by a person.
+ */
+function ContractSheetPanel({
+  record, canSearch, onNote, onAdd, onRemove, onPage, projectName,
+}: {
+  record: ScopeScrubRecord;
+  canSearch: boolean;
+  onNote: (rowId: string, note: string) => void;
+  onAdd: (name: string, words: string) => void;
+  onRemove: (rowId: string) => void;
+  onPage: (page: number) => void;
+  projectName: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [name, setName] = useState("");
+  const [words, setWords] = useState("");
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const rows = record.sheet?.rows ?? [];
+  const title = `Contract sheet \u2014 ${projectName || "Project"} \u2014 ${record.fileName}`;
+
+  function copy() {
+    void navigator.clipboard?.writeText([title, "", ...contractSheetText(record)].join("\n")).then(() => setCopied(true));
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+  function print() {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const body = rows.map((r) => {
+      const where = r.count > 0 ? pageList(r.pages) : r.words.length === 0 ? "" : "NOT mentioned";
+      const quote = r.hits[0] ? `<div class="q">\u201c${esc(r.hits[0].sentence)}\u201d${r.count > 1 ? ` <i>+ ${r.count - 1} more</i>` : ""}</div>` : "";
+      return `<tr><td class="n">${esc(r.name)}</td><td class="w">${esc(where)}</td><td>${quote}<div class="note">${esc(r.note)}</div></td></tr>`;
+    }).join("");
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>
+      body{font:12px/1.5 Arial,sans-serif;color:#111;margin:32px}
+      h1{font-size:16px;margin:0 0 4px} p{margin:0 0 16px;color:#555;font-size:11px}
+      table{width:100%;border-collapse:collapse} td{border-top:1px solid #ccc;padding:8px 10px 8px 0;vertical-align:top}
+      .n{font-weight:bold;width:170px} .w{width:120px;white-space:nowrap} .q{color:#444;font-size:11px} .note{margin-top:3px;font-weight:bold}
+    </style></head><body><h1>${esc(title)}</h1><p>${record.pageCount} pages. Page numbers count from the first page of this file.</p><table>${body}</table></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
+  return (
+    <section className="xl:col-span-3 rounded-xl border border-zinc-800 bg-black/40 p-4">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-zinc-800 pb-3">
+        <div>
+          <h2 className="text-[15px] font-bold uppercase tracking-[0.04em] text-orange-400">Contract sheet</h2>
+          <p className="mt-0.5 text-[10.5px] leading-[1.5] text-zinc-500">
+            What the paper says beyond the scaffold scope. Korban finds and quotes; &ldquo;Not mentioned&rdquo; means none of the row&apos;s words are in this file. Pages count from the first page of the file.
+          </p>
+        </div>
+        <div className="flex gap-1.5">
+          <button onClick={print} className="rounded-lg border border-zinc-800 bg-korban-raised px-3 py-2 font-mono text-[10px] text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200">Print</button>
+          <button onClick={copy} className="rounded-lg border border-orange-500/40 bg-orange-500/10 px-3 py-2 font-mono text-[10px] text-orange-300 transition hover:bg-orange-500/20">{copied ? "Copied" : "Copy sheet"}</button>
+        </div>
+      </div>
+
+      <div className="hidden grid-cols-[170px_130px_minmax(0,1fr)_300px] gap-4 border-b border-zinc-800 py-2 font-mono text-[9px] uppercase tracking-[0.18em] text-zinc-600 lg:grid">
+        <span>Item</span><span>Where</span><span>What the contract says</span><span>Your note</span>
+      </div>
+
+      {rows.map((row) => {
+        const found = row.count > 0;
+        const noteOnly = row.words.length === 0;
+        const showAll = open.has(row.id);
+        const shown = showAll ? row.hits : row.hits.slice(0, 1);
+        return (
+          <div key={row.id} className="grid gap-x-4 gap-y-2 border-b border-zinc-900 py-3 lg:grid-cols-[170px_130px_minmax(0,1fr)_300px]">
+            <div>
+              <p className="text-[13px] font-semibold text-zinc-100">{row.name}</p>
+              {row.custom && (
+                <button onClick={() => onRemove(row.id)} className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-600 hover:text-red-300">Remove row</button>
+              )}
+            </div>
+            <div>
+              {noteOnly ? (
+                <span className="inline-block rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-zinc-500">By hand</span>
+              ) : found ? (
+                <>
+                  <span className="inline-block rounded border border-emerald-400/40 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-emerald-300">Found</span>
+                  <p className="mt-1.5 font-mono text-[10.5px] text-orange-300">{pageList(row.pages)}</p>
+                </>
+              ) : (
+                <span className="inline-block rounded border border-red-400/45 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-red-300">{row.needsAmount ? "Not found" : "Not mentioned"}</span>
+              )}
+            </div>
+            <div className="min-w-0">
+              {noteOnly ? (
+                <p className="text-[11.5px] leading-[1.55] text-zinc-600">Added by hand - not searched.</p>
+              ) : !found ? (
+                <p className="text-[11.5px] leading-[1.55] text-zinc-600">
+                  {row.needsAmount ? "No dollar figure beside these words in this file. If the first page is missing, the price may be on it." : "None of this row's words appear in this file."}
+                  <span className="mt-0.5 block text-[10px] text-zinc-700">Looked for: {row.words.join(", ")}</span>
+                </p>
+              ) : (
+                <>
+                  {shown.map((hit, i) => (
+                    <p key={i} className={`text-[11.5px] leading-[1.55] text-zinc-400 ${i > 0 ? "mt-2 border-t border-zinc-900 pt-2" : ""}`}>
+                      <button onClick={() => onPage(hit.page)} className="mr-1.5 font-mono text-[10px] text-orange-300 hover:underline" title="Open the PDF at this page">p. {hit.page}</button>
+                      {hit.sentence.slice(0, hit.start)}
+                      <mark className="rounded-[2px] bg-orange-500/25 px-0.5 font-semibold text-white">{hit.sentence.slice(hit.start, hit.end)}</mark>
+                      {hit.sentence.slice(hit.end)}
+                    </p>
+                  ))}
+                  {row.count > 1 && (
+                    <button
+                      onClick={() => setOpen((prev) => { const n = new Set(prev); if (n.has(row.id)) n.delete(row.id); else n.add(row.id); return n; })}
+                      className="mt-1 font-mono text-[10px] text-zinc-600 hover:text-zinc-300"
+                    >
+                      {showAll
+                        ? `Show less${row.count > row.hits.length ? ` (${row.count - row.hits.length} more not kept - see the pages)` : ""}`
+                        : `+ ${row.count - 1} more`}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            <textarea
+              value={row.note}
+              onChange={(e) => onNote(row.id, e.target.value)}
+              placeholder="Add a note\u2026"
+              rows={2}
+              className="w-full resize-y rounded border border-zinc-800 bg-black/60 px-2.5 py-2 text-[11.5px] leading-[1.5] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-orange-500/40"
+            />
+          </div>
+        );
+      })}
+
+      <div className="mt-3 grid gap-2 rounded border border-dashed border-zinc-800 p-3 lg:grid-cols-[220px_minmax(0,1fr)_auto]">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Add a row for this contract\u2026"
+          className="rounded border border-zinc-800 bg-black/60 px-2.5 py-1.5 text-[11.5px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500/40"
+        />
+        <input
+          value={words}
+          onChange={(e) => setWords(e.target.value)}
+          disabled={!canSearch}
+          placeholder={canSearch ? "Words to look for, separated by commas (optional)" : "Searching needs the PDF read again - this row will take a note only"}
+          className="rounded border border-zinc-800 bg-black/60 px-2.5 py-1.5 text-[11.5px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500/40 disabled:opacity-60"
+        />
+        <button
+          onClick={() => { onAdd(name, canSearch ? words : ""); setName(""); setWords(""); }}
+          disabled={!name.trim()}
+          className="rounded border border-orange-500/40 bg-orange-500/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-orange-300 transition hover:bg-orange-500/20 disabled:opacity-40"
+        >
+          Add row
+        </button>
+      </div>
+    </section>
+  );
+}
 
 function Chip({ n, label, tone }: { n: string; label: string; tone?: Tone }) {
   return (

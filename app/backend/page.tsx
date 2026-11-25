@@ -22,6 +22,8 @@ import {
 import {
   DEFAULT_SCOPE_LIBRARY,
   SCOPE_DOC_TYPES,
+  contractRowsFromText,
+  contractRowsToText,
   type ScopeCategory,
   type ScopeDocType,
   type ScopeLibrary,
@@ -713,6 +715,8 @@ function ScopeKeywordsEditor({
 }) {
   const [tab, setTab] = useState<ScopeDocType>("scope");
   const [search, setSearch] = useState("");
+  // The contract sheet rows as typed. Kept as text while editing so a half-typed line isn't tidied away.
+  const [rowsText, setRowsText] = useState(() => contractRowsToText(library.contractRows));
   const term = search.trim().toLowerCase();
   const orderKey = tab === "scope" ? "scopeOrder" : "subcontractOrder";
 
@@ -786,6 +790,7 @@ function ScopeKeywordsEditor({
   function resetToKorban() {
     if (!window.confirm("Replace the whole library with Korban's starter list? Your edits are lost.")) return;
     setLibrary(DEFAULT_SCOPE_LIBRARY);
+    setRowsText(contractRowsToText(DEFAULT_SCOPE_LIBRARY.contractRows));
   }
 
   const termCount = library.categories.reduce((n, c) => n + c.terms.length, 0);
@@ -949,6 +954,17 @@ function ScopeKeywordsEditor({
                 </div>
               ))}
             </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
+            <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">Contract sheet rows</h3>
+            <p className="mt-1 mb-2 text-[10px] leading-4 text-zinc-600">
+              What every subcontract is checked for beyond the scaffold scope. One row per line: the name, a bar, then the words that find it, separated by commas. Put $ among the words to take only sentences with a dollar figure. Applies to the next scrub.
+            </p>
+            <TextArea
+              value={rowsText}
+              onChange={(v) => { setRowsText(v); setLibrary({ ...library, contractRows: contractRowsFromText(v) }); }}
+              rows={14}
+            />
           </div>
           <div className="rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4">
             <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-orange-400">The questions</h3>

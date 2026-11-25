@@ -634,6 +634,17 @@ export default function DashboardPage() {
         />
 
         <div className="relative space-y-3">
+          {/* Design Space: a drafting table with no job behind it, so it sits on the page apart from the job's own buttons. */}
+          <div className="flex justify-end">
+            <a
+              href="/design-space"
+              className="rounded-lg border border-zinc-400 bg-zinc-300 px-3.5 py-1.5 text-left transition hover:bg-zinc-200"
+            >
+              <span className="block text-[12px] font-bold leading-tight text-zinc-900">Design Space</span>
+              <span className="block font-mono text-[9px] leading-tight text-zinc-600">for drafting / drawing</span>
+            </a>
+          </div>
+
           {/* ---- What needs attention today -------------------------------- */}
           {alerts.length > 0 && (
             <section className="relative overflow-hidden rounded-lg border border-orange-500/40 bg-orange-500/[0.07] p-3">

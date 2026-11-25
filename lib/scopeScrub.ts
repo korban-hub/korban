@@ -59,13 +59,67 @@ export type ScopeMark = {
   tone: ScopeMarkTone;
 };
 
+/**
+ * One line of the Contract Sheet - the office's review of a subcontract
+ * beyond the scaffold scope: what it pays, what it holds back, what paper
+ * it wants. A row is a name and the words that find it.
+ */
+export type ContractRow = {
+  id: string;
+  name: string;
+  /** Any of these puts a sentence on the row. */
+  words: string[];
+  /** Only sentences that also carry a dollar figure count (the contract price). */
+  needsAmount: boolean;
+};
+
 export type ScopeLibrary = {
   categories: ScopeCategory[];
   /** The four marks, per document type. Same tones, different words. */
   marks: Record<ScopeDocType, ScopeMark[]>;
   /** The review questions answered on every scrub. */
   questions: string[];
+  /** The Contract Sheet every subcontract starts with. */
+  contractRows: ContractRow[];
 };
+
+/**
+ * Rows typed one per line as "Name | word, word, word". A "$" among the
+ * words means the row only takes sentences with a dollar figure in them.
+ */
+export function contractRowsFromText(text: string): ContractRow[] {
+  const used = new Set<string>();
+  return text.split("\n").flatMap((line): ContractRow[] => {
+    const [rawName, rawWords = ""] = line.split("|");
+    const name = (rawName ?? "").trim();
+    if (!name) return [];
+    const all = rawWords.split(",").map((w) => w.trim()).filter(Boolean);
+    let id = "row-" + (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "x");
+    while (used.has(id)) id += "-2";
+    used.add(id);
+    return [{ id, name, words: all.filter((w) => w !== "$"), needsAmount: all.includes("$") }];
+  });
+}
+
+export function contractRowsToText(rows: ContractRow[]): string {
+  return rows.map((r) => `${r.name} | ${[...(r.needsAmount ? ["$"] : []), ...r.words].join(", ")}`).join("\n");
+}
+
+export const DEFAULT_CONTRACT_ROWS: ContractRow[] = contractRowsFromText(`
+Contract amount | $, contract amount, contract price, contract sum, subcontract amount, subcontract price, subcontract sum, purchase order total, purchase order amount, lump sum, total amount, not to exceed
+Early pay / discount | discount, prox, early payment
+Payment terms | net thirty, net 30, pay when paid, paid when paid, payment draw, pay request, progress payment
+Retention | retention, retainage, retained percentage
+Insurance | additional insured, endorsement, certificate of insurance, CG 20 10, CG 20 37, primary wording, non-contributory, waiver of subrogation, rights of recovery
+Guarantee / Warranty | warrant, guarantee, guaranty
+Addenda | addendum, addenda
+Prevailing wage / payroll | prevailing wage, certified payroll, Davis-Bacon, apprentice
+Billing / lien waivers | lien release, lien waiver, conditional waiver, unconditional waiver, joint check, joint payment, invoice
+Bonds | performance bond, payment bond, bid bond, surety
+Preliminary notice | preliminary notice, 20-day notice
+Safety | safety, protection equipment, Cal/OSHA, IIPP
+Contacts | project manager, project engineer, accounts payable
+`);
 
 /** Terms typed as "Term | note", one per line, into a category. */
 function terms(categoryId: string, lines: string, lit: string[] = []): ScopeTerm[] {
@@ -360,6 +414,7 @@ export const DEFAULT_SCOPE_LIBRARY: ScopeLibrary = {
     "Who is responsible for damage caused by other trades?",
     "Does the contract require scaffold beyond the original drawings or bid specifications?",
   ],
+  contractRows: DEFAULT_CONTRACT_ROWS,
 };
 
 /** The categories that run for a document, in that document's order. */
@@ -423,6 +478,20 @@ export function normalizeScopeLibrary(value: unknown): ScopeLibrary {
     questions: Array.isArray(value.questions)
       ? value.questions.filter((q): q is string => typeof q === "string" && q.trim() !== "")
       : d.questions,
+    // A library saved before the Contract Sheet existed gets the standard rows.
+    contractRows: Array.isArray(value.contractRows)
+      ? value.contractRows.flatMap((r, ri): ContractRow[] => {
+        if (!isRecord(r)) return [];
+        const name = str(r.name).trim();
+        if (!name) return [];
+        return [{
+          id: str(r.id) || `row-${ri + 1}`,
+          name,
+          words: Array.isArray(r.words) ? r.words.filter((w): w is string => typeof w === "string" && w.trim() !== "") : [],
+          needsAmount: r.needsAmount === true,
+        }];
+      })
+      : d.contractRows,
   };
 }
 
@@ -537,6 +606,112 @@ export function scrubPages(pages: PageText[], categories: ScopeCategory[]): Cate
 }
 
 // ----------------------------------------------------------------------
+// The Contract Sheet
+// ----------------------------------------------------------------------
+
+/** How many quoted sentences a row keeps; the count and pages cover the rest. */
+const SHEET_QUOTES = 6;
+const AMOUNT = /\$\s?\d[\d,]*(?:\.\d{2})?/;
+
+export type ContractSheetRow = {
+  id: string;
+  name: string;
+  words: string[];
+  needsAmount: boolean;
+  /** Added by hand on this one contract. */
+  custom: boolean;
+  /** Every page the row was found on, in order. */
+  pages: number[];
+  /** Every sentence found, counted; `hits` holds the first few. */
+  count: number;
+  hits: ScopeHit[];
+  /** What the office writes against the row. */
+  note: string;
+};
+
+export type ContractSheet = { rows: ContractSheetRow[] };
+
+/** One row searched across the pages. A sentence counts once, however many of the row's words it carries. */
+export function searchContractRow(row: ContractRow, pages: PageText[]): Pick<ContractSheetRow, "pages" | "count" | "hits"> {
+  const patterns = row.words.map(termPattern);
+  const found: ScopeHit[] = [];
+  const pageSet = new Set<number>();
+  let count = 0;
+  for (const p of pages) {
+    for (const sentence of splitSentences(p.text)) {
+      let m: RegExpExecArray | null = null;
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        m = pattern.exec(sentence);
+        if (m) break;
+      }
+      if (!m) continue;
+      let start = m.index, end = m.index + m[0].length;
+      if (row.needsAmount) {
+        const amount = AMOUNT.exec(sentence);
+        if (!amount) continue;
+        // The figure is what the office wants to see lit, not the word beside it.
+        start = amount.index; end = amount.index + amount[0].length;
+      }
+      count += 1;
+      pageSet.add(p.page);
+      if (found.length >= SHEET_QUOTES) continue;
+      let text = sentence;
+      if (sentence.length > WINDOW * 2 + 40) {
+        const from = Math.max(0, start - WINDOW);
+        const to = Math.min(sentence.length, end + WINDOW);
+        text = (from > 0 ? "\u2026" : "") + sentence.slice(from, to) + (to < sentence.length ? "\u2026" : "");
+        const shift = from - (from > 0 ? 1 : 0);
+        start -= shift; end -= shift;
+      }
+      found.push({ termId: row.id, page: p.page, sentence: text, start, end });
+    }
+  }
+  return { pages: [...pageSet].sort((a, b) => a - b), count, hits: found };
+}
+
+export function buildContractSheet(pages: PageText[], rows: ContractRow[]): ContractSheet {
+  return {
+    rows: rows.map((row) => ({ ...row, custom: false, note: "", ...searchContractRow(row, pages) })),
+  };
+}
+
+/** "pg. 2, 4-8, 11" */
+export function pageList(pages: number[]): string {
+  if (pages.length === 0) return "";
+  const runs: string[] = [];
+  let from = pages[0], prev = pages[0];
+  for (const p of [...pages.slice(1), NaN]) {
+    if (p === prev + 1) { prev = p; continue; }
+    runs.push(from === prev ? String(from) : `${from}-${prev}`);
+    from = prev = p;
+  }
+  return `pg. ${runs.join(", ")}`;
+}
+
+/** The sheet as the office writes it: one line a row, where it is, and the note. */
+export function contractSheetText(record: ScopeScrubRecord): string[] {
+  if (!record.sheet) return [];
+  return record.sheet.rows.map((row) => {
+    const where = row.count > 0 ? pageList(row.pages) : row.words.length === 0 ? "" : "NOT mentioned";
+    return `${row.name}: ${[where, row.note.trim()].filter(Boolean).join(" \u2014 ")}`;
+  });
+}
+
+/**
+ * Whether page text is real words. Some PDFs carry a text layer whose
+ * letters do not map back to characters - it extracts as symbols. Searching
+ * that finds nothing and says nothing, so it is told apart here and the page
+ * is read from its image instead.
+ */
+export function textLooksUnreadable(text: string): boolean {
+  const tokens = text.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length < 12) return false;
+  const wordy = tokens.filter((t) => /^[("\u201c]?[A-Za-z]{2,}[)"\u201d.,;:]?$/.test(t)).length;
+  return wordy / tokens.length < 0.35;
+}
+
+// ----------------------------------------------------------------------
 // The saved scrub
 // ----------------------------------------------------------------------
 
@@ -557,6 +732,10 @@ export type ScopeScrubRecord = {
   answers: Record<string, { answer: ScopeAnswer; note: string }>;
   /** Pages that had no text, so the page can say so. */
   emptyPages: number;
+  /** Pages read from their image because the PDF's text was missing or unreadable. */
+  imagePages: number;
+  /** The Contract Sheet. Subcontracts only; null on a Scope of Work or an older scrub. */
+  sheet: ContractSheet | null;
 };
 
 export function hitKey(hit: ScopeHit): string {
@@ -616,7 +795,38 @@ export function normalizeScrubRecord(value: unknown): ScopeScrubRecord | null {
     scrubbedAt: str(value.scrubbedAt),
     hits, marks, answers,
     emptyPages: typeof value.emptyPages === "number" ? value.emptyPages : 0,
+    imagePages: typeof value.imagePages === "number" ? value.imagePages : 0,
+    sheet: normalizeSheet(value.sheet),
   };
+}
+
+function normalizeSheet(value: unknown): ContractSheet | null {
+  if (!isRecord(value) || !Array.isArray(value.rows)) return null;
+  const rows = value.rows.flatMap((r, ri): ContractSheetRow[] => {
+    if (!isRecord(r)) return [];
+    const id = str(r.id) || `row-${ri + 1}`;
+    const hits: ScopeHit[] = Array.isArray(r.hits)
+      ? r.hits.flatMap((h): ScopeHit[] => {
+        if (!isRecord(h) || !str(h.sentence)) return [];
+        return [{
+          termId: id, page: typeof h.page === "number" ? h.page : 0, sentence: str(h.sentence),
+          start: typeof h.start === "number" ? h.start : 0, end: typeof h.end === "number" ? h.end : 0,
+        }];
+      })
+      : [];
+    return [{
+      id,
+      name: str(r.name, "Untitled"),
+      words: Array.isArray(r.words) ? r.words.filter((w): w is string => typeof w === "string") : [],
+      needsAmount: r.needsAmount === true,
+      custom: r.custom === true,
+      pages: Array.isArray(r.pages) ? r.pages.filter((p): p is number => typeof p === "number") : [],
+      count: typeof r.count === "number" ? r.count : hits.length,
+      hits,
+      note: str(r.note),
+    }];
+  });
+  return { rows };
 }
 
 /**
@@ -743,6 +953,12 @@ export function withScopeItemDone(scrubs: ScopeScrubRecord[], scrubId: string, k
 const sessionFiles = new Map<string, File>();
 
 export function keepScrubFile(id: string, file: File) { sessionFiles.set(id, file); }
+
+// The page text of a scrub, for as long as the tab is open - so a row added
+// to the Contract Sheet by hand can be searched without reading the PDF again.
+const sessionPages = new Map<string, PageText[]>();
+export function keepScrubPages(id: string, pages: PageText[]) { sessionPages.set(id, pages); }
+export function scrubPageText(id: string): PageText[] | undefined { return sessionPages.get(id); }
 export function scrubFile(id: string): File | undefined { return sessionFiles.get(id); }
 
 /** A PDF dropped on the Plan Desk tile, carried to the scrub page. */

@@ -43,6 +43,16 @@ export function KorbanMenu({
               {link.label}
             </a>
           ))}
+          {/* Design Space is not part of any job's flow, so it sits under the rest on every page's menu. */}
+          {!links.some((link) => link.href === "/design-space") && (
+            <a
+              href="/design-space"
+              className="mt-1 block rounded-xl border-t border-zinc-800 px-3 pb-2 pt-2.5 text-xs font-semibold text-zinc-300 hover:bg-orange-500/10 hover:text-orange-300"
+            >
+              Design Space
+              <span className="block font-mono text-[9px] font-normal text-zinc-600">for drafting / drawing</span>
+            </a>
+          )}
         </div>
       )}
     </div>

@@ -407,6 +407,16 @@ export default function ProjectPlanDeskPage() {
           }}
         />
 
+        {/* Design Space: a drafting table with no job behind it, so it sits on the page apart from the job's own buttons. */}
+        <div className="relative mb-3 flex justify-end">
+          <a
+            href="/design-space"
+            className="rounded-lg border border-zinc-400 bg-zinc-300 px-3.5 py-1.5 text-left transition hover:bg-zinc-200"
+          >
+            <span className="block text-[12px] font-bold leading-tight text-zinc-900">Design Space</span>
+            <span className="block font-mono text-[9px] leading-tight text-zinc-600">for drafting / drawing</span>
+          </a>
+        </div>
         <div className="relative grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]">
           {/* ---- Who this job is for ------------------------------------ */}
           <Panel
